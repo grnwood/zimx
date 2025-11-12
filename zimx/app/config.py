@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import platform
 import sqlite3
 import time
 from pathlib import Path
@@ -27,7 +28,37 @@ def load_last_vault() -> Optional[str]:
 
 
 def save_last_vault(path: str) -> None:
-    GLOBAL_CONFIG.write_text(json.dumps({"last_vault": path}, indent=2), encoding="utf-8")
+    _update_global_config({"last_vault": path})
+
+
+def load_vi_block_cursor_enabled() -> bool:
+    """Load app-level preference for vi-mode block cursor. Defaults to True on Windows, False elsewhere."""
+    if not GLOBAL_CONFIG.exists():
+        return platform.system() == "Windows"
+    try:
+        payload = json.loads(GLOBAL_CONFIG.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return platform.system() == "Windows"
+    if "vi_block_cursor" in payload:
+        return bool(payload["vi_block_cursor"])
+    return platform.system() == "Windows"
+
+
+def save_vi_block_cursor_enabled(enabled: bool) -> None:
+    """Save app-level preference for vi-mode block cursor."""
+    _update_global_config({"vi_block_cursor": enabled})
+
+
+def _update_global_config(updates: dict) -> None:
+    """Merge updates into global config file."""
+    existing = {}
+    if GLOBAL_CONFIG.exists():
+        try:
+            existing = json.loads(GLOBAL_CONFIG.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    existing.update(updates)
+    GLOBAL_CONFIG.write_text(json.dumps(existing, indent=2), encoding="utf-8")
 
 
 def load_font_size(default: int = 14) -> int:

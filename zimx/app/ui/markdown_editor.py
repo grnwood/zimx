@@ -171,6 +171,7 @@ class MarkdownEditor(QTextEdit):
         self._current_path: Optional[str] = None
         self._vault_root: Optional[Path] = None
         self._vi_mode_active: bool = False
+        self._vi_block_cursor_enabled: bool = True  # default on, controlled by preferences
         self._vi_saved_flash_time: Optional[int] = None
         self._vi_last_cursor_pos: int = -1
         self.setPlaceholderText("Open a Markdown file to begin editing…")
@@ -355,13 +356,20 @@ class MarkdownEditor(QTextEdit):
         self.cursorMoved.emit(self.textCursor().position())
 
     # --- Vi-mode cursor -------------------------------------------------
+    def set_vi_block_cursor_enabled(self, enabled: bool) -> None:
+        """Set whether vi-mode should show a block cursor. Does not affect vi-mode navigation."""
+        self._vi_block_cursor_enabled = enabled
+        # Refresh cursor display if currently in vi-mode
+        if self._vi_mode_active:
+            self._update_vi_cursor()
+
     def set_vi_mode(self, active: bool) -> None:
         """Enable or disable vi-mode cursor styling (pink block)."""
         if self._vi_mode_active == active:
             return
         self._vi_mode_active = active
-        # Disable cursor blinking while in vi-mode to avoid flicker with overlay
-        if active:
+        # Disable cursor blinking while in vi-mode to avoid flicker with overlay (only if block cursor enabled)
+        if active and self._vi_block_cursor_enabled:
             if self._vi_saved_flash_time is None:
                 try:
                     self._vi_saved_flash_time = QGuiApplication.cursorFlashTime()
@@ -382,7 +390,7 @@ class MarkdownEditor(QTextEdit):
         self._update_vi_cursor()
 
     def _maybe_update_vi_cursor(self) -> None:
-        if not self._vi_mode_active:
+        if not self._vi_mode_active or not self._vi_block_cursor_enabled:
             return
         pos = self.textCursor().position()
         if pos == self._vi_last_cursor_pos:
@@ -391,7 +399,7 @@ class MarkdownEditor(QTextEdit):
         self._update_vi_cursor()
 
     def _update_vi_cursor(self) -> None:
-        if not self._vi_mode_active:
+        if not self._vi_mode_active or not self._vi_block_cursor_enabled:
             # Clear any vi-mode selection overlay
             self.setExtraSelections([])
             return

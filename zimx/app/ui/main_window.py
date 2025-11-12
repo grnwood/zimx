@@ -43,6 +43,7 @@ from zimx.server.adapters.files import PAGE_SUFFIX
 from .markdown_editor import MarkdownEditor
 from .task_panel import TaskPanel
 from .jump_dialog import JumpToPageDialog
+from .preferences_dialog import PreferencesDialog
 
 
 PATH_ROLE = int(Qt.ItemDataRole.UserRole)
@@ -163,6 +164,8 @@ class MainWindow(QMainWindow):
         self.editor.linkActivated.connect(self._open_camel_link)
         self.font_size = 14
         self.editor.set_font_point_size(self.font_size)
+        # Load vi-mode block cursor preference
+        self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
 
         self.task_panel = TaskPanel()
         self.task_panel.refresh()
@@ -243,10 +246,17 @@ class MainWindow(QMainWindow):
         save_action.triggered.connect(self._save_current_file)
         self.toolbar.addAction(save_action)
 
-        # (Removed toolbar indicator; using status bar permanent widget instead)
+        # Right-aligned spacer before preferences icon
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.toolbar.addWidget(spacer)
+
+        # Preferences/settings cog icon
+        prefs_action = QAction("Preferences", self)
+        prefs_action.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
+        prefs_action.triggered.connect(self._open_preferences)
+        self.toolbar.addAction(prefs_action)
+
         # Store default style to restore later
         self._default_toolbar_stylesheet = self.toolbar.styleSheet()
 
@@ -522,6 +532,16 @@ class MainWindow(QMainWindow):
             if target:
                 self._select_tree_path(target)
                 self._open_file(target)
+
+    def _open_preferences(self) -> None:
+        """Open the preferences dialog."""
+        dlg = PreferencesDialog(self)
+        if dlg.exec() == QDialog.Accepted:
+            # Reload vi-mode cursor setting and apply to editor
+            self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
+            # Re-apply vi-mode state to refresh cursor
+            if self._vi_mode_active:
+                self.editor.set_vi_mode(True)
 
     def _open_task_from_panel(self, path: str, line: int) -> None:
         self._select_tree_path(path)
