@@ -6,11 +6,32 @@ import threading
 import time
 
 import uvicorn
+from PySide6.QtCore import QtMsgType, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication
 
 from zimx.server.api import get_app
 from zimx.app import config
 from .ui.main_window import MainWindow
+
+
+def _qt_message_handler(mode: QtMsgType, context, message: str) -> None:
+    """Custom Qt message handler to suppress known harmless warnings."""
+    # Suppress DirectWrite font warning on Windows
+    if "QWindowsFontEngineDirectWrite::recalcAdvances" in message:
+        return
+    # Suppress other known harmless warnings if needed
+    if "GetDesignGlyphMetrics failed" in message:
+        return
+    # Let other messages through to the default handler
+    if mode == QtMsgType.QtDebugMsg:
+        print(f"Qt Debug: {message}", file=sys.stderr)
+    elif mode == QtMsgType.QtWarningMsg:
+        print(f"Qt Warning: {message}", file=sys.stderr)
+    elif mode == QtMsgType.QtCriticalMsg:
+        print(f"Qt Critical: {message}", file=sys.stderr)
+    elif mode == QtMsgType.QtFatalMsg:
+        print(f"Qt Fatal: {message}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _start_api_server() -> tuple[int, uvicorn.Server]:
@@ -31,6 +52,8 @@ def _start_api_server() -> tuple[int, uvicorn.Server]:
 
 def main() -> None:
     config.init_settings()
+    # Install custom message handler to suppress harmless Qt warnings
+    qInstallMessageHandler(_qt_message_handler)
     port, _ = _start_api_server()
     qt_app = QApplication(sys.argv)
     window = MainWindow(api_base=f"http://127.0.0.1:{port}")
