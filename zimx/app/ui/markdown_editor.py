@@ -18,12 +18,17 @@ from PySide6.QtGui import (
     QGuiApplication,
 )
 from PySide6.QtWidgets import QTextEdit, QMenu, QInputDialog
+from .path_utils import path_to_colon, colon_to_path
+
 
 TAG_PATTERN = QRegularExpression(r"@(\w+)")
 TASK_PATTERN = QRegularExpression(r"^(?P<indent>\s*)\((?P<state>[xX ])?\)(?P<body>\s+.*)$")
 TASK_LINE_PATTERN = re.compile(r"^(\s*)\(([ xX])\)(\s+)", re.MULTILINE)
 DISPLAY_TASK_PATTERN = re.compile(r"^(\s*)([☐☑])(\s+)", re.MULTILINE)
-CAMEL_LINK_PATTERN = QRegularExpression(r"\+(?P<link>[A-Z][A-Za-z0-9]+(?:[A-Z][A-Za-z0-9]+)+)")
+# Plus-prefixed link pattern: +PageName or +Projects (any word after +)
+CAMEL_LINK_PATTERN = QRegularExpression(r"\+(?P<link>[A-Za-z]\w*)")
+# Colon link pattern: PageA:PageB:PageC (word chars, digits, underscores separated by colons)
+COLON_LINK_PATTERN = QRegularExpression(r"(?P<link>[\w]+(?::[\w]+)+)")
 HEADING_MAX_LEVEL = 5
 HEADING_SENTINEL_BASE = 0xE000
 HEADING_MARK_PATTERN = re.compile(r"^(\s*)(#{1,5})(\s+)(.+)$", re.MULTILINE)
@@ -151,13 +156,22 @@ class MarkdownHighlighter(QSyntaxHighlighter):
             offset = len(text) - len(stripped)
             self.setFormat(offset, 1, self.checkbox_format)
 
+        # Format for clickable links (both CamelCase and colon notation)
+        link_format = QTextCharFormat()
+        link_format.setForeground(QColor("#4fa3ff"))
+        link_format.setFontUnderline(True)
+        
+        # Highlight CamelCase links
         camel_iter = CAMEL_LINK_PATTERN.globalMatch(text)
-        camel_format = QTextCharFormat()
-        camel_format.setForeground(QColor("#4fa3ff"))
-        camel_format.setFontUnderline(True)
         while camel_iter.hasNext():
             match = camel_iter.next()
-            self.setFormat(match.capturedStart(), match.capturedLength(), camel_format)
+            self.setFormat(match.capturedStart(), match.capturedLength(), link_format)
+        
+        # Highlight colon notation links (PageA:PageB:PageC)
+        colon_iter = COLON_LINK_PATTERN.globalMatch(text)
+        while colon_iter.hasNext():
+            match = colon_iter.next()
+            self.setFormat(match.capturedStart(), match.capturedLength(), link_format)
 
 
 class MarkdownEditor(QTextEdit):
@@ -184,6 +198,8 @@ class MarkdownEditor(QTextEdit):
         self._display_guard = False
         self.textChanged.connect(self._enforce_display_symbols)
         self.viewport().installEventFilter(self)
+        # Enable mouse tracking for hover cursor changes
+        self.viewport().setMouseTracking(True)
 
     def set_context(self, vault_root: Optional[str], relative_path: Optional[str]) -> None:
         self._vault_root = Path(vault_root) if vault_root else None
@@ -210,6 +226,14 @@ class MarkdownEditor(QTextEdit):
         font = self.font()
         font.setPointSize(size)
         self.setFont(font)
+
+    def insert_link(self, colon_path: str) -> None:
+        """Insert a colon-notation link at the current cursor position."""
+        if not colon_path:
+            return
+        cursor = self.textCursor()
+        cursor.insertText(colon_path)
+        self.setTextCursor(cursor)
 
     def toggle_task_state(self) -> None:
         cursor = self.textCursor()
@@ -256,6 +280,54 @@ class MarkdownEditor(QTextEdit):
         file_path = self._current_path.lstrip("/") if self._current_path else None
         if not file_path:
             return None
+    def _remove_link_at_cursor(self, cursor: QTextCursor) -> None:
+        """Remove a link at the cursor position (remove the + prefix or convert colon notation to plain text)."""
+        block = cursor.block()
+        rel = cursor.position() - block.position()
+        block_text = block.text()
+        
+        # Check for CamelCase/plus-prefixed links (+PageName or +Projects)
+        iterator = CAMEL_LINK_PATTERN.globalMatch(block_text)
+        while iterator.hasNext():
+            match = iterator.next()
+            start = match.capturedStart()
+            end = start + match.capturedLength()
+            if start <= rel < end:
+                # Remove the + prefix
+                text_cursor = QTextCursor(block)
+                text_cursor.setPosition(block.position() + start)
+                text_cursor.setPosition(block.position() + end, QTextCursor.KeepAnchor)
+                # Replace with just the link text (without +)
+                text_cursor.insertText(match.captured("link"))
+                return
+        
+        # Check for colon notation links (PageA:PageB:PageC)
+        colon_iterator = COLON_LINK_PATTERN.globalMatch(block_text)
+        while colon_iterator.hasNext():
+            match = colon_iterator.next()
+            start = match.capturedStart()
+            end = start + match.capturedLength()
+            if start <= rel < end:
+                # Just remove the link highlighting by converting to plain text
+                # (colon notation stays as-is but becomes plain text)
+                text_cursor = QTextCursor(block)
+                text_cursor.setPosition(block.position() + start)
+                text_cursor.setPosition(block.position() + end, QTextCursor.KeepAnchor)
+                # Re-insert as plain text (breaks the link pattern by adding space or other separator)
+                link_text = match.captured("link")
+                # Convert colons to forward slashes to break the link pattern
+                text_cursor.insertText(link_text.replace(":", "/"))
+                return
+    
+    def _copy_link_to_location(self) -> None:
+        """Copy the current page location as a colon-notation link to clipboard."""
+        if not self._current_path:
+            return
+        colon_path = path_to_colon(self._current_path)
+        if colon_path:
+            clipboard = QGuiApplication.clipboard()
+            clipboard.setText(colon_path)
+
         folder = (self._vault_root / file_path).resolve().parent if self._vault_root else None
         if folder is None:
             return None
@@ -282,10 +354,14 @@ class MarkdownEditor(QTextEdit):
                 return
         super().keyPressEvent(event)
 
+    def keyReleaseEvent(self, event):  # type: ignore[override]
+        super().keyReleaseEvent(event)
+
     def contextMenuEvent(self, event):  # type: ignore[override]
-        hit = self._image_at_position(event.pos())
-        if hit:
-            cursor, fmt = hit
+        # Check if right-clicking on an image
+        image_hit = self._image_at_position(event.pos())
+        if image_hit:
+            cursor, fmt = image_hit
             position = cursor.position()
             menu = QMenu(self)
             for width in (300, 600, 900):
@@ -299,7 +375,55 @@ class MarkdownEditor(QTextEdit):
             custom_action.triggered.connect(lambda checked=False, pos=position: self._prompt_image_width(pos))
             menu.exec(event.globalPos())
             return
+        
+        # Check if right-clicking on a link
+        click_cursor = self.cursorForPosition(event.pos())
+        link_text = self._link_under_cursor(click_cursor)
+        if link_text:
+            menu = QMenu(self)
+            
+            # Remove Link option
+            remove_action = menu.addAction("Remove Link")
+            remove_action.triggered.connect(lambda: self._remove_link_at_cursor(click_cursor))
+            
+            # Copy Link to Location option (copy the linked page's path)
+            menu.addSeparator()
+            copy_action = menu.addAction("Copy Link to Location")
+            copy_action.triggered.connect(lambda: self._copy_link_to_location(link_text))
+            
+            menu.exec(event.globalPos())
+            return
+        
+        # Check if right-clicking anywhere in the editor (for Copy Link to Location)
+        if self._current_path:
+            menu = self.createStandardContextMenu()
+            menu.addSeparator()
+            copy_action = menu.addAction("Copy Link to Location")
+            copy_action.triggered.connect(self._copy_link_to_location)
+            menu.exec(event.globalPos())
+            return
+        
         super().contextMenuEvent(event)
+
+    def mouseMoveEvent(self, event):  # type: ignore[override]
+        # Show pointing hand cursor when hovering over a link
+        cursor = self.cursorForPosition(event.pos())
+        if self._link_under_cursor(cursor):
+            self.viewport().setCursor(Qt.PointingHandCursor)
+        else:
+            self.viewport().setCursor(Qt.IBeamCursor)
+        super().mouseMoveEvent(event)
+
+    def mousePressEvent(self, event):  # type: ignore[override]
+        # Single click on links to activate them
+        if event.button() == Qt.LeftButton:
+            cursor = self.cursorForPosition(event.pos())
+            link = self._link_under_cursor(cursor)
+            if link:
+                self.linkActivated.emit(link)
+                event.accept()
+                return
+        super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):  # type: ignore[override]
         hit = self._image_at_position(event.pos())
@@ -312,6 +436,7 @@ class MarkdownEditor(QTextEdit):
             return
         if self._toggle_task_at_cursor(event.pos()):
             return
+        # Double-click on links also activates them
         cursor = self.cursorForPosition(event.pos())
         link = self._link_under_cursor(cursor)
         if link:
@@ -343,14 +468,101 @@ class MarkdownEditor(QTextEdit):
         cursor = cursor or self.textCursor()
         block = cursor.block()
         rel = cursor.position() - block.position()
+        
+        # Check for CamelCase links
         iterator = CAMEL_LINK_PATTERN.globalMatch(block.text())
         while iterator.hasNext():
             match = iterator.next()
             start = match.capturedStart()
             end = start + match.capturedLength()
-            if start <= rel <= end:
+            # Cursor must be INSIDE the link, not at the end
+            if start <= rel < end:
                 return match.captured("link")
+        
+        # Check for colon notation links (PageA:PageB:PageC)
+        colon_iterator = COLON_LINK_PATTERN.globalMatch(block.text())
+        while colon_iterator.hasNext():
+            match = colon_iterator.next()
+            start = match.capturedStart()
+            end = start + match.capturedLength()
+            # Cursor must be INSIDE the link, not at the end
+            if start <= rel < end:
+                return match.captured("link")
+        
         return None
+
+    def _remove_link_at_cursor(self, cursor: QTextCursor) -> None:
+        """Remove a link at the cursor position (remove the + prefix or convert colon notation to plain text)."""
+        block = cursor.block()
+        rel = cursor.position() - block.position()
+        block_text = block.text()
+        
+        # Check for CamelCase/plus-prefixed links (+PageName or +Projects)
+        iterator = CAMEL_LINK_PATTERN.globalMatch(block_text)
+        while iterator.hasNext():
+            match = iterator.next()
+            start = match.capturedStart()
+            end = start + match.capturedLength()
+            if start <= rel < end:
+                # Remove the + prefix
+                text_cursor = QTextCursor(block)
+                text_cursor.setPosition(block.position() + start)
+                text_cursor.setPosition(block.position() + end, QTextCursor.KeepAnchor)
+                # Replace with just the link text (without +)
+                text_cursor.insertText(match.captured("link"))
+                return
+        
+        # Check for colon notation links (PageA:PageB:PageC)
+        colon_iterator = COLON_LINK_PATTERN.globalMatch(block_text)
+        while colon_iterator.hasNext():
+            match = colon_iterator.next()
+            start = match.capturedStart()
+            end = start + match.capturedLength()
+            if start <= rel < end:
+                # Convert colon notation to forward slash notation to break the link pattern
+                text_cursor = QTextCursor(block)
+                text_cursor.setPosition(block.position() + start)
+                text_cursor.setPosition(block.position() + end, QTextCursor.KeepAnchor)
+                link_text = match.captured("link")
+                text_cursor.insertText(link_text.replace(":", "/"))
+                return
+    
+    def _copy_link_to_location(self, link_text: str | None = None) -> None:
+        """Copy a link location as colon-notation to clipboard.
+        
+        Args:
+            link_text: The link text (e.g., 'PageName' from +PageName, or 'PageA:PageB:PageC' from colon link).
+                      If None, copies the current page's location.
+        """
+        if link_text:
+            # If it's a colon notation link, use it as-is
+            if ":" in link_text:
+                colon_path = link_text
+            else:
+                # It's a relative link (+PageName), resolve it relative to current page
+                if not self._current_path:
+                    return
+                # Get current page's colon path
+                current_colon = path_to_colon(self._current_path)
+                if not current_colon:
+                    # We're at root, just use the link text
+                    colon_path = link_text
+                else:
+                    # Append the link to current page's path
+                    colon_path = f"{current_colon}:{link_text}"
+        else:
+            # Copy current page's location
+            if not self._current_path:
+                return
+            colon_path = path_to_colon(self._current_path)
+        
+        if colon_path:
+            clipboard = QGuiApplication.clipboard()
+            clipboard.setText(colon_path)
+
+    def copy_current_page_link(self) -> None:
+        """Public method to copy current page's link to clipboard (called by Ctrl+Shift+L)."""
+        self._copy_link_to_location(link_text=None)
 
     def _emit_cursor(self) -> None:
         self.cursorMoved.emit(self.textCursor().position())

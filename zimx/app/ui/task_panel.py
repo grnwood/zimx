@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from zimx.app import config
 from zimx.server.adapters.files import PAGE_SUFFIX
+from .path_utils import path_to_colon
 
 
 class TaskPanel(QWidget):
@@ -166,12 +167,4 @@ class TaskPanel(QWidget):
         self.taskActivated.emit(task["path"], task.get("line") or 1)
 
     def _present_path(self, path: str) -> str:
-        cleaned = path.strip("/")
-        if not cleaned:
-            return "/"
-        parts = cleaned.split("/")
-        if parts:
-            last = parts[-1]
-            if last.endswith(PAGE_SUFFIX):
-                parts[-1] = last[: -len(PAGE_SUFFIX)]
-        return "/".join(parts)
+        return path_to_colon(path)

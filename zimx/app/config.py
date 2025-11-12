@@ -153,6 +153,7 @@ def update_page_index(
 
 
 def delete_page_index(path: str) -> None:
+    """Delete a single page from the index."""
     conn = _get_conn()
     if not conn:
         return
@@ -163,6 +164,36 @@ def delete_page_index(path: str) -> None:
         conn.execute("DELETE FROM links WHERE from_path = ? OR to_path = ?", (path, path))
         conn.execute("DELETE FROM tasks WHERE path = ?", (path,))
         conn.execute("DELETE FROM task_tags WHERE task_id LIKE ?", (like,))
+
+
+def delete_folder_index(folder_path: str) -> None:
+    """Delete all pages under a folder path (recursive) from the index.
+    
+    Args:
+        folder_path: Folder path like /PageA/PageB (without .txt)
+    """
+    conn = _get_conn()
+    if not conn:
+        return
+    
+    # Clean up the folder path
+    folder_prefix = folder_path.rstrip("/")
+    if not folder_prefix.startswith("/"):
+        folder_prefix = "/" + folder_prefix
+    
+    # Find all pages that start with this folder path
+    # Pattern: /PageA/PageB/% will match /PageA/PageB/PageC.txt, /PageA/PageB/Sub/Sub.txt, etc.
+    like_pattern = f"{folder_prefix}/%"
+    
+    with conn:
+        # Delete all pages under this folder
+        conn.execute("DELETE FROM pages WHERE path LIKE ?", (like_pattern,))
+        conn.execute("DELETE FROM page_tags WHERE page LIKE ?", (like_pattern,))
+        conn.execute("DELETE FROM links WHERE from_path LIKE ? OR to_path LIKE ?", 
+                    (like_pattern, like_pattern))
+        conn.execute("DELETE FROM tasks WHERE path LIKE ?", (like_pattern,))
+        # For task_tags, the task_id format is "path:line", so we need to match "path:%"
+        conn.execute("DELETE FROM task_tags WHERE task_id LIKE ?", (f"{folder_prefix}/%:%",))
 
 
 def search_pages(term: str, limit: int = 50) -> list[dict]:

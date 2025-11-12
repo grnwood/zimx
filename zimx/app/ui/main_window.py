@@ -44,6 +44,8 @@ from .markdown_editor import MarkdownEditor
 from .task_panel import TaskPanel
 from .jump_dialog import JumpToPageDialog
 from .preferences_dialog import PreferencesDialog
+from .insert_link_dialog import InsertLinkDialog
+from .path_utils import colon_to_path, path_to_colon
 
 
 PATH_ROLE = int(Qt.ItemDataRole.UserRole)
@@ -143,6 +145,10 @@ class MainWindow(QMainWindow):
         self.vault_root: Optional[str] = None
         self.vault_root_name: Optional[str] = None
         self.current_path: Optional[str] = None
+        
+        # Page navigation history
+        self.page_history: list[str] = []
+        self.history_index: int = -1
 
         self.tree_view = VaultTreeView()
         self.tree_model = QStandardItemModel()
@@ -269,14 +275,23 @@ class MainWindow(QMainWindow):
         zoom_out.activated.connect(lambda: self._adjust_font_size(-1))
         jump_shortcut = QShortcut(QKeySequence("Ctrl+J"), self)
         jump_shortcut.activated.connect(self._jump_to_page)
+        link_shortcut = QShortcut(QKeySequence("Ctrl+L"), self)
+        link_shortcut.activated.connect(self._insert_link)
+        copy_link_shortcut = QShortcut(QKeySequence("Ctrl+Shift+L"), self)
+        copy_link_shortcut.activated.connect(self._copy_current_page_link)
         task_cycle = QShortcut(QKeySequence(Qt.Key_F12), self)
         task_cycle.activated.connect(self.editor.toggle_task_state)
+        # Navigation shortcuts
+        nav_back = QShortcut(QKeySequence("Alt+Left"), self)
+        nav_forward = QShortcut(QKeySequence("Alt+Right"), self)
         nav_up = QShortcut(QKeySequence("Alt+Up"), self)
         nav_down = QShortcut(QKeySequence("Alt+Down"), self)
         nav_pg_up = QShortcut(QKeySequence("Alt+PgUp"), self)
         nav_pg_down = QShortcut(QKeySequence("Alt+PgDown"), self)
-        nav_up.activated.connect(lambda: self._navigate_tree(-1, leaves_only=False))
-        nav_down.activated.connect(lambda: self._navigate_tree(1, leaves_only=False))
+        nav_back.activated.connect(self._navigate_history_back)
+        nav_forward.activated.connect(self._navigate_history_forward)
+        nav_up.activated.connect(self._navigate_hierarchy_up)
+        nav_down.activated.connect(self._navigate_hierarchy_down)
         nav_pg_up.activated.connect(lambda: self._navigate_tree(-1, leaves_only=True))
         nav_pg_down.activated.connect(lambda: self._navigate_tree(1, leaves_only=True))
 
@@ -348,6 +363,8 @@ class MainWindow(QMainWindow):
             self.font_size = config.load_font_size(self.font_size)
             self.editor.set_font_point_size(self.font_size)
         self.editor.set_context(self.vault_root, None)
+        self.editor.set_markdown("")
+        self.current_path = None
         self.statusBar().showMessage(f"Vault: {self.vault_root}")
         self._populate_vault_tree()
         self._reindex_vault()
@@ -412,10 +429,20 @@ class MainWindow(QMainWindow):
             self._debug(f"Tree selection crash while opening {open_target!r}: {exc!r}")
             raise
 
-    def _open_file(self, path: str, retry: bool = False) -> None:
+    def _open_file(self, path: str, retry: bool = False, add_to_history: bool = True) -> None:
         if not path or path == self.current_path:
             return
         self.autosave_timer.stop()
+        
+        # Add to page history (unless we're navigating through history)
+        if add_to_history and path != self.current_path:
+            # Remove any forward history when opening a new page
+            if self.history_index < len(self.page_history) - 1:
+                self.page_history = self.page_history[:self.history_index + 1]
+            # Add new page
+            self.page_history.append(path)
+            self.history_index = len(self.page_history) - 1
+        
         try:
             resp = self.http.post("/api/file/read", json={"path": path})
             resp.raise_for_status()
@@ -443,7 +470,8 @@ class MainWindow(QMainWindow):
             self.editor.moveCursor(QTextCursor.Start)
             self._cursor_cache[path] = self.editor.textCursor().position()
         # Always show editing status; vi-mode banner is separate
-        self.statusBar().showMessage(f"Editing {path}")
+        display_path = path_to_colon(path) or path
+        self.statusBar().showMessage(f"Editing {display_path}")
 
     def _save_current_file(self, auto: bool = False) -> None:
         if self._suspend_autosave:
@@ -474,7 +502,8 @@ class MainWindow(QMainWindow):
             self.task_panel.refresh()
         self.autosave_timer.stop()
         message = "Auto-saved" if auto else "Saved"
-        self.statusBar().showMessage(f"{message} {self.current_path}", 2000 if auto else 4000)
+        display_path = path_to_colon(self.current_path) if self.current_path else ""
+        self.statusBar().showMessage(f"{message} {display_path}", 2000 if auto else 4000)
 
     def _create_journal_today(self) -> None:
         if not self.vault_root:
@@ -533,6 +562,30 @@ class MainWindow(QMainWindow):
                 self._select_tree_path(target)
                 self._open_file(target)
 
+    def _insert_link(self) -> None:
+        """Open insert link dialog and insert selected link at cursor."""
+        if not config.has_active_vault():
+            return
+        # Save current page before inserting link to ensure it's indexed
+        if self.current_path:
+            self._save_current_file(auto=True)
+        dlg = InsertLinkDialog(self)
+        if dlg.exec() == QDialog.Accepted:
+            colon_path = dlg.selected_colon_path()
+            if colon_path:
+                self.editor.insert_link(colon_path)
+                self.editor.setFocus()
+
+    def _copy_current_page_link(self) -> None:
+        """Copy the current page's link to clipboard (Ctrl+Shift+L)."""
+        if not self.current_path:
+            self.statusBar().showMessage("No page open to copy", 3000)
+            return
+        self.editor.copy_current_page_link()
+        colon_path = path_to_colon(self.current_path)
+        if colon_path:
+            self.statusBar().showMessage(f"Copied link: {colon_path}", 3000)
+
     def _open_preferences(self) -> None:
         """Open the preferences dialog."""
         dlg = PreferencesDialog(self)
@@ -551,22 +604,42 @@ class MainWindow(QMainWindow):
         self._goto_line(line, select_line=True)
 
     def _open_camel_link(self, name: str) -> None:
+        """Open a link - handles both CamelCase (relative) and colon notation (absolute)."""
         if not self.current_path:
-            self._alert("Open a page before following CamelCase links.")
+            self._alert("Open a page before following links.")
             return
-        rel_current = Path(self.current_path.lstrip("/"))
-        parent_folder = rel_current.parent
-        target_rel = parent_folder / name if parent_folder.parts else Path(name)
-        rel_string = target_rel.as_posix()
-        folder_path = f"/{rel_string}" if rel_string else "/"
-        if not self._ensure_page_folder(folder_path, allow_existing=True):
-            return
-        target_file = self._folder_to_file_path(folder_path)
-        if not target_file:
-            return
-        self._pending_selection = target_file
-        self._populate_vault_tree()
-        self._open_file(target_file)
+        
+        # Save current page before following link to ensure it's indexed
+        self._save_current_file(auto=True)
+        
+        # Check if this is a colon notation link (PageA:PageB:PageC)
+        if ":" in name:
+            # Colon notation is absolute - convert directly to path
+            target_file = colon_to_path(name, self.vault_root_name)
+            if not target_file:
+                self._alert(f"Invalid link format: {name}")
+                return
+            folder_path = self._file_path_to_folder(target_file)
+            if not self._ensure_page_folder(folder_path, allow_existing=True):
+                return
+            self._pending_selection = target_file
+            self._populate_vault_tree()
+            self._open_file(target_file)
+        else:
+            # CamelCase link is relative to current page
+            rel_current = Path(self.current_path.lstrip("/"))
+            parent_folder = rel_current.parent
+            target_rel = parent_folder / name if parent_folder.parts else Path(name)
+            rel_string = target_rel.as_posix()
+            folder_path = f"/{rel_string}" if rel_string else "/"
+            if not self._ensure_page_folder(folder_path, allow_existing=True):
+                return
+            target_file = self._folder_to_file_path(folder_path)
+            if not target_file:
+                return
+            self._pending_selection = target_file
+            self._populate_vault_tree()
+            self._open_file(target_file)
 
     def _adjust_font_size(self, delta: int) -> None:
         new_size = max(10, min(36, self.font_size + delta))
@@ -623,6 +696,16 @@ class MainWindow(QMainWindow):
         name = rel.name or self.vault_root_name
         rel_file = rel / f"{name}{PAGE_SUFFIX}"
         return f"/{rel_file.as_posix()}"
+
+    def _file_path_to_folder(self, file_path: str) -> str:
+        """Convert file path like /PageA/PageB/PageC/PageC.txt to folder path /PageA/PageB/PageC."""
+        if not file_path or file_path == "/":
+            return "/"
+        # Remove the .txt file at the end
+        path_obj = Path(file_path.lstrip("/"))
+        if path_obj.suffix == PAGE_SUFFIX:  # Suffix includes the dot
+            return f"/{path_obj.parent.as_posix()}"
+        return file_path
 
     # --- Tree context menu -------------------------------------------
     def _open_context_menu(self, pos: QPoint) -> None:
@@ -733,11 +816,16 @@ class MainWindow(QMainWindow):
         except httpx.HTTPError as exc:
             self._alert(f"Failed to delete {folder_path}: {exc}")
             return
-        if open_path:
-            config.delete_page_index(open_path)
+        
+        # Clean up database: delete all pages under this folder
+        # folder_path is like "/PageA/PageB" (folder) not "/PageA/PageB/PageB.txt" (file)
+        config.delete_folder_index(folder_path)
+        
+        # Clear editor if we just deleted the currently open page
         if self.current_path and open_path and self.current_path == open_path:
             self.current_path = None
             self.editor.set_markdown("")
+        
         self._populate_vault_tree()
         self.task_panel.refresh()
 
@@ -787,6 +875,63 @@ class MainWindow(QMainWindow):
 
         recurse(QModelIndex())
         return [idx for idx in flat if idx.isValid()]
+
+    def _navigate_history_back(self) -> None:
+        """Navigate to previous page in history (Alt+Left)."""
+        if self.history_index <= 0:
+            return
+        self.history_index -= 1
+        target_path = self.page_history[self.history_index]
+        self._select_tree_path(target_path)
+        self._open_file(target_path, add_to_history=False)
+
+    def _navigate_history_forward(self) -> None:
+        """Navigate to next page in history (Alt+Right)."""
+        if self.history_index >= len(self.page_history) - 1:
+            return
+        self.history_index += 1
+        target_path = self.page_history[self.history_index]
+        self._select_tree_path(target_path)
+        self._open_file(target_path, add_to_history=False)
+
+    def _navigate_hierarchy_up(self) -> None:
+        """Navigate up in page hierarchy (Alt+Up): PageA:PageB:PageC -> PageA:PageB."""
+        if not self.current_path:
+            return
+        colon_path = path_to_colon(self.current_path)
+        if not colon_path or ":" not in colon_path:
+            return  # Already at root or single page
+        # Remove last segment
+        parts = colon_path.split(":")
+        parent_colon = ":".join(parts[:-1])
+        parent_path = colon_to_path(parent_colon, self.vault_root_name)
+        if parent_path:
+            self._select_tree_path(parent_path)
+            self._open_file(parent_path)
+
+    def _navigate_hierarchy_down(self) -> None:
+        """Navigate down in page hierarchy (Alt+Down): Open first child page."""
+        if not self.current_path:
+            return
+        # Get current folder path
+        folder_path = self._file_path_to_folder(self.current_path)
+        if not folder_path or not self.vault_root:
+            return
+        # Find first child page
+        folder = Path(self.vault_root) / folder_path.lstrip("/")
+        if not folder.exists() or not folder.is_dir():
+            return
+        # Get all subdirectories
+        subdirs = sorted([d for d in folder.iterdir() if d.is_dir()])
+        if not subdirs:
+            return
+        # Open first child page
+        first_child = subdirs[0]
+        child_file = first_child / f"{first_child.name}{PAGE_SUFFIX}"
+        if child_file.exists():
+            child_path = f"/{child_file.relative_to(Path(self.vault_root)).as_posix()}"
+            self._select_tree_path(child_path)
+            self._open_file(child_path)
 
     def _navigate_tree(self, delta: int, leaves_only: bool) -> None:
         indexes = self._gather_indexes(leaves_only)
