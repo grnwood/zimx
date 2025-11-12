@@ -76,8 +76,8 @@ class TaskPanel(QWidget):
         if obj is self.tag_list.viewport() and event.type() == QEvent.MouseButtonPress:
             if self.tag_list.itemAt(event.pos()) is None:
                 self.active_tags.clear()
-                self._refresh_tags()
                 self._refresh_tasks()
+                self._refresh_tags()
                 return True
         return super().eventFilter(obj, event)
 
@@ -140,6 +140,8 @@ class TaskPanel(QWidget):
             display_path = self._present_path(task["path"])
             item = QTreeWidgetItem([priority, text, due, display_path])
             item.setData(0, Qt.UserRole, task)
+            # Set tooltip on the task text column (column 1) to show full text
+            item.setToolTip(1, text)
             self.task_tree.addTopLevelItem(item)
         self.task_tree.sortItems(self.sort_column, self.sort_order)
 

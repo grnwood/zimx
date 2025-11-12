@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
-from PySide6.QtCore import QModelIndex, QPoint, Qt, Signal, QTimer
+from PySide6.QtCore import QEvent, QModelIndex, QPoint, Qt, Signal, QTimer, QObject
 from PySide6.QtGui import (
     QAction,
     QKeySequence,
@@ -12,8 +12,14 @@ from PySide6.QtGui import (
     QStandardItem,
     QStandardItemModel,
     QTextCursor,
+    QKeyEvent,
+    QPainter,
+    QColor,
+    QFont,
+    QPen,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QLineEdit,
     QMenu,
@@ -24,6 +30,11 @@ from PySide6.QtWidgets import (
     QStyle,
     QTreeView,
     QDialog,
+    QWidget,
+    QVBoxLayout,
+    QFrame,
+    QLabel,
+    QHBoxLayout,
 )
 
 from zimx.app import config, indexer
@@ -165,6 +176,19 @@ class MainWindow(QMainWindow):
         self.autosave_timer.setSingleShot(True)
         self.autosave_timer.timeout.connect(lambda: self._save_current_file(auto=True))
 
+        # Vi-mode state
+        self._vi_mode_active = False
+        # Optional vi debug logging (set True to enable noisy logs)
+        self._vi_debug = False
+
+        # Debounced cursor-position persistence
+        self._cursor_save_timer = QTimer(self)
+        self._cursor_save_timer.setSingleShot(True)
+        self._cursor_save_timer.setInterval(250)
+        self._cursor_save_timer.timeout.connect(self._flush_cursor_save)
+        self._pending_cursor_save_path = None  # type: Optional[str]
+        self._pending_cursor_save_pos = None   # type: Optional[int]
+
         editor_split = QSplitter()
         editor_split.addWidget(self.editor)
         editor_split.addWidget(self.task_panel)
@@ -176,36 +200,55 @@ class MainWindow(QMainWindow):
         splitter.addWidget(editor_split)
         splitter.setStretchFactor(1, 5)
         splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setCentralWidget(splitter)
+
+        # Container (no vi-mode banner)
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(splitter, 1)
+        self.setCentralWidget(container)
+
+        # No overlay/indicator widgets; vi-mode is represented by editor cursor style
 
         self._build_toolbar()
         self._register_shortcuts()
+        self._vi_filter_targets: list[QObject] = []
+        self._install_vi_mode_filters()
         self.statusBar().showMessage("Select a vault to get started")
+        self._default_status_stylesheet = self.statusBar().styleSheet()
         last_vault = config.load_last_vault()
         if last_vault:
             self._set_vault(last_vault)
 
     # --- UI wiring -----------------------------------------------------
     def _build_toolbar(self) -> None:
-        toolbar = self.addToolBar("Main")
-        toolbar.setMovable(False)
+        self.toolbar = self.addToolBar("Main")
+        self.toolbar.setMovable(False)
 
         open_vault_action = QAction("Open Vault", self)
         open_vault_action.triggered.connect(self._select_vault)
-        toolbar.addAction(open_vault_action)
+        self.toolbar.addAction(open_vault_action)
 
         create_vault_action = QAction("New Vault", self)
         create_vault_action.triggered.connect(self._create_vault)
-        toolbar.addAction(create_vault_action)
+        self.toolbar.addAction(create_vault_action)
 
         new_journal_action = QAction("New Today", self)
         new_journal_action.triggered.connect(self._create_journal_today)
-        toolbar.addAction(new_journal_action)
+        self.toolbar.addAction(new_journal_action)
 
         save_action = QAction("Save", self)
         save_action.setShortcut(QKeySequence("Ctrl+Shift+S"))
         save_action.triggered.connect(self._save_current_file)
-        toolbar.addAction(save_action)
+        self.toolbar.addAction(save_action)
+
+        # (Removed toolbar indicator; using status bar permanent widget instead)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.toolbar.addWidget(spacer)
+        # Store default style to restore later
+        self._default_toolbar_stylesheet = self.toolbar.styleSheet()
 
     def _register_shortcuts(self) -> None:
         save_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
@@ -389,6 +432,7 @@ class MainWindow(QMainWindow):
         else:
             self.editor.moveCursor(QTextCursor.Start)
             self._cursor_cache[path] = self.editor.textCursor().position()
+        # Always show editing status; vi-mode banner is separate
         self.statusBar().showMessage(f"Editing {path}")
 
     def _save_current_file(self, auto: bool = False) -> None:
@@ -440,9 +484,34 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Image pasted as {filename}", 5000)
 
     def _on_cursor_changed(self, position: int) -> None:
-        if self.current_path and config.has_active_vault():
+        # Update in-memory cache immediately for UX (e.g., focus restore)
+        if self.current_path:
             self._cursor_cache[self.current_path] = position
-            config.save_cursor_position(self.current_path, position)
+
+        # Debounce disk writes to avoid UI stalls during rapid navigation
+        if self.current_path and config.has_active_vault():
+            self._pending_cursor_save_path = self.current_path
+            self._pending_cursor_save_pos = position
+            # restart the timer
+            self._cursor_save_timer.start()
+
+    def _flush_cursor_save(self) -> None:
+        path = self._pending_cursor_save_path
+        pos = self._pending_cursor_save_pos
+        self._pending_cursor_save_path = None
+        self._pending_cursor_save_pos = None
+        if not path or pos is None:
+            return
+        if not config.has_active_vault():
+            return
+        # Only write if still on same file
+        if self.current_path != path:
+            return
+        try:
+            config.save_cursor_position(path, pos)
+        except Exception as exc:
+            # Non-fatal; log quietly
+            self._debug(f"Cursor save failed for {path}: {exc!r}")
 
     def _jump_to_page(self) -> None:
         if not config.has_active_vault():
@@ -457,8 +526,9 @@ class MainWindow(QMainWindow):
     def _open_task_from_panel(self, path: str, line: int) -> None:
         self._select_tree_path(path)
         self._open_file(path)
+        # Focus first, then go to line so the selection isn't cleared
+        self.editor.setFocus()
         self._goto_line(line, select_line=True)
-        self._focus_editor()
 
     def _open_camel_link(self, name: str) -> None:
         if not self.current_path:
@@ -730,6 +800,203 @@ class MainWindow(QMainWindow):
     # --- Utilities -----------------------------------------------------
     def _alert(self, message: str) -> None:
         QMessageBox.critical(self, "ZimX", message)
+
+    def _toggle_vi_mode(self) -> None:
+        """Toggle vi-mode navigation on/off with visual status bar indicator."""
+        self._vi_mode_active = not self._vi_mode_active
+        self._apply_vi_mode_statusbar_style()
+
+    def _install_vi_mode_filters(self) -> None:
+        for target in getattr(self, "_vi_filter_targets", []):
+            target.removeEventFilter(self)
+        self._vi_filter_targets = []
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+            self._vi_filter_targets.append(app)
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        # (Removed overlay repositioning logic; using status bar indicator)
+        if event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_CapsLock:
+                # Toggle vi-mode and consume the event to prevent CapsLock from activating
+                self._toggle_vi_mode()
+                return True  # Block the event completely
+            if self._vi_mode_active:
+                target = self._vi_mode_target_widget()
+                if target:
+                    mapping = self._translate_vi_key_event(event)
+                    if mapping:
+                        if self._vi_debug:
+                            key_name = chr(event.key()) if Qt.Key_A <= event.key() <= Qt.Key_Z else f"Key_{event.key()}"
+                            self._debug(f"Vi-mode: {key_name} -> {mapping[0]} with mods {mapping[1]}")
+                        self._dispatch_vi_navigation(target, mapping)
+                        return True
+                    # Block unmapped letter keys ONLY if they don't have Control modifier
+                    # (Control+key are commands that should be allowed through)
+                    if Qt.Key_A <= event.key() <= Qt.Key_Z:
+                        has_ctrl = bool(event.modifiers() & Qt.ControlModifier)
+                        if not has_ctrl:
+                            if self._vi_debug:
+                                self._debug(f"Vi-mode: blocking unmapped key {chr(event.key())}")
+                            return True
+        elif event.type() == QEvent.KeyRelease:
+            # Also consume CapsLock release to fully prevent OS from toggling caps
+            if event.key() == Qt.Key_CapsLock:
+                return True
+        return super().eventFilter(obj, event)
+
+    # Removed overlay helpers
+
+    def _vi_mode_target_widget(self) -> QWidget | None:
+        widget = self.focusWidget()
+        if widget is None:
+            return None
+        if widget is self.editor or (self.editor and self.editor.isAncestorOf(widget)):
+            return widget
+        if widget is self.tree_view or self.tree_view.isAncestorOf(widget):
+            return widget
+        if widget is self.task_panel or self.task_panel.isAncestorOf(widget):
+            return widget
+        return None
+
+    def _translate_vi_key_event(self, event: QKeyEvent) -> tuple[int, Qt.KeyboardModifiers] | None:
+        # Check for disallowed modifiers (but allow keys with only Shift or no modifiers)
+        key = event.key()
+        shift = bool(event.modifiers() & Qt.ShiftModifier)
+        
+        # Check if there are modifiers other than Shift that we don't handle
+        disallowed = event.modifiers() & ~(Qt.ShiftModifier | Qt.KeypadModifier)
+        if disallowed:
+            return None
+
+        target_key = None
+        target_modifiers = Qt.KeyboardModifiers(Qt.NoModifier)
+
+        if key == Qt.Key_J:
+            target_key = Qt.Key_Down if not shift else Qt.Key_PageDown
+        elif key == Qt.Key_K:
+            target_key = Qt.Key_Up if not shift else Qt.Key_PageUp
+        elif key == Qt.Key_N and shift:
+            target_key = Qt.Key_Down
+            target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
+        elif key == Qt.Key_U and not shift:
+            target_key = Qt.Key_Z
+            target_modifiers = Qt.KeyboardModifiers(Qt.ControlModifier)
+        elif key == Qt.Key_A:
+            target_key = Qt.Key_Home
+            if shift:
+                target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
+        elif key == Qt.Key_H:
+            if shift:
+                target_key = Qt.Key_Home
+                target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
+            else:
+                target_key = Qt.Key_Left
+        elif key == Qt.Key_L and not shift:
+            target_key = Qt.Key_Right
+        elif key == Qt.Key_Semicolon:
+            target_key = Qt.Key_End
+            if shift:
+                target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
+        elif key == Qt.Key_X and not shift:
+            target_key = Qt.Key_X
+            target_modifiers = Qt.KeyboardModifiers(Qt.ControlModifier)
+        elif key == Qt.Key_P and not shift:
+            target_key = Qt.Key_V
+            target_modifiers = Qt.KeyboardModifiers(Qt.ControlModifier)
+        elif key == Qt.Key_D and not shift:
+            # Delete current line: use custom handler with Alt+Delete as marker
+            target_key = Qt.Key_Delete
+            target_modifiers = Qt.KeyboardModifiers(Qt.AltModifier)
+
+        if target_key is None:
+            return None
+
+        return target_key, target_modifiers
+
+    def _dispatch_vi_navigation(self, target: QWidget, mapping: tuple[int, Qt.KeyboardModifiers]) -> None:
+        key, modifiers = mapping
+
+        # Special handling for delete line (d key maps to a special marker)
+        if key == Qt.Key_Delete and modifiers == Qt.KeyboardModifiers(Qt.AltModifier):
+            # This is our custom "delete line" command
+            if hasattr(target, 'textCursor'):
+                cursor = target.textCursor()
+                # Move to start of the current line
+                cursor.movePosition(QTextCursor.StartOfLine)
+                # Select to the start of the next line (includes newline)
+                cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor)
+                # If we're at the last line, make sure we still delete it
+                if not cursor.hasSelection():
+                    cursor.movePosition(QTextCursor.StartOfLine)
+                    cursor.movePosition(QTextCursor.EndOfLine, QTextCursor.KeepAnchor)
+                cursor.removeSelectedText()
+                target.setTextCursor(cursor)
+                return
+
+        # Prefer direct cursor operations for the editor to reduce repaint churn
+        if target is self.editor or (hasattr(target, 'textCursor') and hasattr(target, 'setTextCursor')):
+            try:
+                cur = target.textCursor()
+                keep = QTextCursor.KeepAnchor if (modifiers & Qt.ShiftModifier) else QTextCursor.MoveAnchor
+                if key == Qt.Key_Down:
+                    cur.movePosition(QTextCursor.Down, keep)
+                    target.setTextCursor(cur)
+                    return
+                if key == Qt.Key_Up:
+                    cur.movePosition(QTextCursor.Up, keep)
+                    target.setTextCursor(cur)
+                    return
+                if key == Qt.Key_Left and not (modifiers & Qt.ShiftModifier):
+                    cur.movePosition(QTextCursor.Left, keep)
+                    target.setTextCursor(cur)
+                    return
+                if key == Qt.Key_Right and not (modifiers & Qt.ShiftModifier):
+                    cur.movePosition(QTextCursor.Right, keep)
+                    target.setTextCursor(cur)
+                    return
+                if key == Qt.Key_Home:
+                    cur.movePosition(QTextCursor.StartOfLine, keep)
+                    target.setTextCursor(cur)
+                    return
+                if key == Qt.Key_End:
+                    cur.movePosition(QTextCursor.EndOfLine, keep)
+                    target.setTextCursor(cur)
+                    return
+                if key == Qt.Key_Z and (modifiers & Qt.ControlModifier):
+                    try:
+                        target.undo()
+                        return
+                    except Exception:
+                        pass
+                if key == Qt.Key_X and (modifiers & Qt.ControlModifier):
+                    try:
+                        target.cut()
+                        return
+                    except Exception:
+                        pass
+                if key == Qt.Key_V and (modifiers & Qt.ControlModifier):
+                    try:
+                        target.paste()
+                        return
+                    except Exception:
+                        pass
+            except Exception:
+                # Fallback to synthetic below
+                pass
+
+        # Fallback: synthesize key events for non-editor targets or unhandled keys
+        press_event = QKeyEvent(QEvent.KeyPress, key, modifiers)
+        release_event = QKeyEvent(QEvent.KeyRelease, key, modifiers)
+        QApplication.sendEvent(target, press_event)
+        QApplication.sendEvent(target, release_event)
+
+    def _apply_vi_mode_statusbar_style(self) -> None:
+        # Switch editor cursor styling for vi-mode; no banners/overlays
+        self.editor.set_vi_mode(self._vi_mode_active)
+
+    # (Removed move/resize overlays; not used)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._save_current_file(auto=True)

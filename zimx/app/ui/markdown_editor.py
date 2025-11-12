@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QMimeData, Qt, QRegularExpression, Signal, QUrl, QPoint
+from PySide6.QtCore import QEvent, QMimeData, Qt, QRegularExpression, Signal, QUrl, QPoint
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -15,6 +15,7 @@ from PySide6.QtGui import (
     QTextImageFormat,
     QTextFormat,
     QDesktopServices,
+    QGuiApplication,
 )
 from PySide6.QtWidgets import QTextEdit, QMenu, QInputDialog
 
@@ -169,14 +170,19 @@ class MarkdownEditor(QTextEdit):
         super().__init__(parent)
         self._current_path: Optional[str] = None
         self._vault_root: Optional[Path] = None
+        self._vi_mode_active: bool = False
+        self._vi_saved_flash_time: Optional[int] = None
+        self._vi_last_cursor_pos: int = -1
         self.setPlaceholderText("Open a Markdown file to begin editing…")
         self.setAcceptRichText(True)
         self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(" "))
         self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.highlighter = MarkdownHighlighter(self.document())
         self.cursorPositionChanged.connect(self._emit_cursor)
+        self.cursorPositionChanged.connect(self._maybe_update_vi_cursor)
         self._display_guard = False
         self.textChanged.connect(self._enforce_display_symbols)
+        self.viewport().installEventFilter(self)
 
     def set_context(self, vault_root: Optional[str], relative_path: Optional[str]) -> None:
         self._vault_root = Path(vault_root) if vault_root else None
@@ -348,6 +354,67 @@ class MarkdownEditor(QTextEdit):
     def _emit_cursor(self) -> None:
         self.cursorMoved.emit(self.textCursor().position())
 
+    # --- Vi-mode cursor -------------------------------------------------
+    def set_vi_mode(self, active: bool) -> None:
+        """Enable or disable vi-mode cursor styling (pink block)."""
+        if self._vi_mode_active == active:
+            return
+        self._vi_mode_active = active
+        # Disable cursor blinking while in vi-mode to avoid flicker with overlay
+        if active:
+            if self._vi_saved_flash_time is None:
+                try:
+                    self._vi_saved_flash_time = QGuiApplication.cursorFlashTime()
+                except Exception:
+                    self._vi_saved_flash_time = 1000
+            try:
+                QGuiApplication.setCursorFlashTime(0)
+            except Exception:
+                pass
+        else:
+            if self._vi_saved_flash_time is not None:
+                try:
+                    QGuiApplication.setCursorFlashTime(self._vi_saved_flash_time)
+                except Exception:
+                    pass
+            self._vi_saved_flash_time = None
+            self._vi_last_cursor_pos = -1
+        self._update_vi_cursor()
+
+    def _maybe_update_vi_cursor(self) -> None:
+        if not self._vi_mode_active:
+            return
+        pos = self.textCursor().position()
+        if pos == self._vi_last_cursor_pos:
+            return
+        self._vi_last_cursor_pos = pos
+        self._update_vi_cursor()
+
+    def _update_vi_cursor(self) -> None:
+        if not self._vi_mode_active:
+            # Clear any vi-mode selection overlay
+            self.setExtraSelections([])
+            return
+        cursor = self.textCursor()
+        block_cursor = QTextCursor(cursor)
+        if not block_cursor.atEnd():
+            # Select the character under the caret to form a block
+            block_cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor)
+        extra = QTextEdit.ExtraSelection()
+        extra.cursor = block_cursor
+        fmt = extra.format
+        fmt.setBackground(QColor("#ff7acb"))  # pink background
+        fmt.setForeground(QColor("#000"))     # dark text for contrast
+        fmt.setProperty(QTextFormat.FullWidthSelection, True)
+        self.setExtraSelections([extra])
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if obj is self.viewport():
+            if event.type() in (QEvent.Paint, QEvent.UpdateRequest, QEvent.FocusIn, QEvent.FocusOut):
+                if self._vi_mode_active:
+                    self._update_vi_cursor()
+        return super().eventFilter(obj, event)
+
     def _to_display(self, text: str) -> str:
         def repl(match: re.Match[str]) -> str:
             symbol = "☑" if match.group(2).strip().lower() == "x" else "☐"
@@ -381,23 +448,56 @@ class MarkdownEditor(QTextEdit):
         return f"{indent}{hashes}{spacer}{clean_body}"
 
     def _enforce_display_symbols(self) -> None:
+        """Safely render display symbols on the current line only.
+
+        Avoid full-document rewrites to preserve inline image fragments and
+        prevent cursor jumps or spurious newlines when typing.
+        """
         if self._display_guard:
             return
-        doc_display = self._doc_to_markdown()
-        markdown = self._from_display(doc_display)
-        display = self._to_display(markdown)
-        if display == doc_display:
+
+        cursor = self.textCursor()
+        block = cursor.block()
+        if not block.isValid():
             return
+
+        original = block.text()
+
+        # 1) Checkbox: ( ) / (x) at start-of-line → ☐ / ☑
+        def task_repl(match: re.Match[str]) -> str:
+            symbol = "☑" if match.group(2).strip().lower() == "x" else "☐"
+            return f"{match.group(1)}{symbol}{match.group(3)}"
+
+        line = TASK_LINE_PATTERN.sub(task_repl, original)
+
+        # 2) Heading marks: #'s → sentinel on this line only
+        line = HEADING_MARK_PATTERN.sub(self._encode_heading, line)
+
+        if line == original:
+            return
+
+        # Preserve caret relative to line start
+        abs_pos = cursor.position()
+        line_start = block.position()
+        rel_pos = max(0, abs_pos - line_start)
+        delta = len(line) - len(original)
+
         self._display_guard = True
-        cursor = self.textCursor()
-        pos = cursor.position()
-        self.setPlainText(display)
-        self._render_images(display)
-        cursor = self.textCursor()
-        cursor.setPosition(min(pos, len(display)))
-        self.setTextCursor(cursor)
-        self._display_guard = False
-        self._restore_cursor_position(pos)
+        try:
+            line_cursor = QTextCursor(block)
+            line_cursor.select(QTextCursor.LineUnderCursor)
+            line_cursor.insertText(line)
+
+            # Restore caret with delta applied and clamped to line length
+            new_block = self.document().findBlock(line_start)
+            new_len = max(0, new_block.length() - 1)  # exclude implicit newline
+            new_rel = min(max(0, rel_pos + delta), new_len)
+            new_abs = line_start + new_rel
+            c = self.textCursor()
+            c.setPosition(new_abs)
+            self.setTextCursor(c)
+        finally:
+            self._display_guard = False
 
     def _restore_cursor_position(self, position: int) -> None:
         cursor = self.textCursor()
@@ -426,33 +526,49 @@ class MarkdownEditor(QTextEdit):
         return "".join(parts)
 
     def _markdown_from_image_format(self, img_fmt: QTextImageFormat) -> str:
+        """Return markdown representation for an inline image fragment.
+
+        Reconstructs the original (possibly relative) path, preserving an
+        optional stored width attribute as `{width=NNN}` so round-trips from
+        markdown → display → markdown are stable.
+        """
         alt = img_fmt.property(IMAGE_PROP_ALT) or ""
         original = img_fmt.property(IMAGE_PROP_ORIGINAL) or img_fmt.name()
+        if not isinstance(original, str):  # defensive
+            original = str(original)
         original = self._normalize_image_path(original)
         width_prop = int(img_fmt.property(IMAGE_PROP_WIDTH) or 0)
         suffix = f"{{width={width_prop}}}" if width_prop else ""
         return f"![{alt}]({original}){suffix}"
 
     def _render_images(self, display_text: str) -> None:
+        """Replace markdown image patterns in the given display text with inline images.
+
+        This operates on the current document by selecting each pattern range
+        and inserting a QTextImageFormat created from the resolved path.
+        """
         matches = list(IMAGE_PATTERN.finditer(display_text))
         if not matches:
             return
         cursor = self.textCursor()
         cursor.beginEditBlock()
-        for match in reversed(matches):
-            start, end = match.span()
-            cursor.setPosition(start)
-            cursor.setPosition(end, QTextCursor.KeepAnchor)
-            fmt = self._create_image_format(
-                match.group("path"),
-                match.group("alt") or "",
-                match.group("width"),
-            )
-            if fmt is None:
-                continue
-            cursor.removeSelectedText()
-            cursor.insertImage(fmt)
-        cursor.endEditBlock()
+        try:
+            for match in reversed(matches):
+                start, end = match.span()
+                cursor.setPosition(start)
+                cursor.setPosition(end, QTextCursor.KeepAnchor)
+                fmt = self._create_image_format(
+                    match.group("path"),
+                    match.group("alt") or "",
+                    match.group("width"),
+                )
+                if fmt is None:
+                    # If the image can't be resolved, leave the markdown text as-is
+                    continue
+                cursor.removeSelectedText()
+                cursor.insertImage(fmt)
+        finally:
+            cursor.endEditBlock()
 
     def _insert_image_from_path(self, raw_path: str, alt: str = "", width: Optional[int] = None) -> None:
         fmt = self._create_image_format(raw_path, alt, str(width) if width else None)
