@@ -104,9 +104,8 @@ def file_write(payload: FileWritePayload) -> dict:
 @app.post("/api/journal/today")
 def journal_today(payload: JournalPayload) -> dict:
     root = vault_state.get_root()
-    target = files.ensure_journal_today(root)
-    if payload.template and target.stat().st_size == 0:
-        target.write_text(payload.template, encoding="utf-8")
+    # Pass template through so the initial content becomes the user's day template
+    target = files.ensure_journal_today(root, template=payload.template)
     rel = f"/{target.relative_to(root).as_posix()}"
     return {"path": rel}
 
@@ -179,6 +178,13 @@ def delete_path(payload: DeletePathPayload) -> dict:
     except FileAccessError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True}
+
+
+# Function to render the link
+def render_link(label, target):
+    # Display only the label as a hyperlink
+    hyperlink = f'<a href="#" title="{target}">{label}</a>'
+    return hyperlink
 
 
 def get_app() -> FastAPI:

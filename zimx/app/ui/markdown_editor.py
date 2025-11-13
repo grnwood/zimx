@@ -16,8 +16,10 @@ from PySide6.QtGui import (
     QTextFormat,
     QDesktopServices,
     QGuiApplication,
+    QPainter,
+    QPen,
 )
-from PySide6.QtWidgets import QTextEdit, QMenu, QInputDialog
+from PySide6.QtWidgets import QTextEdit, QMenu, QInputDialog, QDialog
 from .path_utils import path_to_colon, colon_to_path
 
 
@@ -29,6 +31,14 @@ DISPLAY_TASK_PATTERN = re.compile(r"^(\s*)([☐☑])(\s+)", re.MULTILINE)
 CAMEL_LINK_PATTERN = QRegularExpression(r"\+(?P<link>[A-Za-z]\w*)")
 # Colon link pattern: PageA:PageB:PageC (word chars, digits, underscores separated by colons)
 COLON_LINK_PATTERN = QRegularExpression(r"(?P<link>[\w]+(?::[\w]+)+)")
+# Markdown-style link with colon target: [Text](PageA:PageB:PageC)
+# Allow optional whitespace (including newlines) between ]( 
+MARKDOWN_COLON_LINK_PATTERN = QRegularExpression(r"\[(?P<text>[^\]]+)\]\s*\((?P<link>[\w]+(?::[\w]+)+)\)")
+# Storage pattern for markdown links (using Python re for easier replacement)
+# DOTALL flag makes . match newlines, \s* allows whitespace including newlines
+MARKDOWN_LINK_STORAGE_PATTERN = re.compile(r"\[(?P<text>[^\]]+)\]\s*\((?P<link>[\w]+(?::[\w]+)+)\)", re.MULTILINE | re.DOTALL)
+# Display pattern for rendered links (sentinel + null separator + label)
+MARKDOWN_LINK_DISPLAY_PATTERN = re.compile(r"\x00(?P<link>[\w:]+)\x00(?P<text>[^\x00]+)")
 HEADING_MAX_LEVEL = 5
 HEADING_SENTINEL_BASE = 0xE000
 HEADING_MARK_PATTERN = re.compile(r"^(\s*)(#{1,5})(\s+)(.+)$", re.MULTILINE)
@@ -103,6 +113,10 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.checkbox_format.setForeground(QColor("#c8c8c8"))
         self.checkbox_format.setFontFamily("Segoe UI Symbol")
 
+        self.hr_format = QTextCharFormat()
+        self.hr_format.setForeground(QColor("#555555"))
+        self.hr_format.setBackground(QColor("#333333"))
+
     def highlightBlock(self, text: str) -> None:  # type: ignore[override]
         stripped = text.lstrip()
         indent = len(text) - len(stripped)
@@ -125,6 +139,10 @@ class MarkdownHighlighter(QSyntaxHighlighter):
 
         if text.strip().startswith(">"):
             self.setFormat(0, len(text), self.quote_format)
+
+        # Horizontal rule: --- on its own line
+        if text.strip() == "---":
+            self.setFormat(0, len(text), self.hr_format)
 
         code_pattern = QRegularExpression(r"`[^`]+`")
         iterator = code_pattern.globalMatch(text)
@@ -161,6 +179,46 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         link_format.setForeground(QColor("#4fa3ff"))
         link_format.setFontUnderline(True)
         
+        # Highlight display-format markdown links: \x00Link\x00Label
+        # Find all null-separated link patterns and highlight only the label portion
+        display_link_spans: list[tuple[int,int]] = []
+        idx = 0
+        while idx < len(text):
+            if text[idx] == '\x00':
+                # Start of encoded link
+                link_start = idx + 1
+                link_end = text.find('\x00', link_start)
+                if link_end > link_start:
+                    label_start = link_end + 1
+                    # Find the end of the label (could be space, newline, or another \x00)
+                    label_end = label_start
+                    while label_end < len(text) and text[label_end] not in ('\x00', '\n'):
+                        label_end += 1
+                    # Hide the null bytes and link portion, show only label
+                    # Format: \x00Link\x00Label
+                    # Hide: idx to label_start (the \x00Link\x00 part)
+                    # Show and highlight: label_start to label_end
+                    if label_end > label_start:
+                        self.setFormat(idx, label_start - idx, self.hidden_format)  # Hide \x00Link\x00
+                        self.setFormat(label_start, label_end - label_start, link_format)  # Highlight label
+                        display_link_spans.append((idx, label_end))
+                        idx = label_end
+                        continue
+            idx += 1
+        
+        # Highlight markdown colon links (storage format): underline only the visible text
+        md_iter = MARKDOWN_COLON_LINK_PATTERN.globalMatch(text)
+        md_spans: list[tuple[int,int]] = []
+        while md_iter.hasNext():
+            m = md_iter.next()
+            start = m.capturedStart()
+            end = start + m.capturedLength()
+            md_spans.append((start, end))
+            # text inside [] starts at start+1 with length of 'text'
+            text_val = m.captured("text")
+            text_start = start + 1
+            self.setFormat(text_start, len(text_val), link_format)
+
         # Highlight CamelCase links
         camel_iter = CAMEL_LINK_PATTERN.globalMatch(text)
         while camel_iter.hasNext():
@@ -171,7 +229,13 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         colon_iter = COLON_LINK_PATTERN.globalMatch(text)
         while colon_iter.hasNext():
             match = colon_iter.next()
-            self.setFormat(match.capturedStart(), match.capturedLength(), link_format)
+            s = match.capturedStart()
+            e = s + match.capturedLength()
+            # Skip colon highlighting if inside a markdown link span OR display link span
+            inside_md = any(ms <= s and e <= me for (ms, me) in md_spans)
+            inside_display = any(ds <= s and e <= de for (ds, de) in display_link_spans)
+            if not inside_md and not inside_display:
+                self.setFormat(s, e - s, link_format)
 
 
 class MarkdownEditor(QTextEdit):
@@ -179,6 +243,7 @@ class MarkdownEditor(QTextEdit):
     focusLost = Signal()
     cursorMoved = Signal(int)
     linkActivated = Signal(str)
+    linkHovered = Signal(str)  # Emits link path when hovering/cursor over a link
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -200,6 +265,27 @@ class MarkdownEditor(QTextEdit):
         self.viewport().installEventFilter(self)
         # Enable mouse tracking for hover cursor changes
         self.viewport().setMouseTracking(True)
+
+    def paintEvent(self, event):  # type: ignore[override]
+        """Custom paint to draw horizontal rules as visual lines."""
+        super().paintEvent(event)
+        
+        # Draw horizontal rules (blocks containing exactly '---')
+        painter = QPainter(self.viewport())
+        pen = QPen(QColor("#555555"))
+        pen.setWidth(2)
+        painter.setPen(pen)
+        layout = self.document().documentLayout()
+        vsb = self.verticalScrollBar().value()
+        block = self.document().begin()
+        while block.isValid():
+            if block.text().strip() == "---":
+                br = layout.blockBoundingRect(block)
+                y = int(br.top() - vsb + br.height() / 2)
+                if 0 <= y <= self.viewport().height():
+                    painter.drawLine(0, y, self.viewport().width(), y)
+            block = block.next()
+        painter.end()
 
     def set_context(self, vault_root: Optional[str], relative_path: Optional[str]) -> None:
         self._vault_root = Path(vault_root) if vault_root else None
@@ -227,13 +313,29 @@ class MarkdownEditor(QTextEdit):
         font.setPointSize(size)
         self.setFont(font)
 
-    def insert_link(self, colon_path: str) -> None:
-        """Insert a colon-notation link at the current cursor position."""
+    def insert_link(self, colon_path: str, link_name: str | None = None) -> None:
+        """Insert a link at the current cursor position.
+        
+        If link_name is provided, creates markdown-style link [link_name](colon_path).
+        Otherwise inserts plain colon-notation link.
+        """
         if not colon_path:
             return
         cursor = self.textCursor()
-        cursor.insertText(colon_path)
+        pos_before = cursor.position()
+        
+        # If link_name is provided, always use markdown syntax (even if same as path)
+        if link_name:
+            link_text = f"[{link_name}]({colon_path})"
+        else:
+            link_text = colon_path
+            
+        cursor.insertText(link_text)
         self.setTextCursor(cursor)
+        
+        # Force full document re-render to apply display transformation
+        # This handles multi-line patterns that _enforce_display_symbols can't
+        self._refresh_display()
 
     def toggle_task_state(self) -> None:
         cursor = self.textCursor()
@@ -274,64 +376,33 @@ class MarkdownEditor(QTextEdit):
                     self._insert_image_from_path(saved.name, alt=saved.stem)
                     self.imageSaved.emit(saved.name)
                     return
+        
+        # Remember position before paste
+        pos_before = self.textCursor().position()
         super().insertFromMimeData(source)
+        
+        # After pasting text, check if it contains markdown links and re-render if needed
+        if source.hasText():
+            text = source.text()
+            # Quick check: does pasted text contain markdown link pattern?
+            if '[' in text and '](' in text and ':' in text:
+                # Force full document re-render to apply display transformation
+                self._refresh_display()
 
     def _save_image(self, image: QImage) -> Optional[Path]:
-        file_path = self._current_path.lstrip("/") if self._current_path else None
-        if not file_path:
-            return None
-    def _remove_link_at_cursor(self, cursor: QTextCursor) -> None:
-        """Remove a link at the cursor position (remove the + prefix or convert colon notation to plain text)."""
-        block = cursor.block()
-        rel = cursor.position() - block.position()
-        block_text = block.text()
-        
-        # Check for CamelCase/plus-prefixed links (+PageName or +Projects)
-        iterator = CAMEL_LINK_PATTERN.globalMatch(block_text)
-        while iterator.hasNext():
-            match = iterator.next()
-            start = match.capturedStart()
-            end = start + match.capturedLength()
-            if start <= rel < end:
-                # Remove the + prefix
-                text_cursor = QTextCursor(block)
-                text_cursor.setPosition(block.position() + start)
-                text_cursor.setPosition(block.position() + end, QTextCursor.KeepAnchor)
-                # Replace with just the link text (without +)
-                text_cursor.insertText(match.captured("link"))
-                return
-        
-        # Check for colon notation links (PageA:PageB:PageC)
-        colon_iterator = COLON_LINK_PATTERN.globalMatch(block_text)
-        while colon_iterator.hasNext():
-            match = colon_iterator.next()
-            start = match.capturedStart()
-            end = start + match.capturedLength()
-            if start <= rel < end:
-                # Just remove the link highlighting by converting to plain text
-                # (colon notation stays as-is but becomes plain text)
-                text_cursor = QTextCursor(block)
-                text_cursor.setPosition(block.position() + start)
-                text_cursor.setPosition(block.position() + end, QTextCursor.KeepAnchor)
-                # Re-insert as plain text (breaks the link pattern by adding space or other separator)
-                link_text = match.captured("link")
-                # Convert colons to forward slashes to break the link pattern
-                text_cursor.insertText(link_text.replace(":", "/"))
-                return
-    
-    def _copy_link_to_location(self) -> None:
-        """Copy the current page location as a colon-notation link to clipboard."""
-        if not self._current_path:
-            return
-        colon_path = path_to_colon(self._current_path)
-        if colon_path:
-            clipboard = QGuiApplication.clipboard()
-            clipboard.setText(colon_path)
+        """Save a pasted image next to the current page and return its absolute Path.
 
-        folder = (self._vault_root / file_path).resolve().parent if self._vault_root else None
-        if folder is None:
+        Images are stored in the same folder as the current page
+        using sequential names like paste_image_001.png, paste_image_002.png, etc.
+        """
+        if not (self._vault_root and self._current_path):
             return None
-        folder.mkdir(parents=True, exist_ok=True)
+        rel_file_path = self._current_path.lstrip("/")
+        folder = (self._vault_root / rel_file_path).resolve().parent
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
         index = 1
         while True:
             candidate = folder / f"paste_image_{index:03d}.png"
@@ -341,6 +412,9 @@ class MarkdownEditor(QTextEdit):
         if image.save(str(candidate), "PNG"):
             return candidate
         return None
+    
+    
+    # (Removed old _copy_link_to_location; newer implementation exists later in file)
 
     def focusOutEvent(self, event):  # type: ignore[override]
         super().focusOutEvent(event)
@@ -352,6 +426,44 @@ class MarkdownEditor(QTextEdit):
             if link:
                 self.linkActivated.emit(link)
                 return
+        
+        # Handle arrow keys around display-format links to skip over hidden null bytes
+        if event.key() in (Qt.Key_Left, Qt.Key_Right) and not event.modifiers():
+            cursor = self.textCursor()
+            block = cursor.block()
+            text = block.text()
+            rel = cursor.position() - block.position()
+            
+            # Check if we're at a null byte boundary (display-format link)
+            if event.key() == Qt.Key_Right:
+                # Moving right: if at first null byte, skip to the visible label
+                if rel < len(text) and text[rel] == '\x00':
+                    # Find the second null byte (start of label)
+                    link_start = rel + 1
+                    link_end = text.find('\x00', link_start)
+                    if link_end > link_start:
+                        # Jump to the start of the visible label
+                        cursor.setPosition(block.position() + link_end + 1)
+                        self.setTextCursor(cursor)
+                        return
+            elif event.key() == Qt.Key_Left:
+                # Moving left: if just after label, skip back over entire hidden link structure
+                if rel > 0 and rel <= len(text):
+                    # Check if we're just after a display-format link
+                    # Look backward for pattern: \x00Link\x00Label[cursor_here]
+                    search_start = max(0, rel - 200)  # Look back up to 200 chars
+                    search_text = text[search_start:rel]
+                    # Find last occurrence of \x00 before cursor
+                    last_null = search_text.rfind('\x00')
+                    if last_null >= 0:
+                        # Check if there's another \x00 before it (the link start marker)
+                        second_last_null = search_text[:last_null].rfind('\x00')
+                        if second_last_null >= 0:
+                            # We found \x00...\x00 pattern, jump to before the first \x00
+                            cursor.setPosition(block.position() + search_start + second_last_null)
+                            self.setTextCursor(cursor)
+                            return
+        
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event):  # type: ignore[override]
@@ -362,26 +474,31 @@ class MarkdownEditor(QTextEdit):
         image_hit = self._image_at_position(event.pos())
         if image_hit:
             cursor, fmt = image_hit
-            position = cursor.position()
+            # Store the image name as unique identifier instead of position
+            image_name = fmt.name()
             menu = QMenu(self)
             for width in (300, 600, 900):
                 action = menu.addAction(f"{width}px")
-                action.triggered.connect(lambda checked=False, w=width, pos=position: self._set_image_width(pos, w))
+                action.triggered.connect(lambda checked=False, w=width, name=image_name: self._resize_image_by_name(name, w))
             menu.addSeparator()
             reset_action = menu.addAction("Original Size")
-            reset_action.triggered.connect(lambda checked=False, pos=position: self._set_image_width(pos, None))
+            reset_action.triggered.connect(lambda checked=False, name=image_name: self._resize_image_by_name(name, None))
             menu.addSeparator()
             custom_action = menu.addAction("Custom…")
-            custom_action.triggered.connect(lambda checked=False, pos=position: self._prompt_image_width(pos))
+            custom_action.triggered.connect(lambda checked=False, name=image_name: self._prompt_image_width_by_name(name))
             menu.exec(event.globalPos())
             return
         
         # Check if right-clicking on a link
         click_cursor = self.cursorForPosition(event.pos())
-        link_text = self._link_under_cursor(click_cursor)
-        if link_text:
+        md_link = self._markdown_link_at_cursor(click_cursor)
+        plain_link = self._link_under_cursor(click_cursor)
+        if md_link or plain_link:
             menu = QMenu(self)
-            
+            # Edit Link option
+            edit_action = menu.addAction("Edit Link…")
+            edit_action.triggered.connect(lambda: self._edit_link_at_cursor(click_cursor))
+            menu.addSeparator()
             # Remove Link option
             remove_action = menu.addAction("Remove Link")
             remove_action.triggered.connect(lambda: self._remove_link_at_cursor(click_cursor))
@@ -389,7 +506,8 @@ class MarkdownEditor(QTextEdit):
             # Copy Link to Location option (copy the linked page's path)
             menu.addSeparator()
             copy_action = menu.addAction("Copy Link to Location")
-            copy_action.triggered.connect(lambda: self._copy_link_to_location(link_text))
+            link_for_copy = md_link[3] if md_link else plain_link
+            copy_action.triggered.connect(lambda: self._copy_link_to_location(link_for_copy))
             
             menu.exec(event.globalPos())
             return
@@ -408,17 +526,21 @@ class MarkdownEditor(QTextEdit):
     def mouseMoveEvent(self, event):  # type: ignore[override]
         # Show pointing hand cursor when hovering over a link
         cursor = self.cursorForPosition(event.pos())
-        if self._link_under_cursor(cursor):
+        link = self._link_under_cursor(cursor)
+        if link:
             self.viewport().setCursor(Qt.PointingHandCursor)
+            self.linkHovered.emit(link)
         else:
             self.viewport().setCursor(Qt.IBeamCursor)
+            self.linkHovered.emit("")  # Empty string to clear status bar
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event):  # type: ignore[override]
         # Single click on links to activate them
         if event.button() == Qt.LeftButton:
             cursor = self.cursorForPosition(event.pos())
-            link = self._link_under_cursor(cursor)
+            md_info = self._markdown_link_at_cursor(cursor)
+            link = md_info[3] if md_info else self._link_under_cursor(cursor)
             if link:
                 self.linkActivated.emit(link)
                 event.accept()
@@ -468,6 +590,36 @@ class MarkdownEditor(QTextEdit):
         cursor = cursor or self.textCursor()
         block = cursor.block()
         rel = cursor.position() - block.position()
+        text = block.text()
+        
+        # Check display-format markdown links first: \x00Link\x00Label
+        idx = 0
+        while idx < len(text):
+            if text[idx] == '\x00':
+                link_start = idx + 1
+                link_end = text.find('\x00', link_start)
+                if link_end > link_start:
+                    label_start = link_end + 1
+                    label_end = label_start
+                    while label_end < len(text) and text[label_end] not in ('\x00', '\n'):
+                        label_end += 1
+                    # Check if cursor is in the visible label portion
+                    if label_start <= rel < label_end:
+                        return text[link_start:link_end]
+                    idx = label_end
+                    continue
+            idx += 1
+        
+        # Check storage-format markdown links (return target)
+        md_iter = MARKDOWN_COLON_LINK_PATTERN.globalMatch(text)
+        while md_iter.hasNext():
+            m = md_iter.next()
+            start = m.capturedStart()
+            text_val = m.captured("text")
+            text_start = start + 1
+            text_end = text_start + len(text_val)
+            if text_start <= rel < text_end:
+                return m.captured("link")
         
         # Check for CamelCase links
         iterator = CAMEL_LINK_PATTERN.globalMatch(block.text())
@@ -491,11 +643,59 @@ class MarkdownEditor(QTextEdit):
         
         return None
 
+    def _markdown_link_at_cursor(self, cursor: QTextCursor) -> Optional[tuple[int,int,str,str]]:
+        """Return (start, end, text, link) for a markdown link under cursor, or None."""
+        block = cursor.block()
+        rel = cursor.position() - block.position()
+        text = block.text()
+        
+        # Check display-format first: \x00Link\x00Label
+        idx = 0
+        while idx < len(text):
+            if text[idx] == '\x00':
+                link_start = idx + 1
+                link_end = text.find('\x00', link_start)
+                if link_end > link_start:
+                    label_start = link_end + 1
+                    label_end = label_start
+                    while label_end < len(text) and text[label_end] not in ('\x00', '\n'):
+                        label_end += 1
+                    # Check if cursor is in the visible label portion
+                    if label_start <= rel < label_end:
+                        link = text[link_start:link_end]
+                        label = text[label_start:label_end]
+                        return (idx, label_end, label, link)
+                    idx = label_end
+                    continue
+            idx += 1
+        
+        # Check storage-format: [Label](Link)
+        it = MARKDOWN_COLON_LINK_PATTERN.globalMatch(text)
+        while it.hasNext():
+            m = it.next()
+            start = m.capturedStart()
+            end = start + m.capturedLength()
+            text_val = m.captured("text")
+            text_start = start + 1
+            text_end = text_start + len(text_val)
+            if text_start <= rel < text_end:
+                return (start, end, text_val, m.captured("link"))
+        return None
+
     def _remove_link_at_cursor(self, cursor: QTextCursor) -> None:
         """Remove a link at the cursor position (remove the + prefix or convert colon notation to plain text)."""
         block = cursor.block()
         rel = cursor.position() - block.position()
         block_text = block.text()
+        # If a markdown link, unwrap to just the display text
+        md = self._markdown_link_at_cursor(cursor)
+        if md:
+            start, end, text_val, _ = md
+            tc = QTextCursor(block)
+            tc.setPosition(block.position() + start)
+            tc.setPosition(block.position() + end, QTextCursor.KeepAnchor)
+            tc.insertText(text_val)
+            return
         
         # Check for CamelCase/plus-prefixed links (+PageName or +Projects)
         iterator = CAMEL_LINK_PATTERN.globalMatch(block_text)
@@ -526,6 +726,54 @@ class MarkdownEditor(QTextEdit):
                 link_text = match.captured("link")
                 text_cursor.insertText(link_text.replace(":", "/"))
                 return
+
+    def _edit_link_at_cursor(self, cursor: QTextCursor) -> None:
+        """Open edit link dialog and replace link under cursor (supports markdown or plain colon link)."""
+        from .edit_link_dialog import EditLinkDialog
+        block = cursor.block()
+        md = self._markdown_link_at_cursor(cursor)
+        if md:
+            start, end, text_val, link_val = md
+        else:
+            # Fallback: plain colon or CamelCase link
+            link_val = self._link_under_cursor(cursor)
+            if not link_val:
+                return
+            text_val = link_val
+            # determine start/end of the match to replace
+            rel = cursor.position() - block.position()
+            # Check colon first
+            it = COLON_LINK_PATTERN.globalMatch(block.text())
+            rng = None
+            while it.hasNext():
+                m = it.next()
+                s = m.capturedStart(); e = s + m.capturedLength()
+                if s <= rel < e:
+                    rng = (s,e)
+                    break
+            if rng is None:
+                it = CAMEL_LINK_PATTERN.globalMatch(block.text())
+                while it.hasNext():
+                    m = it.next()
+                    s = m.capturedStart(); e = s + m.capturedLength()
+                    if s <= rel < e:
+                        rng = (s,e)
+                        break
+            if rng is None:
+                return
+            start, end = rng
+        dlg = EditLinkDialog(link_to=link_val, link_text=text_val, parent=self)
+        if dlg.exec() == QDialog.Accepted:
+            new_to = dlg.link_to() or link_val
+            new_text = dlg.link_text() or new_to
+            # Replace region with markdown link syntax
+            tc = QTextCursor(block)
+            tc.setPosition(block.position() + start)
+            tc.setPosition(block.position() + end, QTextCursor.KeepAnchor)
+            tc.insertText(f"[{new_text}]({new_to})")
+            
+            # Force full document re-render to apply display transformation
+            self._refresh_display()
     
     def _copy_link_to_location(self, link_text: str | None = None) -> None:
         """Copy a link location as colon-notation to clipboard.
@@ -565,7 +813,14 @@ class MarkdownEditor(QTextEdit):
         self._copy_link_to_location(link_text=None)
 
     def _emit_cursor(self) -> None:
-        self.cursorMoved.emit(self.textCursor().position())
+        cursor = self.textCursor()
+        self.cursorMoved.emit(cursor.position())
+        # Check if cursor is over a link and emit link path
+        link = self._link_under_cursor(cursor)
+        if link:
+            self.linkHovered.emit(link)
+        else:
+            self.linkHovered.emit("")  # Empty string to clear status bar
 
     # --- Vi-mode cursor -------------------------------------------------
     def set_vi_block_cursor_enabled(self, enabled: bool) -> None:
@@ -641,14 +896,19 @@ class MarkdownEditor(QTextEdit):
             return f"{match.group(1)}{symbol}{match.group(3)}"
 
         converted = TASK_LINE_PATTERN.sub(repl, text)
-        return HEADING_MARK_PATTERN.sub(self._encode_heading, converted)
+        converted = HEADING_MARK_PATTERN.sub(self._encode_heading, converted)
+        # Transform markdown links: [Label](Link) → \x00Link\x00Label
+        converted = MARKDOWN_LINK_STORAGE_PATTERN.sub(self._encode_link, converted)
+        return converted
 
     def _from_display(self, text: str) -> str:
         def repl(match: re.Match[str]) -> str:
             state = "x" if match.group(2) == "☑" else " "
             return f"{match.group(1)}({state}){match.group(3)}"
 
-        restored = HEADING_DISPLAY_PATTERN.sub(self._decode_heading, text)
+        # Restore markdown links first: \x00Link\x00Label → [Label](Link)
+        restored = MARKDOWN_LINK_DISPLAY_PATTERN.sub(self._decode_link, text)
+        restored = HEADING_DISPLAY_PATTERN.sub(self._decode_heading, restored)
         return DISPLAY_TASK_PATTERN.sub(repl, restored)
 
     def _encode_heading(self, match: re.Match[str]) -> str:
@@ -666,6 +926,36 @@ class MarkdownEditor(QTextEdit):
         spacer = " " if clean_body else ""
         hashes = "#" * level
         return f"{indent}{hashes}{spacer}{clean_body}"
+
+    def _encode_link(self, match: re.Match[str]) -> str:
+        """Convert [Label](Link) to hidden format: \x00Link\x00Label"""
+        text = match.group("text")
+        link = match.group("link")
+        return f"\x00{link}\x00{text}"
+
+    def _decode_link(self, match: re.Match[str]) -> str:
+        """Convert hidden format \x00Link\x00Label back to [Label](Link)"""
+        link = match.group("link")
+        text = match.group("text")
+        return f"[{text}]({link})"
+    
+    def _refresh_display(self) -> None:
+        """Force full document re-render to apply display transformations.
+        
+        This converts storage format (markdown syntax) to display format (with hidden syntax).
+        Used after inserting/editing links or pasting content that may contain links.
+        """
+        self._display_guard = True
+        storage_text = self.toPlainText()
+        display_text = self._to_display(storage_text)
+        old_cursor_pos = self.textCursor().position()
+        self.document().setPlainText(display_text)
+        # Restore cursor position (approximately)
+        new_cursor = self.textCursor()
+        new_cursor.setPosition(min(old_cursor_pos, len(display_text)))
+        self.setTextCursor(new_cursor)
+        self._render_images(display_text)
+        self._display_guard = False
 
     def _enforce_display_symbols(self) -> None:
         """Safely render display symbols on the current line only.
@@ -692,6 +982,9 @@ class MarkdownEditor(QTextEdit):
 
         # 2) Heading marks: #'s → sentinel on this line only
         line = HEADING_MARK_PATTERN.sub(self._encode_heading, line)
+
+        # 3) Markdown links: [Label](Link) → \x00Link\x00Label
+        line = MARKDOWN_LINK_STORAGE_PATTERN.sub(self._encode_link, line)
 
         if line == original:
             return
@@ -876,43 +1169,72 @@ class MarkdownEditor(QTextEdit):
                 return probe, fmt.toImageFormat()
         return None
 
-    def _set_image_width(self, position: int, width: Optional[int]) -> None:
-        cursor = QTextCursor(self.textCursor())
-        cursor.setPosition(position)
-        self.setTextCursor(cursor)
-        hit = self._image_at_position(None)
-        if not hit:
+    def _find_image_by_name(self, image_name: str) -> Optional[tuple[QTextCursor, QTextImageFormat]]:
+        """Find an image in the document by its filename."""
+        block = self.document().begin()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                fragment = it.fragment()
+                if fragment.isValid():
+                    fmt = fragment.charFormat()
+                    if fmt.isImageFormat():
+                        img_fmt = fmt.toImageFormat()
+                        if img_fmt.name() == image_name:
+                            # Create cursor at this fragment
+                            cursor = QTextCursor(self.document())
+                            cursor.setPosition(fragment.position())
+                            return cursor, img_fmt
+                it += 1
+            block = block.next()
+        return None
+
+    def _resize_image_by_name(self, image_name: str, width: Optional[int]) -> None:
+        """Find and resize an image by its filename."""
+        result = self._find_image_by_name(image_name)
+        if not result:
             return
-        img_cursor, img_fmt = hit
+        
+        cursor, img_fmt = result
+        
+        # Compute new size properties
         natural_w = float(img_fmt.property(IMAGE_PROP_NATURAL_WIDTH) or 0)
         natural_h = float(img_fmt.property(IMAGE_PROP_NATURAL_HEIGHT) or 0)
         if width:
-            img_fmt.setWidth(width)
-            if natural_w:
-                ratio = natural_h / natural_w
-                img_fmt.setHeight(width * ratio if ratio else width)
             img_fmt.setProperty(IMAGE_PROP_WIDTH, int(width))
+            img_fmt.setWidth(int(width))
+            if natural_w:
+                ratio = natural_h / natural_w if natural_w else 0
+                img_fmt.setHeight(int(width) * ratio if ratio else int(width))
         else:
-            img_fmt.setWidth(0)
-            img_fmt.setHeight(0)
+            # Reset to natural size - clear the width property and use natural dimensions
             img_fmt.setProperty(IMAGE_PROP_WIDTH, 0)
-        img_cursor.beginEditBlock()
-        img_cursor.deleteChar()
-        img_cursor.insertImage(img_fmt)
-        img_cursor.endEditBlock()
+            # For display, use the natural dimensions
+            if natural_w and natural_h:
+                img_fmt.setWidth(int(natural_w))
+                img_fmt.setHeight(int(natural_h))
+            else:
+                img_fmt.setWidth(0)
+                img_fmt.setHeight(0)
+        
+        # Replace the image at cursor position
+        img_pos = cursor.position()
+        cursor.beginEditBlock()
+        cursor.setPosition(img_pos)
+        cursor.setPosition(img_pos + 1, QTextCursor.KeepAnchor)
+        cursor.insertImage(img_fmt)
+        cursor.endEditBlock()
 
-    def _prompt_image_width(self, position: int) -> None:
-        cursor = QTextCursor(self.textCursor())
-        cursor.setPosition(position)
-        self.setTextCursor(cursor)
-        hit = self._image_at_position(None)
-        if not hit:
+    def _prompt_image_width_by_name(self, image_name: str) -> None:
+        """Prompt for custom width for an image identified by name."""
+        result = self._find_image_by_name(image_name)
+        if not result:
             return
-        _, fmt = hit
+        _, fmt = result
         current = int(fmt.property(IMAGE_PROP_WIDTH) or 0)
         if not current:
             current = int(fmt.property(IMAGE_PROP_NATURAL_WIDTH) or 300)
         width, ok = QInputDialog.getInt(self, "Image Width", "Width (px):", current, 50, 4096)
         if not ok:
             return
-        self._set_image_width(position, width)
+        self._resize_image_by_name(image_name, width)

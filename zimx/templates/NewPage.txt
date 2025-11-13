@@ -1,0 +1,6 @@
+# {{PageName}}
+Created {{DayDateYear}}
+---
+
+
+

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+import hashlib
 from typing import List, Set
 
 from zimx.app import config
@@ -14,15 +15,27 @@ START_PATTERN = re.compile(r">([0-9]{4}-[0-9]{2}-[0-9]{2})")
 PRIORITY_PATTERN = re.compile(r"(!{1,5})")
 
 
-def index_page(path: str, content: str) -> None:
+def index_page(path: str, content: str) -> bool:
+    """Index page metadata into the per-vault database.
+
+    Returns True if the index was updated (content changed), False if skipped.
+    """
     if not config.has_active_vault():
-        return
+        return False
+    # Fast short-circuit: if content hash unchanged, skip heavy parsing and DB writes
+    digest = hashlib.md5(content.encode("utf-8")).hexdigest()
+    prev = config.get_page_hash(path)
+    if prev == digest:
+        return False
+
     tags = sorted(set(TAG_PATTERN.findall(content)))
     link_targets = {normalize_link(match) for match in LINK_PATTERN.findall(content) if match}
     links = sorted(link_targets)
     tasks = extract_tasks(path, content)
     title = derive_title(path, content)
     config.update_page_index(path, title, tags, links, tasks)
+    config.set_page_hash(path, digest)
+    return True
 
 
 def derive_title(path: str, content: str) -> str:

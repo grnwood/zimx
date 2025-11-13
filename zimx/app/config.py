@@ -49,6 +49,51 @@ def save_vi_block_cursor_enabled(enabled: bool) -> None:
     _update_global_config({"vi_block_cursor": enabled})
 
 
+def get_page_hash(path: str) -> Optional[str]:
+    """Return last stored content hash for a page path, or None."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", (f"hash:{path}",))
+    row = cur.fetchone()
+    return str(row[0]) if row else None
+
+
+def set_page_hash(path: str, digest: str) -> None:
+    """Persist content hash for a page path in kv."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", (f"hash:{path}", digest))
+    conn.commit()
+
+
+def load_bookmarks() -> list[str]:
+    """Load bookmarked page paths. Returns list of paths."""
+    conn = _get_conn()
+    if not conn:
+        return []
+    try:
+        cur = conn.execute("SELECT path FROM bookmarks ORDER BY position")
+        return [row[0] for row in cur.fetchall()]
+    except sqlite3.OperationalError:
+        # Table doesn't exist yet
+        return []
+
+
+def save_bookmarks(paths: list[str]) -> None:
+    """Save bookmarked page paths with their order."""
+    conn = _get_conn()
+    if not conn:
+        return
+    with conn:
+        conn.execute("DELETE FROM bookmarks")
+        conn.executemany(
+            "INSERT INTO bookmarks(path, position) VALUES(?, ?)",
+            ((path, idx) for idx, path in enumerate(paths))
+        )
+
+
 def _update_global_config(updates: dict) -> None:
     """Merge updates into global config file."""
     existing = {}
@@ -340,6 +385,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             tag TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_task_tags_tag ON task_tags(tag);
+        CREATE TABLE IF NOT EXISTS bookmarks (
+            path TEXT PRIMARY KEY,
+            position INTEGER
+        );
         """
     )
     conn.commit()

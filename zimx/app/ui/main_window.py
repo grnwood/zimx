@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QSizePolicy,
     QSplitter,
     QStyle,
@@ -45,6 +46,7 @@ from .task_panel import TaskPanel
 from .jump_dialog import JumpToPageDialog
 from .preferences_dialog import PreferencesDialog
 from .insert_link_dialog import InsertLinkDialog
+from .new_page_dialog import NewPageDialog
 from .path_utils import colon_to_path, path_to_colon
 
 
@@ -149,6 +151,12 @@ class MainWindow(QMainWindow):
         # Page navigation history
         self.page_history: list[str] = []
         self.history_index: int = -1
+        # Guard to suppress auto-open on tree selection during programmatic navigation
+        self._suspend_selection_open: bool = False
+        
+        # Bookmarks
+        self.bookmarks: list[str] = []
+        self.bookmark_buttons: dict[str, QPushButton] = {}
 
         self.tree_view = VaultTreeView()
         self.tree_model = QStandardItemModel()
@@ -166,8 +174,8 @@ class MainWindow(QMainWindow):
         self.editor.imageSaved.connect(self._on_image_saved)
         self.editor.textChanged.connect(lambda: self.autosave_timer.start())
         self.editor.focusLost.connect(lambda: self._save_current_file(auto=True))
-        self.editor.cursorMoved.connect(self._on_cursor_changed)
         self.editor.linkActivated.connect(self._open_camel_link)
+        self.editor.linkHovered.connect(self._on_link_hovered)
         self.font_size = 14
         self.editor.set_font_point_size(self.font_size)
         # Load vi-mode block cursor preference
@@ -178,7 +186,6 @@ class MainWindow(QMainWindow):
         self.task_panel.taskActivated.connect(self._open_task_from_panel)
         self._inline_editor: Optional[InlineNameEdit] = None
         self._pending_selection: Optional[str] = None
-        self._cursor_cache: dict[str, int] = {}
         self._suspend_autosave = False
         self.autosave_timer = QTimer(self)
         self.autosave_timer.setInterval(30_000)
@@ -189,14 +196,6 @@ class MainWindow(QMainWindow):
         self._vi_mode_active = False
         # Optional vi debug logging (set True to enable noisy logs)
         self._vi_debug = False
-
-        # Debounced cursor-position persistence
-        self._cursor_save_timer = QTimer(self)
-        self._cursor_save_timer.setSingleShot(True)
-        self._cursor_save_timer.setInterval(250)
-        self._cursor_save_timer.timeout.connect(self._flush_cursor_save)
-        self._pending_cursor_save_path = None  # type: Optional[str]
-        self._pending_cursor_save_pos = None   # type: Optional[int]
 
         editor_split = QSplitter()
         editor_split.addWidget(self.editor)
@@ -220,10 +219,35 @@ class MainWindow(QMainWindow):
 
         # No overlay/indicator widgets; vi-mode is represented by editor cursor style
 
+        # Build toolbar and main menus
         self._build_toolbar()
+        # Add 'Vault' menu with required actions
+        vault_menu = self.menuBar().addMenu("Vault")
+        open_vault_action = QAction("Open Vault", self)
+        open_vault_action.setToolTip("Open an existing vault")
+        open_vault_action.triggered.connect(self._select_vault)
+        vault_menu.addAction(open_vault_action)
+        new_vault_action = QAction("New Vault", self)
+        new_vault_action.setToolTip("Create a new vault")
+        new_vault_action.triggered.connect(self._create_vault)
+        vault_menu.addAction(new_vault_action)
+        view_vault_disk_action = QAction("View Vault on Disk", self)
+        view_vault_disk_action.setToolTip("Open the vault folder in your system file manager")
+        view_vault_disk_action.triggered.connect(self._open_vault_on_disk)
+        vault_menu.addAction(view_vault_disk_action)
+
         self._register_shortcuts()
         self._vi_filter_targets: list[QObject] = []
         self._install_vi_mode_filters()
+        # Update focus borders when focus moves between widgets
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.focusChanged.connect(lambda old, now: self._apply_focus_borders())
+            except Exception:
+                pass
+        # Apply initial border state
+        self._apply_focus_borders()
         self.statusBar().showMessage("Select a vault to get started")
         self._default_status_stylesheet = self.statusBar().styleSheet()
         last_vault = config.load_last_vault()
@@ -234,24 +258,34 @@ class MainWindow(QMainWindow):
     def _build_toolbar(self) -> None:
         self.toolbar = self.addToolBar("Main")
         self.toolbar.setMovable(False)
-
-        open_vault_action = QAction("Open Vault", self)
-        open_vault_action.triggered.connect(self._select_vault)
-        self.toolbar.addAction(open_vault_action)
-
-        create_vault_action = QAction("New Vault", self)
-        create_vault_action.triggered.connect(self._create_vault)
-        self.toolbar.addAction(create_vault_action)
-
-        new_journal_action = QAction("New Today", self)
-        new_journal_action.triggered.connect(self._create_journal_today)
-        self.toolbar.addAction(new_journal_action)
-
-        save_action = QAction("Save", self)
-        save_action.setShortcut(QKeySequence("Ctrl+Shift+S"))
-        save_action.triggered.connect(self._save_current_file)
-        self.toolbar.addAction(save_action)
-
+        
+        # Home button (navigate to vault root page)
+        home_action = QAction("Home", self)
+        home_action.setIcon(self.style().standardIcon(QStyle.SP_DirHomeIcon))
+        home_action.setToolTip("Go to vault home page")
+        home_action.triggered.connect(self._go_home)
+        self.toolbar.addAction(home_action)
+        
+        # Bookmark button (bold blue plus symbol)
+        self.bookmark_button = QAction("Add Bookmark", self)
+        self.bookmark_button.triggered.connect(self._add_bookmark)
+        # Style the button text to be a bold blue plus symbol
+        font = QFont()
+        font.setPointSize(20)
+        font.setBold(True)
+        self.bookmark_button.setFont(font)
+        # Set text as plus symbol
+        self.bookmark_button.setText("+")
+        # We'll apply color via stylesheet after adding to toolbar
+        self.toolbar.addAction(self.bookmark_button)
+        
+        # Add bookmark display area (will be populated with bookmark buttons)
+        self.bookmark_container = QWidget()
+        self.bookmark_layout = QHBoxLayout(self.bookmark_container)
+        self.bookmark_layout.setContentsMargins(0, 0, 0, 0)
+        self.bookmark_layout.setSpacing(4)
+        self.toolbar.addWidget(self.bookmark_container)
+        
         # Right-aligned spacer before preferences icon
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -265,6 +299,28 @@ class MainWindow(QMainWindow):
 
         # Store default style to restore later
         self._default_toolbar_stylesheet = self.toolbar.styleSheet()
+        
+        # Apply blue color to bookmark button via stylesheet
+        self.toolbar.setStyleSheet("""
+            QToolButton[text="+"] {
+                color: #4A90E2;
+                font-size: 20pt;
+                font-weight: bold;
+            }
+        """)
+
+    def _open_vault_on_disk(self):
+        """Open the vault folder in the system file manager."""
+        import os
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        # vault_root holds absolute path to the vault root directory
+        vault_path = self.vault_root
+        if not vault_path:
+            self.statusBar().showMessage("No vault selected.")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(vault_path)))
+        self.statusBar().showMessage(f"Opened vault folder: {vault_path}")
 
     def _register_shortcuts(self) -> None:
         save_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
@@ -279,6 +335,15 @@ class MainWindow(QMainWindow):
         link_shortcut.activated.connect(self._insert_link)
         copy_link_shortcut = QShortcut(QKeySequence("Ctrl+Shift+L"), self)
         copy_link_shortcut.activated.connect(self._copy_current_page_link)
+        focus_toggle = QShortcut(QKeySequence("Ctrl+Space"), self)
+        focus_toggle.activated.connect(self._toggle_focus_between_tree_and_editor)
+        new_page_shortcut = QShortcut(QKeySequence("Ctrl+N"), self)
+        new_page_shortcut.activated.connect(self._show_new_page_dialog)
+        journal_shortcut = QShortcut(QKeySequence("Alt+D"), self)
+        journal_shortcut.activated.connect(self._open_journal_today)
+        # Home shortcut: Alt+Home (works regardless of vi-mode state)
+        home_shortcut = QShortcut(QKeySequence("Alt+Home"), self)
+        home_shortcut.activated.connect(self._go_home)
         task_cycle = QShortcut(QKeySequence(Qt.Key_F12), self)
         task_cycle.activated.connect(self.editor.toggle_task_state)
         # Navigation shortcuts
@@ -303,25 +368,26 @@ class MainWindow(QMainWindow):
         self._set_vault(directory)
 
     def _create_vault(self) -> None:
-        target_path, _ = QFileDialog.getSaveFileName(self, "Create Vault", str(Path.home() / "NewVault"))
+        target_path = QFileDialog.getExistingDirectory(self, "Select Folder for Vault", str(Path.home()))
         if not target_path:
             return
         target = Path(target_path)
         try:
+            # Check if folder is empty or ask for confirmation
             if target.exists():
-                if not target.is_dir():
-                    self._alert("A file with that name already exists.")
-                    return
-                reply = QMessageBox.question(
-                    self,
-                    "Use Existing Folder",
-                    f"{target} already exists. Use it as the vault?",
-                )
-                if reply != QMessageBox.StandardButton.Yes:
-                    return
+                existing_items = list(target.iterdir())
+                if existing_items:
+                    reply = QMessageBox.question(
+                        self,
+                        "Use Existing Folder",
+                        f"{target.name} is not empty. Create vault here anyway?",
+                    )
+                    if reply != QMessageBox.StandardButton.Yes:
+                        return
             else:
                 target.mkdir(parents=True)
-                self._seed_vault(target)
+            
+            self._seed_vault(target)
         except OSError as exc:
             self._alert(f"Failed to create vault: {exc}")
             return
@@ -366,8 +432,106 @@ class MainWindow(QMainWindow):
         self.editor.set_markdown("")
         self.current_path = None
         self.statusBar().showMessage(f"Vault: {self.vault_root}")
+        self._update_window_title()
         self._populate_vault_tree()
         self._reindex_vault()
+        self._load_bookmarks()
+
+    def _add_bookmark(self) -> None:
+        """Add the current page to bookmarks."""
+        if not self.current_path:
+            self.statusBar().showMessage("No page open to bookmark", 3000)
+            return
+        
+        # Check if already bookmarked
+        if self.current_path in self.bookmarks:
+            self.statusBar().showMessage("Page already bookmarked", 3000)
+            return
+        
+        # Add to beginning of list (leftmost position)
+        self.bookmarks.insert(0, self.current_path)
+        config.save_bookmarks(self.bookmarks)
+        self._refresh_bookmark_buttons()
+        
+        # Show feedback
+        page_name = Path(self.current_path).stem
+        self.statusBar().showMessage(f"Bookmarked: {page_name}", 3000)
+
+    def _load_bookmarks(self) -> None:
+        """Load bookmarks from config and refresh display."""
+        if not config.has_active_vault():
+            return
+        self.bookmarks = config.load_bookmarks()
+        self._refresh_bookmark_buttons()
+
+    def _refresh_bookmark_buttons(self) -> None:
+        """Refresh the bookmark buttons in the toolbar."""
+        # Clear existing buttons
+        for btn in list(self.bookmark_buttons.values()):
+            self.bookmark_layout.removeWidget(btn)
+            btn.deleteLater()
+        self.bookmark_buttons.clear()
+        
+        # Add buttons for each bookmark
+        for bookmark_path in self.bookmarks:
+            # Extract leaf node name (page name)
+            page_name = Path(bookmark_path).stem
+            
+            # Create button as a QPushButton with context menu
+            btn = QPushButton(page_name)
+            btn.setToolTip(path_to_colon(bookmark_path) or bookmark_path)
+            btn.clicked.connect(lambda checked=False, p=bookmark_path: self._open_bookmark(p))
+            btn.setContextMenuPolicy(Qt.CustomContextMenu)
+            btn.customContextMenuRequested.connect(
+                lambda pos, p=bookmark_path, b=btn: self._show_bookmark_context_menu(pos, p, b)
+            )
+            
+            # Store button in dict for later removal
+            self.bookmark_buttons[bookmark_path] = btn
+            
+            # Add to layout
+            self.bookmark_layout.addWidget(btn)
+
+    def _go_home(self) -> None:
+        """Navigate to the vault's root page (page with same name as vault)."""
+        if not self.vault_root or not self.vault_root_name:
+            self.statusBar().showMessage("No vault selected", 3000)
+            return
+        
+        # Construct path to root page: /VaultName/VaultName.txt
+        home_path = f"/{self.vault_root_name}{PAGE_SUFFIX}"
+        
+        # Clear tree selection
+        self.tree_view.clearSelection()
+        
+        # Open the home page
+        self._open_file(home_path)
+        self.statusBar().showMessage(f"Home: {self.vault_root_name}", 2000)
+
+    def _open_bookmark(self, path: str) -> None:
+        """Open a bookmarked page."""
+        self._select_tree_path(path)
+        self._open_file(path)
+
+    def _show_bookmark_context_menu(self, pos: QPoint, bookmark_path: str, button: QWidget) -> None:
+        """Show context menu for bookmark with Remove option."""
+        menu = QMenu(self)
+        remove_action = menu.addAction("Remove")
+        remove_action.triggered.connect(lambda: self._remove_bookmark(bookmark_path))
+        
+        # Show menu at global position relative to button
+        global_pos = button.mapToGlobal(pos)
+        menu.exec(global_pos)
+
+    def _remove_bookmark(self, path: str) -> None:
+        """Remove a bookmark from the list."""
+        if path in self.bookmarks:
+            self.bookmarks.remove(path)
+            config.save_bookmarks(self.bookmarks)
+            self._refresh_bookmark_buttons()
+            
+            page_name = Path(path).stem
+            self.statusBar().showMessage(f"Removed bookmark: {page_name}", 3000)
 
     def _populate_vault_tree(self) -> None:
         self._cancel_inline_editor()
@@ -382,7 +546,12 @@ class MainWindow(QMainWindow):
         data = resp.json().get("tree", [])
         self.tree_model.removeRows(0, self.tree_model.rowCount())
         for node in data:
-            self._add_tree_node(self.tree_model.invisibleRootItem(), node)
+            # Hide the root vault node (path == "/") and render only its children
+            if node.get("path") == "/":
+                for child in node.get("children", []):
+                    self._add_tree_node(self.tree_model.invisibleRootItem(), child)
+            else:
+                self._add_tree_node(self.tree_model.invisibleRootItem(), node)
         self.tree_view.expandAll()
         if self._pending_selection:
             self._select_tree_path(self._pending_selection)
@@ -415,6 +584,10 @@ class MainWindow(QMainWindow):
         if not current.isValid():
             self._debug("Tree selection cleared (no valid index).")
             return
+        # If we're programmatically changing selection (history/hierarchy nav), don't auto-open here
+        if self._suspend_selection_open:
+            self._debug("Selection change suppressed (programmatic nav).")
+            return
         open_target = current.data(OPEN_ROLE) or current.data(PATH_ROLE)
         self._debug(f"Tree selection target resolved to: {open_target!r}")
         if not open_target:
@@ -429,8 +602,8 @@ class MainWindow(QMainWindow):
             self._debug(f"Tree selection crash while opening {open_target!r}: {exc!r}")
             raise
 
-    def _open_file(self, path: str, retry: bool = False, add_to_history: bool = True) -> None:
-        if not path or path == self.current_path:
+    def _open_file(self, path: str, retry: bool = False, add_to_history: bool = True, force: bool = False, cursor_at_end: bool = False) -> None:
+        if not path or (path == self.current_path and not force):
             return
         self.autosave_timer.stop()
         
@@ -439,9 +612,10 @@ class MainWindow(QMainWindow):
             # Remove any forward history when opening a new page
             if self.history_index < len(self.page_history) - 1:
                 self.page_history = self.page_history[:self.history_index + 1]
-            # Add new page
-            self.page_history.append(path)
-            self.history_index = len(self.page_history) - 1
+            # Add new page if not duplicate of last
+            if not self.page_history or self.page_history[-1] != path:
+                self.page_history.append(path)
+                self.history_index = len(self.page_history) - 1
         
         try:
             resp = self.http.post("/api/file/read", json={"path": path})
@@ -458,20 +632,20 @@ class MainWindow(QMainWindow):
         self._suspend_autosave = True
         self.editor.set_markdown(content)
         self._suspend_autosave = False
-        indexer.index_page(path, content)
-        self.task_panel.refresh()
-        stored_pos = config.load_cursor_position(path) if config.has_active_vault() else None
-        if stored_pos is not None:
+        updated = indexer.index_page(path, content)
+        if updated:
+            self.task_panel.refresh()
+        # Position cursor at end for newly templated pages, otherwise at start
+        if cursor_at_end:
             cursor = self.editor.textCursor()
-            cursor.setPosition(min(stored_pos, len(content)))
+            cursor.movePosition(QTextCursor.End)
             self.editor.setTextCursor(cursor)
-            self._cursor_cache[path] = stored_pos
         else:
             self.editor.moveCursor(QTextCursor.Start)
-            self._cursor_cache[path] = self.editor.textCursor().position()
         # Always show editing status; vi-mode banner is separate
         display_path = path_to_colon(path) or path
         self.statusBar().showMessage(f"Editing {display_path}")
+        self._update_window_title()
 
     def _save_current_file(self, auto: bool = False) -> None:
         if self._suspend_autosave:
@@ -496,8 +670,6 @@ class MainWindow(QMainWindow):
                 self._alert(f"Failed to save {self.current_path}: {exc}")
             return
         if config.has_active_vault():
-            position = self._cursor_cache.get(self.current_path, self.editor.textCursor().position())
-            config.save_cursor_position(self.current_path, position)
             indexer.index_page(self.current_path, payload["content"])
             self.task_panel.refresh()
         self.autosave_timer.stop()
@@ -505,52 +677,162 @@ class MainWindow(QMainWindow):
         display_path = path_to_colon(self.current_path) if self.current_path else ""
         self.statusBar().showMessage(f"{message} {display_path}", 2000 if auto else 4000)
 
-    def _create_journal_today(self) -> None:
+    def _open_journal_today(self) -> None:
         if not self.vault_root:
             self._alert("Select a vault before creating journal entries.")
             return
+        # Build day template string from templates/JournalDay.txt with substitution
+        day_template = ""
         try:
-            resp = self.http.post("/api/journal/today", json={})
+            templates_root = Path(__file__).parent.parent.parent / "templates"
+            day_tpl = templates_root / "JournalDay.txt"
+            if day_tpl.exists():
+                from datetime import datetime
+                now = datetime.now()
+                vars_map = {
+                    "{{YYYY}}": f"{now:%Y}",
+                    "{{Month}}": now.strftime("%B"),
+                    "{{DOW}}": now.strftime("%A"),
+                    "{{dd}}": f"{now:%d}",
+                }
+                raw = day_tpl.read_text(encoding="utf-8")
+                for k, v in vars_map.items():
+                    raw = raw.replace(k, v)
+                day_template = raw
+        except Exception:
+            day_template = ""
+
+        try:
+            resp = self.http.post("/api/journal/today", json={"template": day_template})
             resp.raise_for_status()
         except httpx.HTTPError as exc:
             self._alert(f"Failed to create journal entry: {exc}")
             return
         path = resp.json().get("path")
         if path:
-            self._open_file(path)
+            # Repopulate tree so newly created nested year/month/day nodes appear
+            self._pending_selection = path
+            self._populate_vault_tree()
+            # Apply journal templates (year/month/day) if newly created
+            self._apply_journal_templates(path)
+            # Open with cursor at end for immediate typing
+            self._open_file(path, cursor_at_end=True)
+            self.statusBar().showMessage("Journal: today", 4000)
+            # Ensure focus returns to editor (tree selection may have taken focus)
+            self.editor.setFocus()
+            self._apply_focus_borders()
+
+    def _apply_journal_templates(self, day_file_path: str) -> None:
+        """Ensure year/month/day journal pages exist and apply templates with variable substitution.
+
+        day_file_path: relative file path like /Journal/2025/11/12/12.txt (from API)
+        Templates: JournalYear.txt, JournalMonth.txt, JournalDay.txt
+        Variables: {{YYYY}}, {{Month}}, {{DOW}}, {{dd}}
+        """
+        if not self.vault_root:
+            return
+        from datetime import datetime
+        now = datetime.now()
+        year_str = f"{now:%Y}"
+        month_num = f"{now:%m}"  # zero-padded numeric month (folder name)
+        month_name = now.strftime("%B")  # English month name
+        day_num = f"{now:%d}"  # zero-padded day
+        dow_name = now.strftime("%A")
+
+        vault_root = Path(self.vault_root)
+        # Derive folders
+        journal_root = vault_root / "Journal"
+        year_dir = journal_root / year_str
+        month_dir = year_dir / month_num
+        day_dir = month_dir / day_num
+
+        # Page files (name matches folder name)
+        year_page = year_dir / f"{year_dir.name}{PAGE_SUFFIX}"
+        month_page = month_dir / f"{month_dir.name}{PAGE_SUFFIX}"
+        day_page = day_dir / f"{day_dir.name}{PAGE_SUFFIX}"
+
+        # Load templates
+        templates_root = Path(__file__).parent.parent.parent / "templates"
+        year_tpl = templates_root / "JournalYear.txt"
+        month_tpl = templates_root / "JournalMonth.txt"
+        day_tpl = templates_root / "JournalDay.txt"
+
+        vars_map = {
+            "{{YYYY}}": year_str,
+            "{{Month}}": month_name,
+            "{{DOW}}": dow_name,
+            "{{dd}}": day_num,
+        }
+
+        def render(template_path: Path) -> str:
+            try:
+                raw = template_path.read_text(encoding="utf-8")
+            except Exception:
+                return ""
+            out = raw
+            for k, v in vars_map.items():
+                out = out.replace(k, v)
+            return out
+
+        # Create missing directories
+        year_dir.mkdir(parents=True, exist_ok=True)
+        month_dir.mkdir(parents=True, exist_ok=True)
+        day_dir.mkdir(parents=True, exist_ok=True)
+
+        # Helper to decide if we overwrite (only when file absent or trivially small)
+        def needs_write(path: Path) -> bool:
+            if not path.exists():
+                return True
+            try:
+                size = path.stat().st_size
+            except OSError:
+                return False
+            return size < 20  # heuristic: very small stub header
+
+        # Year
+        if needs_write(year_page) and year_tpl.exists():
+            content = render(year_tpl)
+            if content:
+                year_page.write_text(content, encoding="utf-8")
+        # Month
+        if needs_write(month_page) and month_tpl.exists():
+            content = render(month_tpl)
+            if content:
+                month_page.write_text(content, encoding="utf-8")
+        # Day
+        def needs_day_write(path: Path) -> bool:
+            if not path.exists():
+                return True
+            try:
+                text = path.read_text(encoding="utf-8")
+            except Exception:
+                return False
+            stripped = text.strip()
+            # Consider it a stub if very short OR only header lines (<=3 lines)
+            if not stripped:
+                return True
+            lines = [ln for ln in stripped.splitlines() if ln.strip()]
+            if len(lines) <= 3 and len(stripped) < 160:
+                return True
+            return False
+        if needs_day_write(day_page) and day_tpl.exists():
+            content = render(day_tpl)
+            if content:
+                day_page.write_text(content, encoding="utf-8")
+        # Always perform a substitution pass on existing day page if placeholders remain
+        try:
+            existing = day_page.read_text(encoding="utf-8")
+            if any(token in existing for token in ("{{YYYY}}","{{Month}}","{{DOW}}","{{dd}}")):
+                replaced = existing
+                for k,v in vars_map.items():
+                    replaced = replaced.replace(k, v)
+                if replaced != existing:
+                    day_page.write_text(replaced, encoding="utf-8")
+        except Exception:
+            pass
 
     def _on_image_saved(self, filename: str) -> None:
         self.statusBar().showMessage(f"Image pasted as {filename}", 5000)
-
-    def _on_cursor_changed(self, position: int) -> None:
-        # Update in-memory cache immediately for UX (e.g., focus restore)
-        if self.current_path:
-            self._cursor_cache[self.current_path] = position
-
-        # Debounce disk writes to avoid UI stalls during rapid navigation
-        if self.current_path and config.has_active_vault():
-            self._pending_cursor_save_path = self.current_path
-            self._pending_cursor_save_pos = position
-            # restart the timer
-            self._cursor_save_timer.start()
-
-    def _flush_cursor_save(self) -> None:
-        path = self._pending_cursor_save_path
-        pos = self._pending_cursor_save_pos
-        self._pending_cursor_save_path = None
-        self._pending_cursor_save_pos = None
-        if not path or pos is None:
-            return
-        if not config.has_active_vault():
-            return
-        # Only write if still on same file
-        if self.current_path != path:
-            return
-        try:
-            config.save_cursor_position(path, pos)
-        except Exception as exc:
-            # Non-fatal; log quietly
-            self._debug(f"Cursor save failed for {path}: {exc!r}")
 
     def _jump_to_page(self) -> None:
         if not config.has_active_vault():
@@ -572,8 +854,9 @@ class MainWindow(QMainWindow):
         dlg = InsertLinkDialog(self)
         if dlg.exec() == QDialog.Accepted:
             colon_path = dlg.selected_colon_path()
+            link_name = dlg.selected_link_name()
             if colon_path:
-                self.editor.insert_link(colon_path)
+                self.editor.insert_link(colon_path, link_name)
                 self.editor.setFocus()
 
     def _copy_current_page_link(self) -> None:
@@ -585,6 +868,69 @@ class MainWindow(QMainWindow):
         colon_path = path_to_colon(self.current_path)
         if colon_path:
             self.statusBar().showMessage(f"Copied link: {colon_path}", 3000)
+
+    def _show_new_page_dialog(self) -> None:
+        """Show dialog to create a new page with template selection (Ctrl+N)."""
+        if not self.vault_root:
+            self._alert("Select a vault before creating pages.")
+            return
+        
+        dlg = NewPageDialog(self)
+        if dlg.exec() == QDialog.Accepted:
+            page_name = dlg.get_page_name()
+            if not page_name:
+                self.statusBar().showMessage("Page name cannot be empty", 3000)
+                return
+            
+            if "/" in page_name or ":" in page_name:
+                self.statusBar().showMessage("Page name cannot contain '/' or ':'", 3000)
+                return
+            
+            # Determine parent path based on current selection
+            parent_path = self._get_current_parent_path()
+            
+            # Create the new page path
+            target_path = self._join_paths(parent_path, page_name)
+            
+            try:
+                # Create the page folder
+                resp = self.http.post("/api/path/create", json={"path": target_path, "is_dir": True})
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                if exc.response is not None and exc.response.status_code == 409:
+                    self.statusBar().showMessage("Page already exists", 4000)
+                else:
+                    self._alert(f"Failed to create page: {exc}")
+                return
+            except httpx.HTTPError as exc:
+                self._alert(f"Failed to create page: {exc}")
+                return
+            
+            # Get the file path
+            file_path = self._folder_to_file_path(target_path)
+            if not file_path:
+                return
+            
+            # Apply the selected template
+            template_path = dlg.get_template_path()
+            if template_path:
+                self._apply_template_from_path(file_path, page_name, template_path)
+            
+            # Open the new page
+            self._pending_selection = file_path
+            self._populate_vault_tree()
+            self._open_file(file_path, cursor_at_end=True)
+
+    def _get_current_parent_path(self) -> str:
+        """Get the parent path for creating new pages based on current selection."""
+        # If we have a current file open, use its parent
+        if self.current_path:
+            rel_current = Path(self.current_path.lstrip("/"))
+            parent_folder = rel_current.parent
+            if parent_folder.parts:
+                # Remove the filename to get the folder
+                return f"/{parent_folder.as_posix()}"
+        return "/"
 
     def _open_preferences(self) -> None:
         """Open the preferences dialog."""
@@ -603,6 +949,18 @@ class MainWindow(QMainWindow):
         self.editor.setFocus()
         self._goto_line(line, select_line=True)
 
+    def _on_link_hovered(self, link: str) -> None:
+        """Update status bar when hovering over a link."""
+        if link:
+            self.statusBar().showMessage(f"Link: {link}")
+        else:
+            # Restore default status message
+            if self.current_path:
+                display_path = path_to_colon(self.current_path) or self.current_path
+                self.statusBar().showMessage(f"Editing {display_path}")
+            else:
+                self.statusBar().showMessage("")
+    
     def _open_camel_link(self, name: str) -> None:
         """Open a link - handles both CamelCase (relative) and colon notation (absolute)."""
         if not self.current_path:
@@ -620,11 +978,18 @@ class MainWindow(QMainWindow):
                 self._alert(f"Invalid link format: {name}")
                 return
             folder_path = self._file_path_to_folder(target_file)
+            # Check if file already exists before creating
+            file_existed = self.vault_root and Path(self.vault_root, target_file.lstrip("/")).exists()
             if not self._ensure_page_folder(folder_path, allow_existing=True):
                 return
+            # Apply template to newly created page
+            is_new_page = not file_existed
+            if is_new_page:
+                page_name = name.split(":")[-1]  # Get last part for page name
+                self._apply_new_page_template(target_file, page_name)
             self._pending_selection = target_file
             self._populate_vault_tree()
-            self._open_file(target_file)
+            self._open_file(target_file, cursor_at_end=is_new_page)
         else:
             # CamelCase link is relative to current page
             rel_current = Path(self.current_path.lstrip("/"))
@@ -632,14 +997,20 @@ class MainWindow(QMainWindow):
             target_rel = parent_folder / name if parent_folder.parts else Path(name)
             rel_string = target_rel.as_posix()
             folder_path = f"/{rel_string}" if rel_string else "/"
-            if not self._ensure_page_folder(folder_path, allow_existing=True):
-                return
             target_file = self._folder_to_file_path(folder_path)
             if not target_file:
                 return
+            # Check if file already exists before creating
+            file_existed = self.vault_root and Path(self.vault_root, target_file.lstrip("/")).exists()
+            if not self._ensure_page_folder(folder_path, allow_existing=True):
+                return
+            # Apply template to newly created page
+            is_new_page = not file_existed
+            if is_new_page:
+                self._apply_new_page_template(target_file, name)
             self._pending_selection = target_file
             self._populate_vault_tree()
-            self._open_file(target_file)
+            self._open_file(target_file, cursor_at_end=is_new_page)
 
     def _adjust_font_size(self, delta: int) -> None:
         new_size = max(10, min(36, self.font_size + delta))
@@ -655,12 +1026,30 @@ class MainWindow(QMainWindow):
 
     def _focus_editor(self) -> None:
         self.editor.setFocus()
-        if self.current_path:
-            pos = self._cursor_cache.get(self.current_path) or config.load_cursor_position(self.current_path)
-            if pos is not None:
-                cursor = self.editor.textCursor()
-                cursor.setPosition(min(pos, len(self.editor.toPlainText())))
-                self.editor.setTextCursor(cursor)
+
+    # --- Focus toggle & visual indication ---------------------------
+    def _toggle_focus_between_tree_and_editor(self) -> None:
+        """Toggle focus between navigation tree and editor (Ctrl+Space)."""
+        fw = self.focusWidget()
+        if fw is self.editor or (self.editor and self.editor.isAncestorOf(fw)):
+            # Go to tree
+            self.tree_view.setFocus()
+        else:
+            # Go to editor
+            self.editor.setFocus()
+        self._apply_focus_borders()
+
+    def _apply_focus_borders(self) -> None:
+        """Apply a subtle border around the widget that currently has focus."""
+        focused = self.focusWidget()
+        editor_has = focused is self.editor or (self.editor and self.editor.isAncestorOf(focused))
+        tree_has = focused is self.tree_view or self.tree_view.isAncestorOf(focused)
+        # Styles: subtle 1px border with accent color; remove when unfocused
+        editor_style = "QTextEdit { border: 1px solid #4A90E2; border-radius:3px; }" if editor_has else "QTextEdit { border: 1px solid transparent; }"
+        tree_style = "QTreeView { border: 1px solid #4A90E2; border-radius:3px; }" if tree_has else "QTreeView { border: 1px solid transparent; }"
+        # Preserve existing styles by appending (simple approach)
+        self.editor.setStyleSheet(editor_style)
+        self.tree_view.setStyleSheet(tree_style)
 
     def _goto_line(self, line: int, select_line: bool = False) -> None:
         cursor = self.editor.textCursor()
@@ -726,10 +1115,40 @@ class MainWindow(QMainWindow):
                 delete_action.triggered.connect(
                     lambda checked=False, p=path, op=open_path: self._delete_path(p, op, global_pos)
                 )
+            # View Page Source (open underlying txt in external editor)
+            file_path = open_path or self._folder_to_file_path(path)
+            if file_path:
+                view_src = menu.addAction("View Page Source")
+                view_src.triggered.connect(lambda checked=False, fp=file_path: self._view_page_source(fp))
         else:
             menu.addAction("New Page", lambda checked=False: self._start_inline_creation("/", global_pos, None))
         if menu.actions():
             menu.exec(global_pos)
+
+    def _view_page_source(self, file_path: str) -> None:
+        """Open the given page's txt file in the OS editor, show modal, and reload on OK."""
+        if not self.vault_root:
+            return
+        try:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+        except Exception:
+            return
+        abs_path = str((Path(self.vault_root) / file_path.lstrip("/")).resolve())
+        # Launch in default editor
+        QDesktopServices.openUrl(QUrl.fromLocalFile(abs_path))
+        # Block with modal until user confirms they're done
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("View Page Source")
+        dlg.setText("File being edited outside of ZimX.\nPress OK when finished.")
+        dlg.setIcon(QMessageBox.Information)
+        dlg.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        dlg.setDefaultButton(QMessageBox.Ok)
+        result = dlg.exec()
+        if result == QMessageBox.Ok:
+            # Reload and render page (force reload even if already current)
+            self._select_tree_path(file_path)
+            self._open_file(file_path, force=True)
 
     def _start_inline_creation(
         self,
@@ -779,8 +1198,54 @@ class MainWindow(QMainWindow):
         self._cancel_inline_editor()
         file_path = self._folder_to_file_path(target_path)
         if file_path:
+            # Apply NewPage.txt template to the newly created page
+            self._apply_new_page_template(file_path, name)
             self._pending_selection = file_path
         self._populate_vault_tree()
+
+    def _apply_new_page_template(self, file_path: str, page_name: str) -> None:
+        """Apply the NewPage.txt template to a newly created page."""
+        template_path = Path(__file__).parent.parent.parent / "templates" / "NewPage.txt"
+        self._apply_template_from_path(file_path, page_name, str(template_path))
+
+    def _apply_template_from_path(self, file_path: str, page_name: str, template_path: str) -> None:
+        """Apply a specific template file to a newly created page."""
+        if not self.vault_root:
+            return
+        
+        # Load template
+        template_file = Path(template_path)
+        if not template_file.exists():
+            return
+        
+        try:
+            template_content = template_file.read_text(encoding="utf-8")
+        except Exception:
+            return
+        
+        # Process template variables
+        content = self._process_template_variables(template_content, page_name)
+        
+        # Write to the new page file
+        abs_path = Path(self.vault_root) / file_path.lstrip("/")
+        try:
+            abs_path.write_text(content, encoding="utf-8")
+        except Exception:
+            pass
+
+    def _process_template_variables(self, template: str, page_name: str) -> str:
+        """Replace template variables with their values."""
+        from datetime import datetime
+        
+        # Get current date in format: Tuesday 29 April 2025
+        now = datetime.now()
+        day_date_year = now.strftime("%A %d %B %Y")
+        
+        # Replace variables
+        result = template.replace("{{PageName}}", page_name)
+        result = result.replace("{{DayDateYear}}", day_date_year)
+        
+        return result
 
     def _inline_editor_cancelled(self) -> None:
         self._inline_editor = None
@@ -882,7 +1347,11 @@ class MainWindow(QMainWindow):
             return
         self.history_index -= 1
         target_path = self.page_history[self.history_index]
-        self._select_tree_path(target_path)
+        self._suspend_selection_open = True
+        try:
+            self._select_tree_path(target_path)
+        finally:
+            self._suspend_selection_open = False
         self._open_file(target_path, add_to_history=False)
 
     def _navigate_history_forward(self) -> None:
@@ -891,23 +1360,36 @@ class MainWindow(QMainWindow):
             return
         self.history_index += 1
         target_path = self.page_history[self.history_index]
-        self._select_tree_path(target_path)
+        self._suspend_selection_open = True
+        try:
+            self._select_tree_path(target_path)
+        finally:
+            self._suspend_selection_open = False
         self._open_file(target_path, add_to_history=False)
 
     def _navigate_hierarchy_up(self) -> None:
-        """Navigate up in page hierarchy (Alt+Up): PageA:PageB:PageC -> PageA:PageB."""
+        """Navigate up in page hierarchy (Alt+Up): Move up one level, stop at root."""
         if not self.current_path:
             return
         colon_path = path_to_colon(self.current_path)
-        if not colon_path or ":" not in colon_path:
-            return  # Already at root or single page
-        # Remove last segment
+        if not colon_path:
+            return
         parts = colon_path.split(":")
+        if len(parts) == 1:
+            # Already at root vault
+            self.statusBar().showMessage(f"At root: {colon_path}")
+            return
+        # Remove only the last segment
         parent_colon = ":".join(parts[:-1])
         parent_path = colon_to_path(parent_colon, self.vault_root_name)
         if parent_path:
             self._select_tree_path(parent_path)
             self._open_file(parent_path)
+            if len(parts) == 2:
+                # Just moved to root vault
+                self.statusBar().showMessage(f"At root: {parent_colon}")
+            else:
+                self.statusBar().showMessage(f"Up: {parent_colon}")
 
     def _navigate_hierarchy_down(self) -> None:
         """Navigate down in page hierarchy (Alt+Down): Open first child page."""
@@ -966,6 +1448,18 @@ class MainWindow(QMainWindow):
     def _alert(self, message: str) -> None:
         QMessageBox.critical(self, "ZimX", message)
 
+    def _update_window_title(self) -> None:
+        parts: list[str] = []
+        if self.current_path:
+            colon = path_to_colon(self.current_path)
+            if colon:
+                parts.append(colon)
+        if self.vault_root_name:
+            parts.append(self.vault_root_name)
+        suffix = "ZimX Desktop"
+        title = " | ".join(parts + [suffix]) if parts else suffix
+        self.setWindowTitle(title)
+
     def _toggle_vi_mode(self) -> None:
         """Toggle vi-mode navigation on/off with visual status bar indicator."""
         self._vi_mode_active = not self._vi_mode_active
@@ -986,6 +1480,9 @@ class MainWindow(QMainWindow):
             if event.key() == Qt.Key_CapsLock:
                 # Toggle vi-mode and consume the event to prevent CapsLock from activating
                 self._toggle_vi_mode()
+                # After Qt processes this, ensure OS CapsLock state is OFF
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(0, self._neutralize_capslock)
                 return True  # Block the event completely
             if self._vi_mode_active:
                 target = self._vi_mode_target_widget()
@@ -1011,6 +1508,38 @@ class MainWindow(QMainWindow):
                 return True
         return super().eventFilter(obj, event)
 
+    def _neutralize_capslock(self) -> None:
+        """Best-effort attempt to revert CapsLock state AFTER using it as an internal vi-mode toggle.
+
+        Qt does not provide an API to directly change keyboard LED / lock states. We consume
+        the CapsLock key events so the application treats the key purely as a mode toggle.
+        However, the OS will typically still flip the hardware CapsLock state before delivery
+        of the event. Fully preventing the change requires platform or driver level hooks not
+        exposed by Qt.
+
+        We implement a lightweight Windows-only fallback using the Win32 `keybd_event` (via
+        ctypes) to send another CapsLock press/release if the key is left engaged. This will
+        effectively toggle it back off. On Linux (X11/Wayland) there is no portable solution
+        via Qt alone; XKB calls or compositor protocols would require extra native bindings.
+
+        This function fails silently if anything is unsupported; vi-mode still works.
+        """
+        try:
+            import sys
+            # WINDOWS fallback: send synthetic CapsLock to undo state if engaged
+            if sys.platform.startswith('win'):
+                import ctypes
+                user32 = ctypes.windll.user32
+                VK_CAPITAL = 0x14
+                KEYEVENTF_KEYUP = 0x0002
+                state = user32.GetKeyState(VK_CAPITAL) & 0x0001
+                if state:  # CapsLock is ON, send another press to turn OFF
+                    user32.keybd_event(VK_CAPITAL, 0, 0, 0)
+                    user32.keybd_event(VK_CAPITAL, 0, KEYEVENTF_KEYUP, 0)
+            # Linux / others: no-op (documented limitation)
+        except Exception:
+            pass
+
     # Removed overlay helpers
 
     def _vi_mode_target_widget(self) -> QWidget | None:
@@ -1029,9 +1558,10 @@ class MainWindow(QMainWindow):
         # Check for disallowed modifiers (but allow keys with only Shift or no modifiers)
         key = event.key()
         shift = bool(event.modifiers() & Qt.ShiftModifier)
-        
-        # Check if there are modifiers other than Shift that we don't handle
-        disallowed = event.modifiers() & ~(Qt.ShiftModifier | Qt.KeypadModifier)
+        alt = bool(event.modifiers() & Qt.AltModifier)
+
+        # Allow Alt (for Alt+h / Alt+l mappings) plus Shift; block everything else
+        disallowed = event.modifiers() & ~(Qt.ShiftModifier | Qt.KeypadModifier | Qt.AltModifier)
         if disallowed:
             return None
 
@@ -1053,13 +1583,22 @@ class MainWindow(QMainWindow):
             if shift:
                 target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
         elif key == Qt.Key_H:
-            if shift:
+            if alt and not shift:
+                # Alt+h -> Alt+Left (word-left style navigation)
+                target_key = Qt.Key_Left
+                target_modifiers = Qt.KeyboardModifiers(Qt.AltModifier)
+            elif shift:
                 target_key = Qt.Key_Home
                 target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
             else:
                 target_key = Qt.Key_Left
         elif key == Qt.Key_L and not shift:
-            target_key = Qt.Key_Right
+            if alt:
+                # Alt+l -> Alt+Right (word-right style navigation)
+                target_key = Qt.Key_Right
+                target_modifiers = Qt.KeyboardModifiers(Qt.AltModifier)
+            else:
+                target_key = Qt.Key_Right
         elif key == Qt.Key_Semicolon:
             target_key = Qt.Key_End
             if shift:
@@ -1113,11 +1652,13 @@ class MainWindow(QMainWindow):
                     cur.movePosition(QTextCursor.Up, keep)
                     target.setTextCursor(cur)
                     return
-                if key == Qt.Key_Left and not (modifiers & Qt.ShiftModifier):
+                # Intercept ONLY plain Left/Right for single-char movement; let Alt+Left/Right propagate
+                # so vi-mode Alt+h / Alt+l (translated to Alt+Left / Alt+Right) trigger global page traversal.
+                if key == Qt.Key_Left and modifiers == Qt.KeyboardModifiers(Qt.NoModifier):
                     cur.movePosition(QTextCursor.Left, keep)
                     target.setTextCursor(cur)
                     return
-                if key == Qt.Key_Right and not (modifiers & Qt.ShiftModifier):
+                if key == Qt.Key_Right and modifiers == Qt.KeyboardModifiers(Qt.NoModifier):
                     cur.movePosition(QTextCursor.Right, keep)
                     target.setTextCursor(cur)
                     return

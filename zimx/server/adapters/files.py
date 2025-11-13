@@ -99,15 +99,21 @@ def list_dir(root: Path) -> List[Dict]:
     return [build(root)]
 
 
-def ensure_journal_today(root: Path) -> Path:
+def ensure_journal_today(root: Path, template: str | None = None) -> Path:
+    """Ensure today's journal page exists and return its file path.
+
+    If a template string is provided and the page does not yet exist, the file
+    will be created with that template content. Otherwise a simple default stub
+    is used for first-time creation.
+    """
     today = dt.datetime.now()
     rel = Path("Journal") / f"{today:%Y}" / f"{today:%m}" / f"{today:%d}"
     page_dir = root / rel
     page_dir.mkdir(parents=True, exist_ok=True)
     page_file = page_dir / f"{page_dir.name}{PAGE_SUFFIX}"
     if not page_file.exists():
-        template = f"# {today:%A, %B %d, %Y}\n\n"
-        page_file.write_text(template, encoding="utf-8")
+        content = template if template is not None else f"# {today:%A, %B %d, %Y}\n\n"
+        page_file.write_text(content, encoding="utf-8")
     return page_file
 
 
