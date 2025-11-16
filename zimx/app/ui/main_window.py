@@ -44,6 +44,8 @@ from zimx.server.adapters.files import PAGE_SUFFIX
 from .markdown_editor import MarkdownEditor
 from .task_panel import TaskPanel
 from .jump_dialog import JumpToPageDialog
+from .toc_widget import TableOfContentsWidget
+from .heading_utils import heading_slug
 from .preferences_dialog import PreferencesDialog
 from .insert_link_dialog import InsertLinkDialog
 from .new_page_dialog import NewPageDialog
@@ -180,6 +182,19 @@ class MainWindow(QMainWindow):
         self.editor.set_font_point_size(self.font_size)
         # Load vi-mode block cursor preference
         self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
+        self.toc_widget = TableOfContentsWidget(self.editor.viewport())
+        self.toc_widget.set_headings([])
+        self.toc_widget.set_base_path("")
+        self.toc_widget.headingActivated.connect(self._toc_jump_to_position)
+        self.toc_widget.collapsedChanged.connect(self._on_toc_collapsed_changed)
+        self.toc_widget.linkCopied.connect(
+            lambda link: self.statusBar().showMessage(f"Copied link: {link}", 2500)
+        )
+        self.toc_widget.set_collapsed(config.load_toc_collapsed())
+        self.toc_widget.show()
+        self.editor.headingsChanged.connect(self.toc_widget.set_headings)
+        self.editor.viewportResized.connect(self._position_toc_widget)
+        self.editor.verticalScrollBar().valueChanged.connect(self._position_toc_widget)
 
         self.task_panel = TaskPanel()
         self.task_panel.refresh()
@@ -216,6 +231,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(0)
         layout.addWidget(splitter, 1)
         self.setCentralWidget(container)
+        self._position_toc_widget()
 
         # No overlay/indicator widgets; vi-mode is represented by editor cursor style
 
@@ -645,6 +661,9 @@ class MainWindow(QMainWindow):
             self.editor.moveCursor(QTextCursor.Start)
         # Always show editing status; vi-mode banner is separate
         display_path = path_to_colon(path) or path
+        if hasattr(self, "toc_widget"):
+            self.toc_widget.set_base_path(display_path)
+            self.editor.refresh_heading_outline()
         self.statusBar().showMessage(f"Editing {display_path}")
         self._update_window_title()
 
@@ -865,10 +884,13 @@ class MainWindow(QMainWindow):
         if not self.current_path:
             self.statusBar().showMessage("No page open to copy", 3000)
             return
-        self.editor.copy_current_page_link()
-        colon_path = path_to_colon(self.current_path)
-        if colon_path:
-            self.statusBar().showMessage(f"Copied link: {colon_path}", 3000)
+        copied = self.editor.copy_current_page_link()
+        if copied:
+            self.statusBar().showMessage(f"Copied link: {copied}", 3000)
+        else:
+            colon_path = path_to_colon(self.current_path)
+            if colon_path:
+                self.statusBar().showMessage(f"Copied link: {colon_path}", 3000)
 
     def _show_new_page_dialog(self) -> None:
         """Show dialog to create a new page with template selection (Ctrl+N)."""
@@ -970,11 +992,13 @@ class MainWindow(QMainWindow):
         
         # Save current page before following link to ensure it's indexed
         self._save_current_file(auto=True)
+        target_name, anchor = self._split_link_anchor(name)
+        anchor_slug = self._anchor_slug(anchor)
         
         # Check if this is a colon notation link (PageA:PageB:PageC)
-        if ":" in name:
+        if ":" in target_name:
             # Colon notation is absolute - convert directly to path
-            target_file = colon_to_path(name, self.vault_root_name)
+            target_file = colon_to_path(target_name, self.vault_root_name)
             if not target_file:
                 self._alert(f"Invalid link format: {name}")
                 return
@@ -986,16 +1010,17 @@ class MainWindow(QMainWindow):
             # Apply template to newly created page
             is_new_page = not file_existed
             if is_new_page:
-                page_name = name.split(":")[-1]  # Get last part for page name
+                page_name = target_name.split(":")[-1]  # Get last part for page name
                 self._apply_new_page_template(target_file, page_name)
             self._pending_selection = target_file
             self._populate_vault_tree()
             self._open_file(target_file, cursor_at_end=is_new_page)
+            self._scroll_to_anchor_slug(anchor_slug)
         else:
             # CamelCase link is relative to current page
             rel_current = Path(self.current_path.lstrip("/"))
             parent_folder = rel_current.parent
-            target_rel = parent_folder / name if parent_folder.parts else Path(name)
+            target_rel = parent_folder / target_name if parent_folder.parts else Path(target_name)
             rel_string = target_rel.as_posix()
             folder_path = f"/{rel_string}" if rel_string else "/"
             target_file = self._folder_to_file_path(folder_path)
@@ -1008,10 +1033,11 @@ class MainWindow(QMainWindow):
             # Apply template to newly created page
             is_new_page = not file_existed
             if is_new_page:
-                self._apply_new_page_template(target_file, name)
+                self._apply_new_page_template(target_file, target_name)
             self._pending_selection = target_file
             self._populate_vault_tree()
             self._open_file(target_file, cursor_at_end=is_new_page)
+            self._scroll_to_anchor_slug(anchor_slug)
 
     def _adjust_font_size(self, delta: int) -> None:
         new_size = max(10, min(36, self.font_size + delta))
@@ -1381,6 +1407,51 @@ class MainWindow(QMainWindow):
         last_line = trimmed.splitlines()[-1]
         return last_line.strip() == "---"
 
+    def _split_link_anchor(self, target: str) -> tuple[str, Optional[str]]:
+        if "#" not in target:
+            return target, None
+        base, anchor = target.split("#", 1)
+        return base or "", anchor or None
+
+    def _anchor_slug(self, anchor: Optional[str]) -> Optional[str]:
+        if not anchor:
+            return None
+        return heading_slug(anchor)
+
+    def _scroll_to_anchor_slug(self, slug: Optional[str]) -> None:
+        if not slug:
+            return
+
+        def jump() -> None:
+            if not self.editor.jump_to_anchor(slug):
+                self.statusBar().showMessage(f"Heading not found for anchor #{slug}", 4000)
+
+        QTimer.singleShot(0, jump)
+
+    def _toc_jump_to_position(self, position: int) -> None:
+        cursor = self.editor.textCursor()
+        cursor.setPosition(max(0, position))
+        self.editor.setFocus()
+        self.editor.setTextCursor(cursor)
+        self.editor.centerCursor()
+
+    def _on_toc_collapsed_changed(self, collapsed: bool) -> None:
+        config.save_toc_collapsed(collapsed)
+        self._position_toc_widget()
+
+    def _position_toc_widget(self) -> None:
+        if not hasattr(self, "toc_widget") or not self.toc_widget:
+            return
+        viewport = self.editor.viewport()
+        if viewport is None:
+            return
+        margin = 12
+        width = self.toc_widget.width()
+        x = max(margin, viewport.width() - width - margin)
+        y = margin
+        self.toc_widget.move(x, y)
+        self.toc_widget.raise_()
+
     def _navigate_hierarchy_up(self) -> None:
         """Navigate up in page hierarchy (Alt+Up): Move up one level, stop at root."""
         if not self.current_path:
@@ -1641,6 +1712,10 @@ class MainWindow(QMainWindow):
             # This is our custom "delete line" command
             if hasattr(target, 'textCursor'):
                 cursor = target.textCursor()
+                if cursor.hasSelection():
+                    cursor.removeSelectedText()
+                    target.setTextCursor(cursor)
+                    return
                 # Move to start of the current line
                 cursor.movePosition(QTextCursor.StartOfLine)
                 # Select to the start of the next line (includes newline)
@@ -1717,6 +1792,10 @@ class MainWindow(QMainWindow):
         self.editor.set_vi_mode(self._vi_mode_active)
 
     # (Removed move/resize overlays; not used)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._position_toc_widget()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._save_current_file(auto=True)

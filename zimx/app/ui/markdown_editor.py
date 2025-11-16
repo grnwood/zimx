@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QMimeData, Qt, QRegularExpression, Signal, QUrl, QPoint
+from PySide6.QtCore import QEvent, QMimeData, Qt, QRegularExpression, Signal, QUrl, QPoint, QTimer
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -21,6 +21,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QTextEdit, QMenu, QInputDialog, QDialog
 from .path_utils import path_to_colon, colon_to_path
+from .heading_utils import heading_slug
 
 
 TAG_PATTERN = QRegularExpression(r"@(\w+)")
@@ -29,16 +30,21 @@ TASK_LINE_PATTERN = re.compile(r"^(\s*)\(([ xX])\)(\s+)", re.MULTILINE)
 DISPLAY_TASK_PATTERN = re.compile(r"^(\s*)([☐☑])(\s+)", re.MULTILINE)
 # Plus-prefixed link pattern: +PageName or +Projects (any word after +)
 CAMEL_LINK_PATTERN = QRegularExpression(r"\+(?P<link>[A-Za-z]\w*)")
-# Colon link pattern: PageA:PageB:PageC (word chars, digits, underscores separated by colons)
-COLON_LINK_PATTERN = QRegularExpression(r"(?P<link>[\w]+(?::[\w]+)+)")
-# Markdown-style link with colon target: [Text](PageA:PageB:PageC)
+# Colon link pattern with optional anchor: PageA:PageB#heading-12
+COLON_LINK_PATTERN = QRegularExpression(r"(?P<link>[\w]+(?::[\w]+)+(?:#[A-Za-z0-9_-]+)?)")
+# Markdown-style link with colon target (optionally with anchor): [Text](PageA:PageB#anchor)
 # Allow optional whitespace (including newlines) between ]( 
-MARKDOWN_COLON_LINK_PATTERN = QRegularExpression(r"\[(?P<text>[^\]]+)\]\s*\((?P<link>[\w]+(?::[\w]+)+)\)")
+MARKDOWN_COLON_LINK_PATTERN = QRegularExpression(
+    r"\[(?P<text>[^\]]+)\]\s*\((?P<link>[\w]+(?::[\w]+)+(?:#[A-Za-z0-9_-]+)?)\)"
+)
 # Storage pattern for markdown links (using Python re for easier replacement)
 # DOTALL flag makes . match newlines, \s* allows whitespace including newlines
-MARKDOWN_LINK_STORAGE_PATTERN = re.compile(r"\[(?P<text>[^\]]+)\]\s*\((?P<link>[\w]+(?::[\w]+)+)\)", re.MULTILINE | re.DOTALL)
+MARKDOWN_LINK_STORAGE_PATTERN = re.compile(
+    r"\[(?P<text>[^\]]+)\]\s*\((?P<link>[\w]+(?::[\w]+)+(?:#[A-Za-z0-9_-]+)?)\)",
+    re.MULTILINE | re.DOTALL,
+)
 # Display pattern for rendered links (sentinel + null separator + label)
-MARKDOWN_LINK_DISPLAY_PATTERN = re.compile(r"\x00(?P<link>[\w:]+)\x00(?P<text>[^\x00]+)")
+MARKDOWN_LINK_DISPLAY_PATTERN = re.compile(r"\x00(?P<link>[\w:#\-]+)\x00(?P<text>[^\x00]+)")
 HEADING_MAX_LEVEL = 5
 HEADING_SENTINEL_BASE = 0xE000
 HEADING_MARK_PATTERN = re.compile(r"^(\s*)(#{1,5})(\s+)(.+)$", re.MULTILINE)
@@ -244,6 +250,8 @@ class MarkdownEditor(QTextEdit):
     cursorMoved = Signal(int)
     linkActivated = Signal(str)
     linkHovered = Signal(str)  # Emits link path when hovering/cursor over a link
+    headingsChanged = Signal(list)
+    viewportResized = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -253,6 +261,7 @@ class MarkdownEditor(QTextEdit):
         self._vi_block_cursor_enabled: bool = True  # default on, controlled by preferences
         self._vi_saved_flash_time: Optional[int] = None
         self._vi_last_cursor_pos: int = -1
+        self._heading_outline: list[dict] = []
         self.setPlaceholderText("Open a Markdown file to begin editing…")
         self.setAcceptRichText(True)
         self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(" "))
@@ -263,6 +272,11 @@ class MarkdownEditor(QTextEdit):
         self._display_guard = False
         self.textChanged.connect(self._enforce_display_symbols)
         self.viewport().installEventFilter(self)
+        self._heading_timer = QTimer(self)
+        self._heading_timer.setInterval(250)
+        self._heading_timer.setSingleShot(True)
+        self._heading_timer.timeout.connect(self._emit_heading_outline)
+        self.textChanged.connect(self._schedule_heading_outline)
         # Enable mouse tracking for hover cursor changes
         self.viewport().setMouseTracking(True)
 
@@ -302,6 +316,7 @@ class MarkdownEditor(QTextEdit):
         self.setPlainText(display)
         self._render_images(display)
         self._display_guard = False
+        self._schedule_heading_outline()
 
     def to_markdown(self) -> str:
         markdown = self._doc_to_markdown()
@@ -773,12 +788,13 @@ class MarkdownEditor(QTextEdit):
             # Force full document re-render to apply display transformation
             self._refresh_display()
     
-    def _copy_link_to_location(self, link_text: str | None = None) -> None:
+    def _copy_link_to_location(self, link_text: str | None = None, anchor_slug: Optional[str] = None) -> Optional[str]:
         """Copy a link location as colon-notation to clipboard.
-        
+
         Args:
             link_text: The link text (e.g., 'PageName' from +PageName, or 'PageA:PageB:PageC' from colon link).
                       If None, copies the current page's location.
+            anchor_slug: Optional heading slug to append when copying current page.
         """
         if link_text:
             # If it's a colon notation link, use it as-is
@@ -787,7 +803,7 @@ class MarkdownEditor(QTextEdit):
             else:
                 # It's a relative link (+PageName), resolve it relative to current page
                 if not self._current_path:
-                    return
+                    return None
                 # Get current page's colon path
                 current_colon = path_to_colon(self._current_path)
                 if not current_colon:
@@ -799,16 +815,21 @@ class MarkdownEditor(QTextEdit):
         else:
             # Copy current page's location
             if not self._current_path:
-                return
+                return None
             colon_path = path_to_colon(self._current_path)
-        
+
         if colon_path:
+            if anchor_slug and "#" not in colon_path:
+                colon_path = f"{colon_path}#{anchor_slug}"
             clipboard = QGuiApplication.clipboard()
             clipboard.setText(colon_path)
+            return colon_path
+        return None
 
-    def copy_current_page_link(self) -> None:
-        """Public method to copy current page's link to clipboard (called by Ctrl+Shift+L)."""
-        self._copy_link_to_location(link_text=None)
+    def copy_current_page_link(self) -> Optional[str]:
+        """Copy current page (or heading) link and return the copied text."""
+        slug = self.current_heading_slug()
+        return self._copy_link_to_location(link_text=None, anchor_slug=slug)
 
     def _emit_cursor(self) -> None:
         cursor = self.textCursor()
@@ -888,6 +909,10 @@ class MarkdownEditor(QTextEdit):
                     self._update_vi_cursor()
         return super().eventFilter(obj, event)
 
+    def resizeEvent(self, event):  # type: ignore[override]
+        super().resizeEvent(event)
+        self.viewportResized.emit()
+
     def _to_display(self, text: str) -> str:
         def repl(match: re.Match[str]) -> str:
             symbol = "☑" if match.group(2).strip().lower() == "x" else "☐"
@@ -936,7 +961,63 @@ class MarkdownEditor(QTextEdit):
         link = match.group("link")
         text = match.group("text")
         return f"[{text}]({link})"
-    
+
+    def refresh_heading_outline(self) -> None:
+        """Force computation of heading outline immediately."""
+        self._emit_heading_outline()
+
+    def _schedule_heading_outline(self) -> None:
+        if self._display_guard:
+            return
+        self._heading_timer.start()
+
+    def _emit_heading_outline(self) -> None:
+        outline: list[dict] = []
+        block = self.document().firstBlock()
+        while block.isValid():
+            text = block.text()
+            stripped = text.lstrip()
+            if stripped:
+                level = heading_level_from_char(stripped[0])
+                if level:
+                    title = stripped[1:].strip()
+                    cursor = QTextCursor(block)
+                    outline.append(
+                        {
+                            "level": level,
+                            "title": title,
+                            "line": block.blockNumber() + 1,
+                            "position": cursor.position(),
+                        }
+                    )
+            block = block.next()
+        self._heading_outline = outline
+        self.headingsChanged.emit(outline)
+
+    def jump_to_anchor(self, anchor: str) -> bool:
+        slug = heading_slug(anchor)
+        if not slug:
+            return False
+        for entry in self._heading_outline:
+            if heading_slug(entry.get("title", "")) == slug:
+                cursor = self.textCursor()
+                cursor.setPosition(int(entry.get("position", 0)))
+                self.setTextCursor(cursor)
+                self.centerCursor()
+                return True
+        return False
+
+    def current_heading_slug(self) -> Optional[str]:
+        """Return slug of heading on current line, if any."""
+        if not self._heading_outline:
+            return None
+        line_no = self.textCursor().blockNumber() + 1
+        for entry in self._heading_outline:
+            if int(entry.get("line", 0)) == line_no:
+                slug = heading_slug(entry.get("title", ""))
+                return slug or None
+        return None
+
     def _refresh_display(self) -> None:
         """Force full document re-render to apply display transformations.
         
@@ -954,6 +1035,7 @@ class MarkdownEditor(QTextEdit):
         self.setTextCursor(new_cursor)
         self._render_images(display_text)
         self._display_guard = False
+        self._schedule_heading_outline()
 
     def _enforce_display_symbols(self) -> None:
         """Safely render display symbols on the current line only.
@@ -1009,6 +1091,7 @@ class MarkdownEditor(QTextEdit):
             self.setTextCursor(c)
         finally:
             self._display_guard = False
+        self._schedule_heading_outline()
 
     def _restore_cursor_position(self, position: int) -> None:
         cursor = self.textCursor()

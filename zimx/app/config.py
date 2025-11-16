@@ -49,6 +49,22 @@ def save_vi_block_cursor_enabled(enabled: bool) -> None:
     _update_global_config({"vi_block_cursor": enabled})
 
 
+def load_toc_collapsed() -> bool:
+    """Return whether the table-of-contents panel should start collapsed."""
+    if not GLOBAL_CONFIG.exists():
+        return False
+    try:
+        payload = json.loads(GLOBAL_CONFIG.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    return bool(payload.get("toc_collapsed", False))
+
+
+def save_toc_collapsed(collapsed: bool) -> None:
+    """Persist the collapsed state of the table-of-contents panel."""
+    _update_global_config({"toc_collapsed": bool(collapsed)})
+
+
 def get_page_hash(path: str) -> Optional[str]:
     """Return last stored content hash for a page path, or None."""
     conn = _get_conn()
