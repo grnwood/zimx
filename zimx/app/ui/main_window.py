@@ -635,10 +635,11 @@ class MainWindow(QMainWindow):
         updated = indexer.index_page(path, content)
         if updated:
             self.task_panel.refresh()
-        # Position cursor at end for newly templated pages, otherwise at start
-        if cursor_at_end:
+        move_cursor_to_end = cursor_at_end or self._should_focus_hr_tail(content)
+        if move_cursor_to_end:
             cursor = self.editor.textCursor()
-            cursor.movePosition(QTextCursor.End)
+            display_length = len(self.editor.toPlainText())
+            cursor.setPosition(display_length)
             self.editor.setTextCursor(cursor)
         else:
             self.editor.moveCursor(QTextCursor.Start)
@@ -1118,7 +1119,7 @@ class MainWindow(QMainWindow):
             # View Page Source (open underlying txt in external editor)
             file_path = open_path or self._folder_to_file_path(path)
             if file_path:
-                view_src = menu.addAction("View Page Source")
+                view_src = menu.addAction("Edit Page Source")
                 view_src.triggered.connect(lambda checked=False, fp=file_path: self._view_page_source(fp))
         else:
             menu.addAction("New Page", lambda checked=False: self._start_inline_creation("/", global_pos, None))
@@ -1139,7 +1140,7 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(abs_path))
         # Block with modal until user confirms they're done
         dlg = QMessageBox(self)
-        dlg.setWindowTitle("View Page Source")
+        dlg.setWindowTitle("Edit Page Source")
         dlg.setText("File being edited outside of ZimX.\nPress OK when finished.")
         dlg.setIcon(QMessageBox.Information)
         dlg.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
@@ -1366,6 +1367,19 @@ class MainWindow(QMainWindow):
         finally:
             self._suspend_selection_open = False
         self._open_file(target_path, add_to_history=False)
+
+    def _should_focus_hr_tail(self, content: str) -> bool:
+        """Return True if cursor should jump to trailing newline after a horizontal rule."""
+        if not content:
+            return False
+        # Skip expensive work on very large files
+        if len(content.encode("utf-8")) > 100_000:
+            return False
+        trimmed = content.rstrip("\n")
+        if not trimmed:
+            return False
+        last_line = trimmed.splitlines()[-1]
+        return last_line.strip() == "---"
 
     def _navigate_hierarchy_up(self) -> None:
         """Navigate up in page hierarchy (Alt+Up): Move up one level, stop at root."""

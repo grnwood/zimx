@@ -332,9 +332,7 @@ class MarkdownEditor(QTextEdit):
             
         cursor.insertText(link_text)
         self.setTextCursor(cursor)
-        
-        # Force full document re-render to apply display transformation
-        # This handles multi-line patterns that _enforce_display_symbols can't
+        # Full refresh ensures markdown links convert to hidden-display format immediately.
         self._refresh_display()
 
     def toggle_task_state(self) -> None:

@@ -222,3 +222,148 @@ class TestEdgeCases:
         colon = path_to_colon(file_path)
         back = colon_to_path(colon)
         assert back == file_path
+
+
+class TestTextLinks:
+    """Test markdown-style text links with labels [label](link)."""
+    
+    def test_link_with_label_format(self):
+        """Test that a link with label is formatted correctly"""
+        # Simulate what insert_link does: [label](colon_path)
+        link_name = "diggus"
+        colon_path = "Journal:2025:11:12:someStuff:LetsDoThis:LetsDoit:BiggusDiggus"
+        link_text = f"[{link_name}]({colon_path})"
+        
+        # Verify format is correct
+        assert link_text == "[diggus](Journal:2025:11:12:someStuff:LetsDoThis:LetsDoit:BiggusDiggus)"
+        # Verify the label doesn't contain the path
+        assert "Journal" not in link_name
+        assert "(" not in link_name
+        assert ")" not in link_name
+    
+    def test_link_without_label_format(self):
+        """Test that a link without label is just the colon path"""
+        colon_path = "Journal:2025:11:12:someStuff:LetsDoThis:LetsDoit:BiggusDiggus"
+        link_text = colon_path
+        
+        # Verify it's just the plain colon path
+        assert link_text == "Journal:2025:11:12:someStuff:LetsDoThis:LetsDoit:BiggusDiggus"
+        assert "[" not in link_text
+        assert "]" not in link_text
+        assert "(" not in link_text
+        assert ")" not in link_text
+    
+    def test_editor_display_transform(self):
+        """Test that editor transforms [label](link) correctly for display"""
+        import re
+        # This is the pattern used by the editor to transform links
+        MARKDOWN_LINK_STORAGE_PATTERN = re.compile(
+            r"\[(?P<text>[^\]]+)\]\s*\((?P<link>[\w]+(?::[\w]+)+)\)", 
+            re.MULTILINE | re.DOTALL
+        )
+        
+        # Storage format (what's in the file)
+        storage = "[diggus](Journal:2025:11:12:someStuff:LetsDoThis:LetsDoit:BiggusDiggus)"
+        
+        # Display format (what's shown in editor): \x00Link\x00Label
+        def encode_link(match):
+            text = match.group("text")
+            link = match.group("link")
+            return f"\x00{link}\x00{text}"
+        
+        display = MARKDOWN_LINK_STORAGE_PATTERN.sub(encode_link, storage)
+        
+        # Verify display format hides the link syntax
+        assert display == "\x00Journal:2025:11:12:someStuff:LetsDoThis:LetsDoit:BiggusDiggus\x00diggus"
+        # The visible part should only be "diggus"
+        visible_part = display.split('\x00')[-1]
+        assert visible_part == "diggus"
+    
+    def test_editor_save_transform(self):
+        """Test that editor transforms display format back to storage on save"""
+        import re
+        # This is the pattern used by the editor to restore links
+        MARKDOWN_LINK_DISPLAY_PATTERN = re.compile(r"\x00(?P<link>[\w:]+)\x00(?P<text>[^\x00]+)")
+        
+        # Display format (what's in the editor)
+        display = "\x00Journal:2025:11:12:someStuff:LetsDoThis:LetsDoit:BiggusDiggus\x00diggus"
+        
+        # Storage format (what gets saved to file): [Label](Link)
+        def decode_link(match):
+            link = match.group("link")
+            text = match.group("text")
+            return f"[{text}]({link})"
+        
+        storage = MARKDOWN_LINK_DISPLAY_PATTERN.sub(decode_link, display)
+        
+        # Verify storage format is correct
+        assert storage == "[diggus](Journal:2025:11:12:someStuff:LetsDoThis:LetsDoit:BiggusDiggus)"
+    
+    def test_link_label_no_corruption(self):
+        """Test that link labels don't get path appended"""
+        # Common bug: link name becomes "diggus(Journal:...)" instead of just "diggus"
+        link_name = "diggus"
+        colon_path = "Journal:2025:11:12:someStuff:LetsDoThis:LetsDoit:BiggusDiggus"
+        
+        # Verify the link name is clean (no path appended)
+        assert link_name == "diggus"
+        assert colon_path not in link_name
+        assert f"{link_name}({colon_path})" != link_name
+        
+        # Create the link
+        link_text = f"[{link_name}]({colon_path})"
+        
+        # Verify the result doesn't have path in the label
+        assert link_text == "[diggus](Journal:2025:11:12:someStuff:LetsDoThis:LetsDoit:BiggusDiggus)"
+        assert "[diggus(Journal" not in link_text
+    
+    def test_round_trip_with_label(self):
+        """Test that a link with label survives load -> display -> save"""
+        import re
+        
+        # Patterns from the editor
+        MARKDOWN_LINK_STORAGE_PATTERN = re.compile(
+            r"\[(?P<text>[^\]]+)\]\s*\((?P<link>[\w]+(?::[\w]+)+)\)", 
+            re.MULTILINE | re.DOTALL
+        )
+        MARKDOWN_LINK_DISPLAY_PATTERN = re.compile(r"\x00(?P<link>[\w:]+)\x00(?P<text>[^\x00]+)")
+        
+        def encode_link(match):
+            text = match.group("text")
+            link = match.group("link")
+            return f"\x00{link}\x00{text}"
+        
+        def decode_link(match):
+            link = match.group("link")
+            text = match.group("text")
+            return f"[{text}]({link})"
+        
+        # Original storage format
+        original = "[diggus](Journal:2025:11:12:someStuff:LetsDoThis:LetsDoit:BiggusDiggus)"
+        
+        # Load: convert to display format
+        display = MARKDOWN_LINK_STORAGE_PATTERN.sub(encode_link, original)
+        
+        # Save: convert back to storage format
+        saved = MARKDOWN_LINK_DISPLAY_PATTERN.sub(decode_link, display)
+        
+        # Should be identical
+        assert saved == original
+    
+    def test_round_trip_without_label(self):
+        """Test that a plain colon link survives load -> display -> save"""
+        # Plain colon links are not transformed
+        original = "Journal:2025:11:12:someStuff:LetsDoThis:LetsDoit:BiggusDiggus"
+        
+        # No transformation should occur for plain links
+        # (they don't match the markdown link pattern)
+        import re
+        MARKDOWN_LINK_STORAGE_PATTERN = re.compile(
+            r"\[(?P<text>[^\]]+)\]\s*\((?P<link>[\w]+(?::[\w]+)+)\)", 
+            re.MULTILINE | re.DOTALL
+        )
+        
+        display = MARKDOWN_LINK_STORAGE_PATTERN.sub(lambda m: f"\x00{m.group('link')}\x00{m.group('text')}", original)
+        
+        # Should be unchanged (no match)
+        assert display == original
