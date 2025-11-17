@@ -1,0 +1,25 @@
+# Sprint Planning Overview
+
+## Current Sprint
+
+Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nunc nec turpis vel metus volutpat sagittis.
+
+### Sprint Goals
+
+Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.
+
+( ) Define sprint objectives @sprint @planning <2025-11-21
+
+#### Team Capacity
+
+Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.
+
+##### Individual Velocity
+
+Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+
+## Backlog Refinement
+
+Sed ut perspiciatis unde omnis iste natus error sit voluptatem accusantium doloremque laudantium.
+
+( ) Groom product backlog @backlog <2025-11-23

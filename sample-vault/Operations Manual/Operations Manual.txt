@@ -1,0 +1,49 @@
+# Operations Manual
+
+## Standard Procedures
+
+Lorem ipsum dolor sit amet, consectetur adipiscing elit. Quisque velit nisi pretium ut lacinia in elementum id enim.
+
+### Daily Operations
+
+Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.
+
+( ) Review daily operations checklist @operations <2025-11-20
+
+#### Opening Procedures
+
+Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.
+
+##### System Checks
+
+Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+
+( ) Perform system health checks @monitoring <2025-11-21
+
+##### Shift Handoff
+
+Sed ut perspiciatis unde omnis iste natus error sit voluptatem accusantium doloremque laudantium.
+
+## Emergency Protocols
+
+Totam rem aperiam, eaque ipsa quae ab illo inventore veritatis et quasi architecto beatae vitae dicta sunt explicabo.
+
+### Incident Management
+
+Nemo enim ipsam voluptatem quia voluptas sit aspernatur aut odit aut fugit, sed quia consequuntur magni dolores.
+
+( ) Update emergency contact list @operations <2025-11-25
+
+#### Escalation Paths
+
+Neque porro quisquam est, qui dolorem ipsum quia dolor sit amet, consectetur, adipisci velit.
+
+##### On-Call Rotation
+
+Sed quia non numquam eius modi tempora incidunt ut labore et dolore magnam aliquam quaerat voluptatem.
+
+### Disaster Recovery
+
+Ut aut reiciendis voluptatibus maiores alias consequatur aut perferendis doloribus asperiores repellat.
+
+( ) Test disaster recovery plan @dr <2025-12-01

@@ -541,7 +541,14 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Vault: {self.vault_root}")
         self._update_window_title()
         self._populate_vault_tree()
-        self._reindex_vault()
+        
+        # Check if index is empty and rebuild if needed
+        if config.is_vault_index_empty():
+            self.statusBar().showMessage("Building initial index...", 0)
+            self._reindex_vault(show_progress=True)
+        else:
+            self._reindex_vault()
+        
         self._load_bookmarks()
         if self.vault_root:
             self.right_panel.set_vault_root(self.vault_root)
@@ -1258,6 +1265,7 @@ class MainWindow(QMainWindow):
     def _open_preferences(self) -> None:
         """Open the preferences dialog."""
         dlg = PreferencesDialog(self)
+        dlg.rebuildIndexRequested.connect(lambda: self._reindex_vault(show_progress=True))
         if dlg.exec() == QDialog.Accepted:
             # Reload vi-mode cursor setting and apply to editor
             self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
@@ -1610,13 +1618,18 @@ class MainWindow(QMainWindow):
         self.tree_view.setStyleSheet(tree_style)
 
     def _goto_line(self, line: int, select_line: bool = False) -> None:
-        cursor = self.editor.textCursor()
-        cursor.movePosition(QTextCursor.Start)
-        if line > 1:
-            cursor.movePosition(QTextCursor.Down, QTextCursor.MoveAnchor, line - 1)
-        if select_line:
-            cursor.select(QTextCursor.LineUnderCursor)
-        self.editor.setTextCursor(cursor)
+        # Convert line number (1-indexed) to block number (0-indexed)
+        block_num = max(0, line - 1)
+        doc = self.editor.document()
+        block = doc.findBlockByNumber(block_num)
+        
+        if block.isValid():
+            cursor = QTextCursor(block)
+            # Move to start of block content (skip whitespace if selecting line)
+            if select_line:
+                cursor.select(QTextCursor.LineUnderCursor)
+            self.editor.setTextCursor(cursor)
+            self.editor.ensureCursorVisible()
 
     def _ensure_page_folder(self, folder_path: str, allow_existing: bool = False) -> bool:
         payload = {"path": folder_path, "is_dir": True}
@@ -1982,7 +1995,7 @@ class MainWindow(QMainWindow):
         cursor.setPosition(max(0, position))
         self.editor.setFocus()
         self.editor.setTextCursor(cursor)
-        self.editor.centerCursor()
+        self.editor.ensureCursorVisible()
 
     def _on_toc_collapsed_changed(self, collapsed: bool) -> None:
         config.save_toc_collapsed(collapsed)
@@ -2065,18 +2078,94 @@ class MainWindow(QMainWindow):
         self.tree_view.setCurrentIndex(target)
         self.tree_view.scrollTo(target)
 
-    def _reindex_vault(self) -> None:
+    def _reindex_vault(self, show_progress: bool = False) -> None:
+        """Reindex all pages in the vault."""
         if not self.vault_root or not config.has_active_vault():
             return
+        
+        if show_progress:
+            self.statusBar().showMessage("Rebuilding index...", 0)
+        
         root = Path(self.vault_root)
-        for path in root.rglob(f"*{PAGE_SUFFIX}"):
-            rel = f"/{path.relative_to(root).as_posix()}"
+        txt_files = sorted(root.rglob(f"*{PAGE_SUFFIX}"))
+        
+        for txt_file in txt_files:
+            rel_path = txt_file.relative_to(root)
+            path_str = f"/{rel_path.as_posix()}"
+            
             try:
-                content = path.read_text(encoding="utf-8")
-            except OSError:
+                content = txt_file.read_text(encoding="utf-8")
+                
+                # Extract title (first line starting with #)
+                title = txt_file.stem
+                for line in content.splitlines():
+                    if line.startswith('# '):
+                        title = line[2:].strip()
+                        break
+                
+                # Extract tags (words starting with @)
+                tags = []
+                for word in content.split():
+                    if word.startswith('@') and len(word) > 1:
+                        tag = word[1:].rstrip('.,;:!?')
+                        if tag and tag not in tags:
+                            tags.append(tag)
+                
+                # Extract links - use indexer for this
+                links = []
+                
+                # Extract tasks
+                tasks = []
+                for line_num, line in enumerate(content.splitlines(), 1):
+                    stripped = line.strip()
+                    if stripped.startswith('( )'):
+                        task_text = stripped[4:].strip()
+                        
+                        # Extract task tags
+                        task_tags = []
+                        task_words = task_text.split()
+                        for word in task_words:
+                            if word.startswith('@') and len(word) > 1:
+                                tag = word[1:].rstrip('.,;:!?')
+                                if tag:
+                                    task_tags.append(tag)
+                        
+                        # Extract due date (date after <)
+                        due_date = None
+                        for word in task_words:
+                            if word.startswith('<') and len(word) > 1:
+                                due_date = word[1:].rstrip('.,;:!?')
+                                break
+                        
+                        task_id = f"{path_str}:{line_num}"
+                        task = {
+                            "id": task_id,
+                            "line": line_num,
+                            "text": task_text,
+                            "status": "open",
+                            "priority": None,
+                            "due": due_date,
+                            "start": None,
+                            "tags": task_tags,
+                        }
+                        tasks.append(task)
+                
+                # Update page index
+                config.update_page_index(
+                    path=path_str,
+                    title=title,
+                    tags=tags,
+                    links=links,
+                    tasks=tasks,
+                )
+            except Exception:
                 continue
-            indexer.index_page(rel, content)
+        
         self.right_panel.refresh_tasks()
+        
+        if show_progress:
+            page_count = len(txt_files)
+            self.statusBar().showMessage(f"Index rebuilt: {page_count} pages", 3000)
 
     # --- Utilities -----------------------------------------------------
     def _alert(self, message: str) -> None:

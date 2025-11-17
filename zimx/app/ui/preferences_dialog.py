@@ -1,17 +1,22 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QCheckBox, QDialogButtonBox, QLabel
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QCheckBox, QDialogButtonBox, 
+    QLabel, QPushButton, QHBoxLayout
+)
 
 from zimx.app import config
 
 
 class PreferencesDialog(QDialog):
+    rebuildIndexRequested = Signal()
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Preferences")
         self.setModal(True)
-        self.resize(400, 200)
+        self.resize(450, 250)
         
         layout = QVBoxLayout(self)
         
@@ -27,6 +32,27 @@ class PreferencesDialog(QDialog):
         )
         layout.addWidget(self.vi_block_cursor_checkbox)
         
+        layout.addSpacing(15)
+        
+        # Vault maintenance section
+        vault_section = QLabel("<b>Vault Maintenance</b>")
+        layout.addWidget(vault_section)
+        
+        rebuild_layout = QHBoxLayout()
+        rebuild_label = QLabel("Rebuild search index:")
+        rebuild_layout.addWidget(rebuild_label)
+        
+        self.rebuild_button = QPushButton("Rebuild Index")
+        self.rebuild_button.setToolTip(
+            "Rebuild the search index for all pages in the vault.\n"
+            "Use this if search results are incorrect or after manual file changes."
+        )
+        self.rebuild_button.clicked.connect(self._on_rebuild_clicked)
+        rebuild_layout.addWidget(self.rebuild_button)
+        rebuild_layout.addStretch(1)
+        
+        layout.addLayout(rebuild_layout)
+        
         layout.addStretch(1)
         
         # OK/Cancel buttons
@@ -34,6 +60,12 @@ class PreferencesDialog(QDialog):
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
+    
+    def _on_rebuild_clicked(self):
+        """Handle rebuild index button click."""
+        self.rebuildIndexRequested.emit()
+        self.rebuild_button.setEnabled(False)
+        self.rebuild_button.setText("Rebuilding...")
     
     def accept(self):
         """Save preferences when OK is clicked."""

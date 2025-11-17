@@ -453,6 +453,19 @@ def has_active_vault() -> bool:
     return _ACTIVE_CONN is not None
 
 
+def is_vault_index_empty() -> bool:
+    """Check if the vault index is empty (no pages indexed)."""
+    conn = _get_conn()
+    if not conn:
+        return True
+    try:
+        cur = conn.execute("SELECT COUNT(*) FROM pages")
+        count = cur.fetchone()[0]
+        return count == 0
+    except sqlite3.OperationalError:
+        return True
+
+
 def _get_conn() -> Optional[sqlite3.Connection]:
     return _ACTIVE_CONN
 

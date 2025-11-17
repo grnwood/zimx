@@ -1,0 +1,48 @@
+# Human Resources
+
+## Recruitment
+
+Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla porttitor accumsan tincidunt vivamus magna justo.
+
+### Job Postings
+Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.
+
+( ) Post senior developer position @hiring <2025-11-24
+
+#### Interview Process
+
+Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.
+
+##### Screening Calls
+
+Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+
+( ) Schedule candidate interviews @recruiting <2025-11-27
+
+##### Technical Assessments
+
+Sed ut perspiciatis unde omnis iste natus error sit voluptatem accusantium doloremque laudantium.
+
+## Employee Development
+
+Totam rem aperiam, eaque ipsa quae ab illo inventore veritatis et quasi architecto beatae vitae dicta sunt explicabo.
+
+### Performance Reviews
+
+Nemo enim ipsam voluptatem quia voluptas sit aspernatur aut odit aut fugit, sed quia consequuntur magni dolores.
+
+( ) Conduct Q4 performance reviews @hr <2025-12-12
+
+#### Goal Setting
+
+Neque porro quisquam est, qui dolorem ipsum quia dolor sit amet, consectetur, adipisci velit.
+
+##### Career Paths
+
+Sed quia non numquam eius modi tempora incidunt ut labore et dolore magnam aliquam quaerat voluptatem.
+
+### Benefits Administration
+
+Ut aut reiciendis voluptatibus maiores alias consequatur aut perferendis doloribus asperiores repellat.
+
+( ) Update benefits enrollment @hr @benefits <2025-12-15
