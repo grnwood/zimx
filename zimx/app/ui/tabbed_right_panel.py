@@ -70,7 +70,18 @@ class TabbedRightPanel(QWidget):
     def set_current_page(self, page_path) -> None:
         """Update the attachments panel with the current page."""
         self.attachments_panel.set_page(page_path)
+        self._update_attachments_tab_label()
     
     def refresh_attachments(self) -> None:
         """Refresh the attachments panel."""
         self.attachments_panel.refresh()
+        self._update_attachments_tab_label()
+    
+    def _update_attachments_tab_label(self) -> None:
+        """Update the Attachments tab label with the count of attachments."""
+        count = self.attachments_panel.attachments_list.count()
+        # Find the attachments tab (should be index 1)
+        for i in range(self.tabs.count()):
+            if self.tabs.widget(i) == self.attachments_panel:
+                self.tabs.setTabText(i, f"Attachments ({count})")
+                break

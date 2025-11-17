@@ -28,6 +28,9 @@ TAG_PATTERN = QRegularExpression(r"@(\w+)")
 TASK_PATTERN = QRegularExpression(r"^(?P<indent>\s*)\((?P<state>[xX ])?\)(?P<body>\s+.*)$")
 TASK_LINE_PATTERN = re.compile(r"^(\s*)\(([ xX])\)(\s+)", re.MULTILINE)
 DISPLAY_TASK_PATTERN = re.compile(r"^(\s*)([☐☑])(\s+)", re.MULTILINE)
+# Bullet patterns for storage and display
+BULLET_STORAGE_PATTERN = re.compile(r"^(\s*)\* ", re.MULTILINE)
+BULLET_DISPLAY_PATTERN = re.compile(r"^(\s*)• ", re.MULTILINE)
 # Plus-prefixed link pattern: +PageName or +Projects (any word after +)
 CAMEL_LINK_PATTERN = QRegularExpression(r"\+(?P<link>[A-Za-z]\w*)")
 # Colon link pattern with optional anchor: PageA:PageB#heading-12
@@ -312,6 +315,8 @@ class MarkdownEditor(QTextEdit):
         self.viewport().setMouseTracking(True)
         # Enable drag and drop for file attachments
         self.setAcceptDrops(True)
+        # Configure scroll-past-end margin initially
+        QTimer.singleShot(0, self._apply_scroll_past_end_margin)
 
     def paintEvent(self, event):  # type: ignore[override]
         """Custom paint to draw horizontal rules as visual lines."""
@@ -350,6 +355,8 @@ class MarkdownEditor(QTextEdit):
         self._render_images(display)
         self._display_guard = False
         self._schedule_heading_outline()
+        # Ensure scroll-past-end margin is applied after new content
+        self._apply_scroll_past_end_margin()
 
     def to_markdown(self) -> str:
         markdown = self._doc_to_markdown()
@@ -467,50 +474,98 @@ class MarkdownEditor(QTextEdit):
         self.focusLost.emit()
 
     def keyPressEvent(self, event):  # type: ignore[override]
+        # Vi-mode: Shift+H selects left, Shift+L selects right (like Shift+Arrow)
+        if self._vi_mode_active:
+            if (event.modifiers() & Qt.ShiftModifier) and not (event.modifiers() & Qt.ControlModifier):
+                if event.key() == Qt.Key_H:
+                    c = self.textCursor()
+                    c.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor, 1)
+                    self.setTextCursor(c)
+                    event.accept()
+                    return
+                if event.key() == Qt.Key_L:
+                    c = self.textCursor()
+                    c.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, 1)
+                    self.setTextCursor(c)
+                    event.accept()
+                    return
+            # ctrl-shift-j: PageUp
+            if (event.modifiers() & Qt.ControlModifier) and (event.modifiers() & Qt.ShiftModifier):
+                if event.key() == Qt.Key_K:
+                    self._vi_page_up()
+                    event.accept()
+                    return
+                if event.key() == Qt.Key_J:
+                    self._vi_page_down()
+                    event.accept()
+                    return
+        # Bullet mode key handling
+        cursor = self.textCursor()
+        block = cursor.block()
+        text = block.text()
+        is_bullet, indent, content = self._is_bullet_line(text)
+        # Tab: indent bullet
+        if is_bullet and event.key() == Qt.Key_Tab and not event.modifiers():
+            if self._handle_bullet_indent():
+                event.accept()
+                return
+        # Shift-Tab: dedent bullet
+        if is_bullet and event.key() == Qt.Key_Backtab:
+            if self._handle_bullet_dedent():
+                event.accept()
+                return
+        # Enter: continue bullet or terminate if empty
+        if is_bullet and event.key() in (Qt.Key_Return, Qt.Key_Enter) and not event.modifiers():
+            if self._handle_bullet_enter():
+                event.accept()
+                return
+        # Esc: terminate bullet mode (remove bullet and all leading whitespace, move cursor to column 0)
+        if event.key() == Qt.Key_Escape:
+            cursor.beginEditBlock()
+            cursor.select(QTextCursor.LineUnderCursor)
+            cursor.removeSelectedText()
+            cursor.insertText("")
+            cursor.setPosition(block.position())
+            cursor.endEditBlock()
+            self.setTextCursor(cursor)
+            event.accept()
+            return
+        # ...existing code...
+        # When at end-of-buffer, Down should still scroll the viewport
+        if event.key() == Qt.Key_Down and not event.modifiers():
+            if self.textCursor().atEnd():
+                self._scroll_one_line_down()
+                event.accept()
+                return
         if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not event.modifiers():
             link = self._link_under_cursor()
             if link:
                 self.linkActivated.emit(link)
                 return
-        
-        # Handle arrow keys around display-format links to skip over hidden null bytes
-        if event.key() in (Qt.Key_Left, Qt.Key_Right) and not event.modifiers():
-            cursor = self.textCursor()
-            block = cursor.block()
-            text = block.text()
-            rel = cursor.position() - block.position()
-            
-            # Check if we're at a null byte boundary (display-format link)
-            if event.key() == Qt.Key_Right:
-                # Moving right: if at first null byte, skip to the visible label
-                if rel < len(text) and text[rel] == '\x00':
-                    # Find the second null byte (start of label)
-                    link_start = rel + 1
-                    link_end = text.find('\x00', link_start)
-                    if link_end > link_start:
-                        # Jump to the start of the visible label
-                        cursor.setPosition(block.position() + link_end + 1)
-                        self.setTextCursor(cursor)
-                        return
-            elif event.key() == Qt.Key_Left:
-                # Moving left: if just after label, skip back over entire hidden link structure
-                if rel > 0 and rel <= len(text):
-                    # Check if we're just after a display-format link
-                    # Look backward for pattern: \x00Link\x00Label[cursor_here]
-                    search_start = max(0, rel - 200)  # Look back up to 200 chars
-                    search_text = text[search_start:rel]
-                    # Find last occurrence of \x00 before cursor
-                    last_null = search_text.rfind('\x00')
-                    if last_null >= 0:
-                        # Check if there's another \x00 before it (the link start marker)
-                        second_last_null = search_text[:last_null].rfind('\x00')
-                        if second_last_null >= 0:
-                            # We found \x00...\x00 pattern, jump to before the first \x00
-                            cursor.setPosition(block.position() + search_start + second_last_null)
-                            self.setTextCursor(cursor)
-                            return
-        
+            # Handle bullet list continuation (non-bullet lines)
+            if self._handle_bullet_enter():
+                event.accept()
+                return
+            # For non-bullets: carry over leading indentation on new line
+            if self._handle_enter_indent_same_level():
+                event.accept()
+                return
+        # ...existing code...
         super().keyPressEvent(event)
+
+    def _vi_page_up(self):
+        # Simulate PageUp: move cursor up by visible lines
+        lines = max(1, self.viewport().height() // self.fontMetrics().lineSpacing())
+        c = self.textCursor()
+        c.movePosition(QTextCursor.Up, QTextCursor.MoveAnchor, lines)
+        self.setTextCursor(c)
+
+    def _vi_page_down(self):
+        # Simulate PageDown: move cursor down by visible lines
+        lines = max(1, self.viewport().height() // self.fontMetrics().lineSpacing())
+        c = self.textCursor()
+        c.movePosition(QTextCursor.Down, QTextCursor.MoveAnchor, lines)
+        self.setTextCursor(c)
 
     def keyReleaseEvent(self, event):  # type: ignore[override]
         super().keyReleaseEvent(event)
@@ -1020,6 +1075,10 @@ class MarkdownEditor(QTextEdit):
             self.setExtraSelections([])
             return
         cursor = self.textCursor()
+        # Don't draw block cursor overlay while there's an active selection
+        if cursor.hasSelection():
+            self.setExtraSelections([])
+            return
         block_cursor = QTextCursor(cursor)
         if not block_cursor.atEnd():
             # Select the character under the caret to form a block
@@ -1042,6 +1101,8 @@ class MarkdownEditor(QTextEdit):
     def resizeEvent(self, event):  # type: ignore[override]
         super().resizeEvent(event)
         self.viewportResized.emit()
+        # Reapply scroll-past-end margin on resize
+        self._apply_scroll_past_end_margin()
 
     def _to_display(self, text: str) -> str:
         def repl(match: re.Match[str]) -> str:
@@ -1052,6 +1113,8 @@ class MarkdownEditor(QTextEdit):
         converted = HEADING_MARK_PATTERN.sub(self._encode_heading, converted)
         # Transform markdown links: [Label](Link) → \x00Link\x00Label
         converted = MARKDOWN_LINK_STORAGE_PATTERN.sub(self._encode_link, converted)
+        # Transform bullets: * → •
+        converted = BULLET_STORAGE_PATTERN.sub(r"\1• ", converted)
         return converted
 
     def _from_display(self, text: str) -> str:
@@ -1062,7 +1125,10 @@ class MarkdownEditor(QTextEdit):
         # Restore markdown links first: \x00Link\x00Label → [Label](Link)
         restored = MARKDOWN_LINK_DISPLAY_PATTERN.sub(self._decode_link, text)
         restored = HEADING_DISPLAY_PATTERN.sub(self._decode_heading, restored)
-        return DISPLAY_TASK_PATTERN.sub(repl, restored)
+        restored = DISPLAY_TASK_PATTERN.sub(repl, restored)
+        # Restore bullets: • → *
+        restored = BULLET_DISPLAY_PATTERN.sub(r"\1* ", restored)
+        return restored
 
     def _encode_heading(self, match: re.Match[str]) -> str:
         indent, hashes, _, body = match.groups()
@@ -1166,6 +1232,8 @@ class MarkdownEditor(QTextEdit):
         self._render_images(display_text)
         self._display_guard = False
         self._schedule_heading_outline()
+        self._apply_scroll_past_end_margin()
+        self._apply_scroll_past_end_margin()
 
     def _enforce_display_symbols(self) -> None:
         """Safely render display symbols on the current line only.
@@ -1195,6 +1263,23 @@ class MarkdownEditor(QTextEdit):
 
         # 3) Markdown links: [Label](Link) → \x00Link\x00Label
         line = MARKDOWN_LINK_STORAGE_PATTERN.sub(self._encode_link, line)
+        
+        # 4) Bullet conversion: Convert "* " at start of line (after whitespace) to bullet
+        # Only convert when user types "* " followed by space
+        stripped = line.lstrip()
+        if stripped.startswith("* ") and len(stripped) > 2:
+            # Check if this is a new bullet being typed (cursor should be after "* ")
+            abs_pos = cursor.position()
+            line_start = block.position()
+            rel_pos = abs_pos - line_start
+            indent = line[:len(line) - len(stripped)]
+            bullet_pos = len(indent) + 2  # Position after "* "
+            
+            # Only convert if cursor is near the bullet marker position
+            # This prevents conversion when just navigating through existing bullets
+            if abs(rel_pos - bullet_pos) <= 2:
+                # Convert the * to a bullet point (•)
+                line = indent + "• " + stripped[2:]
 
         if line == original:
             return
@@ -1227,6 +1312,287 @@ class MarkdownEditor(QTextEdit):
         cursor = self.textCursor()
         cursor.setPosition(min(position, len(self.toPlainText())))
         self.setTextCursor(cursor)
+    
+    # --- Bullet list handling ---
+    
+    def _is_bullet_line(self, text: str) -> tuple[bool, str, str]:
+        """Check if line is a bullet and return (is_bullet, indent, content_after_bullet).
+        
+        Returns:
+            (True, indent_str, content) if bullet line
+            (False, "", "") otherwise
+        """
+        stripped = text.lstrip()
+        indent = text[:len(text) - len(stripped)]
+        
+        # Check for bullet patterns: "• ", "* ", "- ", "+ "
+        if stripped.startswith(("• ", "* ", "- ", "+ ")):
+            content = stripped[2:]
+            return (True, indent, content)
+        
+        return (False, "", "")
+    
+    def _handle_bullet_enter(self) -> bool:
+        """Handle Enter key in bullet mode. Returns True if handled."""
+        cursor = self.textCursor()
+        block = cursor.block()
+        text = block.text()
+        
+        is_bullet, indent, content = self._is_bullet_line(text)
+        if not is_bullet:
+            return False
+        
+        # Get cursor position relative to line start
+        rel_pos = cursor.position() - block.position()
+        bullet_start = len(indent) + 2  # After bullet marker
+        
+        # If bullet line is empty (just the bullet), exit bullet mode
+        if not content.strip():
+            # Remove the bullet marker and stay on same line
+            cursor.beginEditBlock()
+            cursor.select(QTextCursor.LineUnderCursor)
+            cursor.removeSelectedText()
+            cursor.insertText(indent)  # Keep indent but remove bullet
+            cursor.endEditBlock()
+            return True
+        
+        # Insert new line with bullet (use • for visual consistency)
+        cursor.beginEditBlock()
+        cursor.insertText("\n" + indent + "• ")
+        cursor.endEditBlock()
+        return True
+    
+    def _handle_bullet_indent(self) -> bool:
+        """Handle Tab key for bullet indentation. Returns True if handled.
+        
+        If the bullet has child bullets (more indented bullets following it),
+        they will be indented along with the parent.
+        """
+        cursor = self.textCursor()
+        block = cursor.block()
+        text = block.text()
+        
+        is_bullet, indent, content = self._is_bullet_line(text)
+        if not is_bullet:
+            return False
+        
+        # Get current indent level
+        current_indent_len = len(indent)
+        
+        # Find all child bullets (lines with greater indent following this line)
+        children_blocks = []
+        next_block = block.next()
+        while next_block.isValid():
+            next_text = next_block.text()
+            next_is_bullet, next_indent, next_content = self._is_bullet_line(next_text)
+            
+            if next_is_bullet and len(next_indent) > current_indent_len:
+                # This is a child bullet
+                children_blocks.append(next_block)
+                next_block = next_block.next()
+            else:
+                # No longer a child (same or less indent, or not a bullet)
+                break
+        
+        # Save cursor position relative to end of line
+        rel_from_end = len(text) - (cursor.position() - block.position())
+        
+        # Begin edit block to make all changes atomic
+        cursor.beginEditBlock()
+        
+        # Indent the current line
+        new_indent = indent + "  "
+        new_line = new_indent + "• " + content
+        
+        line_cursor = QTextCursor(block)
+        line_cursor.select(QTextCursor.LineUnderCursor)
+        line_cursor.insertText(new_line)
+        
+        # Indent all child bullets
+        for child_block in children_blocks:
+            child_text = child_block.text()
+            child_is_bullet, child_indent, child_content = self._is_bullet_line(child_text)
+            if child_is_bullet:
+                new_child_indent = child_indent + "  "
+                new_child_line = new_child_indent + "• " + child_content
+                
+                child_cursor = QTextCursor(child_block)
+                child_cursor.select(QTextCursor.LineUnderCursor)
+                child_cursor.insertText(new_child_line)
+        
+        # Restore cursor position (adjusted for new indent)
+        new_pos = block.position() + len(new_line) - rel_from_end
+        cursor.setPosition(max(block.position() + len(new_indent) + 2, new_pos))
+        self.setTextCursor(cursor)
+        cursor.endEditBlock()
+        return True
+    
+    def _handle_bullet_dedent(self) -> bool:
+        """Handle Shift+Tab key for bullet dedentation. Returns True if handled.
+        
+        If the bullet has child bullets (more indented bullets following it),
+        they will be dedented along with the parent.
+        """
+        cursor = self.textCursor()
+        block = cursor.block()
+        text = block.text()
+        
+        is_bullet, indent, content = self._is_bullet_line(text)
+        if not is_bullet:
+            return False
+        
+        # Can't dedent if already at zero indent
+        if len(indent) == 0:
+            return True  # Still consume the event
+        
+        # Get current indent level
+        current_indent_len = len(indent)
+        
+        # Find all child bullets (lines with greater indent following this line)
+        children_blocks = []
+        next_block = block.next()
+        while next_block.isValid():
+            next_text = next_block.text()
+            next_is_bullet, next_indent, next_content = self._is_bullet_line(next_text)
+            
+            if next_is_bullet and len(next_indent) > current_indent_len:
+                # This is a child bullet
+                children_blocks.append(next_block)
+                next_block = next_block.next()
+            else:
+                # No longer a child (same or less indent, or not a bullet)
+                break
+        
+        # Remove up to two spaces from indent
+        if len(indent) >= 2:
+            new_indent = indent[:-2]
+        else:
+            new_indent = ""
+        
+        # Save cursor position relative to end of line
+        rel_from_end = len(text) - (cursor.position() - block.position())
+        
+        # Begin edit block to make all changes atomic
+        cursor.beginEditBlock()
+        
+        # Dedent the current line
+        new_line = new_indent + "• " + content
+        
+        line_cursor = QTextCursor(block)
+        line_cursor.select(QTextCursor.LineUnderCursor)
+        line_cursor.insertText(new_line)
+        
+        # Dedent all child bullets (if they have at least 2 spaces to remove)
+        for child_block in children_blocks:
+            child_text = child_block.text()
+            child_is_bullet, child_indent, child_content = self._is_bullet_line(child_text)
+            if child_is_bullet and len(child_indent) >= 2:
+                new_child_indent = child_indent[:-2]
+                new_child_line = new_child_indent + "• " + child_content
+                
+                child_cursor = QTextCursor(child_block)
+                child_cursor.select(QTextCursor.LineUnderCursor)
+                child_cursor.insertText(new_child_line)
+        
+        # Restore cursor position (adjusted for new indent)
+        new_pos = block.position() + len(new_line) - rel_from_end
+        cursor.setPosition(max(block.position() + len(new_indent) + 2, new_pos))
+        self.setTextCursor(cursor)
+        cursor.endEditBlock()
+        return True
+
+    # --- Generic indentation helpers (non-bullet) ---
+
+    def _handle_enter_indent_same_level(self) -> bool:
+        """On Enter, continue the next line at the same leading indentation as the current line.
+
+        Applies only when not in a bullet context. Returns True if handled.
+        """
+        cursor = self.textCursor()
+        block = cursor.block()
+        if not block.isValid():
+            return False
+        text = block.text()
+        # Determine leading whitespace (tabs and/or spaces)
+        stripped = text.lstrip(" \t")
+        indent = text[: len(text) - len(stripped)]
+        # Simply insert a newline plus the indent
+        cursor.beginEditBlock()
+        cursor.insertText("\n" + indent)
+        cursor.endEditBlock()
+        return True
+
+    def _handle_generic_dedent(self) -> bool:
+        """Handle Shift+Tab on non-bullet lines by removing one leading indent unit.
+
+        Dedent strategy:
+        - If line starts with a tab (\t), remove one tab.
+        - Else if starts with two spaces, remove two spaces.
+        - Else if starts with one space, remove that single space.
+        Always consumes the event even if nothing to dedent to prevent focus shifts.
+        Returns True when the event should be consumed.
+        """
+        cursor = self.textCursor()
+        block = cursor.block()
+        if not block.isValid():
+            return True  # consume to avoid focus change
+
+        text = block.text()
+        # If it's a bullet, let bullet handler manage it
+        is_bullet, _, _ = self._is_bullet_line(text)
+        if is_bullet:
+            return False
+
+        original = text
+        if text.startswith("\t"):
+            new_line = text[1:]
+            removed = 1
+        elif text.startswith("  "):
+            new_line = text[2:]
+            removed = 2
+        elif text.startswith(" "):
+            new_line = text[1:]
+            removed = 1
+        else:
+            # Nothing to dedent, but still consume the key to avoid focus change
+            return True
+
+        # Preserve caret relative position
+        rel = cursor.position() - block.position()
+        cursor.beginEditBlock()
+        line_cursor = QTextCursor(block)
+        line_cursor.select(QTextCursor.LineUnderCursor)
+        line_cursor.insertText(new_line)
+        # Restore cursor position moved left by 'removed', not going before line start
+        new_block = self.document().findBlock(block.position())
+        new_pos = max(new_block.position(), block.position() + rel - removed)
+        c = self.textCursor()
+        c.setPosition(new_pos)
+        self.setTextCursor(c)
+        cursor.endEditBlock()
+        return True
+
+    # --- Scrolling helpers ---
+
+    def _apply_scroll_past_end_margin(self) -> None:
+        """Add bottom margin to the document so the view can scroll past the last line."""
+        try:
+            root = self.document().rootFrame()
+            fmt = root.frameFormat()
+            # Use a fraction of the viewport height for a comfortable cushion
+            margin = max(0, int(self.viewport().height() * 0.4))
+            if fmt.bottomMargin() != margin:
+                fmt.setBottomMargin(margin)
+                root.setFrameFormat(fmt)
+        except Exception:
+            # Be defensive—failure to set margin shouldn't break editing
+            pass
+
+    def _scroll_one_line_down(self) -> None:
+        """Scroll the viewport down by roughly one line height."""
+        sb = self.verticalScrollBar()
+        step = max(1, int(self.fontMetrics().lineSpacing()))
+        sb.setValue(sb.value() + step)
 
     def _doc_to_markdown(self) -> str:
         parts: list[str] = []

@@ -165,6 +165,9 @@ class MainWindow(QMainWindow):
         # Bookmarks
         self.bookmarks: list[str] = []
         self.bookmark_buttons: dict[str, QPushButton] = {}
+        
+        # History buttons
+        self.history_buttons: list[QPushButton] = []
 
         self.tree_view = VaultTreeView()
         self.tree_model = QStandardItemModel()
@@ -238,16 +241,23 @@ class MainWindow(QMainWindow):
         self.autosave_timer.setSingleShot(True)
         self.autosave_timer.timeout.connect(lambda: self._save_current_file(auto=True))
 
+        # Geometry save timer (debounce frequent resize/splitter move events)
+        self.geometry_save_timer = QTimer(self)
+        self.geometry_save_timer.setInterval(500)  # 500ms debounce
+        self.geometry_save_timer.setSingleShot(True)
+        self.geometry_save_timer.timeout.connect(self._save_geometry)
+
         # Vi-mode state
         self._vi_mode_active = False
         # Optional vi debug logging (set True to enable noisy logs)
         self._vi_debug = False
 
-        editor_split = QSplitter()
-        editor_split.addWidget(self.editor)
-        editor_split.addWidget(self.right_panel)
-        editor_split.setStretchFactor(0, 4)
-        editor_split.setStretchFactor(1, 2)
+        self.editor_split = QSplitter()
+        self.editor_split.addWidget(self.editor)
+        self.editor_split.addWidget(self.right_panel)
+        self.editor_split.setStretchFactor(0, 4)
+        self.editor_split.setStretchFactor(1, 2)
+        self.editor_split.splitterMoved.connect(self._on_splitter_moved)
 
         # Create tree container with custom header
         tree_container = QWidget()
@@ -258,18 +268,41 @@ class MainWindow(QMainWindow):
         tree_layout.addWidget(self.tree_view)
         tree_container.setLayout(tree_layout)
         
-        splitter = QSplitter()
-        splitter.addWidget(tree_container)
-        splitter.addWidget(editor_split)
-        splitter.setStretchFactor(1, 5)
-        splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.main_splitter = QSplitter()
+        self.main_splitter.addWidget(tree_container)
+        self.main_splitter.addWidget(self.editor_split)
+        self.main_splitter.setStretchFactor(1, 5)
+        self.main_splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.main_splitter.splitterMoved.connect(self._on_splitter_moved)
+
+        # Create history bar (separate row for history buttons)
+        self.history_bar = QWidget()
+        self.history_bar.setMaximumHeight(40)
+        self.history_bar.setStyleSheet("border-top: 1px solid #555;")
+        history_bar_layout = QHBoxLayout(self.history_bar)
+        history_bar_layout.setContentsMargins(5, 2, 5, 2)
+        history_bar_layout.setSpacing(4)
+        
+        # Add history buttons container
+        self.history_container = QWidget()
+        self.history_container.setStyleSheet("")  # Clear any inherited styles
+        self.history_layout = QHBoxLayout(self.history_container)
+        self.history_layout.setContentsMargins(0, 0, 0, 0)
+        self.history_layout.setSpacing(4)
+        history_bar_layout.addWidget(self.history_container)
+        
+        # Add spacer to push buttons to the left
+        history_spacer = QWidget()
+        history_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        history_bar_layout.addWidget(history_spacer)
 
         # Container (no vi-mode banner)
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(splitter, 1)
+        layout.addWidget(self.history_bar)
+        layout.addWidget(self.main_splitter, 1)
         self.setCentralWidget(container)
         self._position_toc_widget()
 
@@ -306,9 +339,24 @@ class MainWindow(QMainWindow):
         self._apply_focus_borders()
         self.statusBar().showMessage("Select a vault to get started")
         self._default_status_stylesheet = self.statusBar().styleSheet()
+
+    # Create a right-aligned permanent status widget for VI mode indicator
+        self._vi_status_label = QLabel("VI")
+        self._vi_status_label.setObjectName("viStatusLabel")
+        # Base badge styling; background color will be toggled
+        self._vi_badge_base_style = (
+            "border: 1px solid #666; padding: 2px 6px; border-radius: 3px;"
+        )
+        # Start in OFF state (transparent background)
+        self._vi_status_label.setStyleSheet(self._vi_badge_base_style + " background-color: transparent;")
+        # Add to right side of the status bar
+        self.statusBar().addPermanentWidget(self._vi_status_label, 0)
+
         last_vault = config.load_last_vault()
         if last_vault:
             self._set_vault(last_vault)
+            # Auto-load last file or vault home after vault is set
+            QTimer.singleShot(100, self._auto_load_initial_file)
 
     # --- UI wiring -----------------------------------------------------
     def _build_toolbar(self) -> None:
@@ -497,6 +545,9 @@ class MainWindow(QMainWindow):
         self._load_bookmarks()
         if self.vault_root:
             self.right_panel.set_vault_root(self.vault_root)
+        
+        # Restore window geometry and splitter positions
+        self._restore_geometry()
 
     def _add_bookmark(self) -> None:
         """Add the current page to bookmarks."""
@@ -531,6 +582,69 @@ class MainWindow(QMainWindow):
         self.bookmarks = config.load_bookmarks()
         self._refresh_bookmark_buttons()
 
+    def _save_geometry(self) -> None:
+        """Save window geometry and splitter positions."""
+        if not config.has_active_vault():
+            return
+        
+        # Save window geometry (size and position)
+        geometry = self.saveGeometry().toBase64().data().decode('ascii')
+        config.save_window_geometry(geometry)
+        print(f"[Geometry] Saved window geometry: {len(geometry)} chars")
+        
+        # Save main splitter state (tree vs editor+right panel)
+        splitter_state = self.main_splitter.saveState().toBase64().data().decode('ascii')
+        config.save_splitter_state(splitter_state)
+        print(f"[Geometry] Saved main splitter state: {len(splitter_state)} chars")
+        
+        # Save editor splitter state (editor vs right panel)
+        editor_splitter_state = self.editor_split.saveState().toBase64().data().decode('ascii')
+        config.save_editor_splitter_state(editor_splitter_state)
+        print(f"[Geometry] Saved editor splitter state: {len(editor_splitter_state)} chars")
+
+    def _restore_geometry(self) -> None:
+        """Restore window geometry and splitter positions."""
+        if not config.has_active_vault():
+            print("[Geometry] No active vault, skipping restore")
+            return
+        
+        # Restore window geometry
+        geometry_str = config.load_window_geometry()
+        if geometry_str:
+            print(f"[Geometry] Restoring window geometry: {len(geometry_str)} chars")
+            from PySide6.QtCore import QByteArray
+            geometry = QByteArray.fromBase64(geometry_str.encode('ascii'))
+            result = self.restoreGeometry(geometry)
+            print(f"[Geometry] Window geometry restore result: {result}")
+        else:
+            print("[Geometry] No saved window geometry found")
+        
+        # Restore main splitter state
+        splitter_state_str = config.load_splitter_state()
+        if splitter_state_str:
+            print(f"[Geometry] Restoring main splitter state: {len(splitter_state_str)} chars")
+            from PySide6.QtCore import QByteArray
+            splitter_state = QByteArray.fromBase64(splitter_state_str.encode('ascii'))
+            result = self.main_splitter.restoreState(splitter_state)
+            print(f"[Geometry] Main splitter restore result: {result}")
+        else:
+            print("[Geometry] No saved main splitter state found")
+        
+        # Restore editor splitter state
+        editor_splitter_state_str = config.load_editor_splitter_state()
+        if editor_splitter_state_str:
+            print(f"[Geometry] Restoring editor splitter state: {len(editor_splitter_state_str)} chars")
+            from PySide6.QtCore import QByteArray
+            editor_splitter_state = QByteArray.fromBase64(editor_splitter_state_str.encode('ascii'))
+            result = self.editor_split.restoreState(editor_splitter_state)
+            print(f"[Geometry] Editor splitter restore result: {result}")
+        else:
+            print("[Geometry] No saved editor splitter state found")
+
+    def _on_splitter_moved(self, pos: int, index: int) -> None:
+        """Save splitter positions when moved (debounced)."""
+        self.geometry_save_timer.start()
+
     def _refresh_bookmark_buttons(self) -> None:
         """Refresh the bookmark buttons in the toolbar."""
         # Clear existing buttons
@@ -559,6 +673,70 @@ class MainWindow(QMainWindow):
             # Add to layout
             self.bookmark_layout.addWidget(btn)
 
+    def _refresh_history_buttons(self) -> None:
+        """Refresh the history buttons in the toolbar (last 10 pages visited)."""
+        # Clear existing buttons
+        for btn in self.history_buttons:
+            self.history_layout.removeWidget(btn)
+            btn.deleteLater()
+        self.history_buttons.clear()
+        
+        # Get last 10 items from history (most recent last)
+        recent_history = self.page_history[-10:] if len(self.page_history) > 10 else self.page_history[:]
+        
+        # Remove duplicates while preserving order (keep most recent occurrence)
+        seen = set()
+        unique_history = []
+        for page_path in reversed(recent_history):
+            if page_path not in seen:
+                seen.add(page_path)
+                unique_history.append(page_path)
+        unique_history.reverse()  # Restore original order (oldest to newest)
+        
+        # Add buttons for each history item
+        for page_path in unique_history:
+            # Extract page name
+            page_name = Path(page_path).stem
+            
+            # Create button with border styling
+            btn = QPushButton(page_name)
+            btn.setStyleSheet("QPushButton { border: 1px solid #555; padding: 2px 6px; border-radius: 3px; }")
+            btn.setToolTip(path_to_colon(page_path) or page_path)
+            btn.clicked.connect(lambda checked=False, p=page_path: self._open_history_page(p))
+            
+            # Store button
+            self.history_buttons.append(btn)
+            
+            # Add to layout
+            self.history_layout.addWidget(btn)
+
+    def _open_history_page(self, page_path: str) -> None:
+        """Open a page from history and update tree selection."""
+        # Path is already in colon format, just open it directly (same as bookmarks)
+        self._select_tree_path(page_path)
+        self._open_file(page_path, add_to_history=False)  # Don't add to history again
+
+    def _auto_load_initial_file(self) -> None:
+        """Auto-load the last opened file or vault home page on startup."""
+        if not self.vault_root or not self.vault_root_name:
+            return
+        
+        # Try to load the last opened file
+        last_file = config.load_last_file()
+        if last_file:
+            # Verify the file still exists
+            try:
+                abs_path = Path(self.vault_root) / last_file.lstrip("/")
+                if abs_path.exists():
+                    self._select_tree_path(last_file)
+                    self._open_file(last_file)
+                    return
+            except Exception:
+                pass
+        
+        # Fall back to vault home page
+        self._go_home()
+    
     def _go_home(self) -> None:
         """Navigate to the vault's root page (page with same name as vault)."""
         if not self.vault_root or not self.vault_root_name:
@@ -706,6 +884,8 @@ class MainWindow(QMainWindow):
             if not self.page_history or self.page_history[-1] != path:
                 self.page_history.append(path)
                 self.history_index = len(self.page_history) - 1
+                # Refresh history buttons
+                self._refresh_history_buttons()
         
         try:
             resp = self.http.post("/api/file/read", json={"path": path})
@@ -740,6 +920,10 @@ class MainWindow(QMainWindow):
             self.editor.refresh_heading_outline()
         self.statusBar().showMessage(f"Editing {display_path}")
         self._update_window_title()
+        
+        # Save the last opened file
+        if config.has_active_vault():
+            config.save_last_file(path)
         
         # Update calendar if this is a journal page
         self._update_calendar_for_journal_page(path)
@@ -1928,6 +2112,11 @@ class MainWindow(QMainWindow):
     def eventFilter(self, obj, event):  # type: ignore[override]
         # (Removed overlay repositioning logic; using status bar indicator)
         if event.type() == QEvent.KeyPress:
+            # Allow Esc to exit vi-mode explicitly
+            if event.key() == Qt.Key_Escape and self._vi_mode_active:
+                self._vi_mode_active = False
+                self._apply_vi_mode_statusbar_style()
+                return True
             if event.key() == Qt.Key_CapsLock:
                 # Toggle vi-mode and consume the event to prevent CapsLock from activating
                 self._toggle_vi_mode()
@@ -2019,51 +2208,90 @@ class MainWindow(QMainWindow):
         target_key = None
         target_modifiers = Qt.KeyboardModifiers(Qt.NoModifier)
 
+        # Basic motion (j/k/h/l) + shifted variants
         if key == Qt.Key_J:
-            target_key = Qt.Key_Down if not shift else Qt.Key_PageDown
+            if alt and not shift:
+                # Alt+J -> PageDown (page navigation uses Alt modifier)
+                target_key = Qt.Key_PageDown
+            elif shift:
+                # Shift+J -> Shift+Down (line selection)
+                target_key = Qt.Key_Down
+                target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
+            else:
+                target_key = Qt.Key_Down
         elif key == Qt.Key_K:
-            target_key = Qt.Key_Up if not shift else Qt.Key_PageUp
+            if alt and not shift:
+                # Alt+K -> PageUp (page navigation uses Alt modifier)
+                target_key = Qt.Key_PageUp
+            elif shift:
+                # Shift+K -> Shift+Up (line selection)
+                target_key = Qt.Key_Up
+                target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
+            else:
+                target_key = Qt.Key_Up
+        elif key == Qt.Key_H:
+            if shift:
+                # Shift+H -> Shift+Left (select one char left)
+                target_key = Qt.Key_Left
+                target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
+            else:
+                target_key = Qt.Key_Left
+        elif key == Qt.Key_L:
+            if shift:
+                # Shift+L -> Shift+Right (select one char right)
+                target_key = Qt.Key_Right
+                target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
+            else:
+                target_key = Qt.Key_Right
+        # Line selection helper keys (+U/+N) for Shift+Up / Shift+Down
         elif key == Qt.Key_N and shift:
             target_key = Qt.Key_Down
             target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
+        elif key == Qt.Key_U and shift:
+            target_key = Qt.Key_Up
+            target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
+        # Undo / Redo / Copy / Cut / Paste
         elif key == Qt.Key_U and not shift:
             target_key = Qt.Key_Z
             target_modifiers = Qt.KeyboardModifiers(Qt.ControlModifier)
-        elif key == Qt.Key_A:
-            target_key = Qt.Key_Home
-            if shift:
-                target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
-        elif key == Qt.Key_H:
-            if alt and not shift:
-                # Alt+h -> Alt+Left (word-left style navigation)
-                target_key = Qt.Key_Left
-                target_modifiers = Qt.KeyboardModifiers(Qt.AltModifier)
-            elif shift:
-                target_key = Qt.Key_Home
-                target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
-            else:
-                target_key = Qt.Key_Left
-        elif key == Qt.Key_L and not shift:
-            if alt:
-                # Alt+l -> Alt+Right (word-right style navigation)
-                target_key = Qt.Key_Right
-                target_modifiers = Qt.KeyboardModifiers(Qt.AltModifier)
-            else:
-                target_key = Qt.Key_Right
-        elif key == Qt.Key_Semicolon:
-            target_key = Qt.Key_End
-            if shift:
-                target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
+        elif key == Qt.Key_R and not shift:
+            target_key = Qt.Key_Y
+            target_modifiers = Qt.KeyboardModifiers(Qt.ControlModifier)
+        elif key == Qt.Key_C and not shift:
+            target_key = Qt.Key_C
+            target_modifiers = Qt.KeyboardModifiers(Qt.ControlModifier)
         elif key == Qt.Key_X and not shift:
             target_key = Qt.Key_X
             target_modifiers = Qt.KeyboardModifiers(Qt.ControlModifier)
         elif key == Qt.Key_P and not shift:
             target_key = Qt.Key_V
             target_modifiers = Qt.KeyboardModifiers(Qt.ControlModifier)
-        elif key == Qt.Key_D and not shift:
-            # Delete current line: use custom handler with Alt+Delete as marker
-            target_key = Qt.Key_Delete
-            target_modifiers = Qt.KeyboardModifiers(Qt.AltModifier)
+        # Word motions (w forward, b backward)
+        elif key == Qt.Key_W and not shift:
+            target_key = Qt.Key_Right
+            target_modifiers = Qt.KeyboardModifiers(Qt.ControlModifier)
+        elif key == Qt.Key_B and not shift:
+            target_key = Qt.Key_Left
+            target_modifiers = Qt.KeyboardModifiers(Qt.ControlModifier)
+        # Home/End and selection variants
+        elif key == Qt.Key_A:
+            target_key = Qt.Key_Home
+            if shift:
+                target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
+        elif key == Qt.Key_Semicolon:
+            target_key = Qt.Key_End
+            if shift:
+                target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
+        # Delete variants
+        elif key == Qt.Key_D:
+            if shift:
+                # Shift+D -> delete whole line
+                target_key = Qt.Key_Delete
+                target_modifiers = Qt.KeyboardModifiers(Qt.AltModifier | Qt.ShiftModifier)
+            else:
+                # Plain 'd' -> Delete key
+                target_key = Qt.Key_Delete
+                target_modifiers = Qt.KeyboardModifiers(Qt.NoModifier)
 
         if target_key is None:
             return None
@@ -2073,24 +2301,28 @@ class MainWindow(QMainWindow):
     def _dispatch_vi_navigation(self, target: QWidget, mapping: tuple[int, Qt.KeyboardModifiers]) -> None:
         key, modifiers = mapping
 
-        # Special handling for delete line (d key maps to a special marker)
-        if key == Qt.Key_Delete and modifiers == Qt.KeyboardModifiers(Qt.AltModifier):
-            # This is our custom "delete line" command
-            if hasattr(target, 'textCursor'):
-                cursor = target.textCursor()
+        # Special handling for delete variants
+        if key == Qt.Key_Delete and hasattr(target, 'textCursor'):
+            # Shift+D: line delete (we encoded modifiers with Alt|Shift) OR Alt+Delete legacy
+            is_line_delete = bool(modifiers & Qt.ShiftModifier) or bool(modifiers & Qt.AltModifier and modifiers & Qt.ShiftModifier)
+            cursor = target.textCursor()
+            if is_line_delete:
+                # Delete whole current line
                 if cursor.hasSelection():
                     cursor.removeSelectedText()
                     target.setTextCursor(cursor)
                     return
-                # Move to start of the current line
                 cursor.movePosition(QTextCursor.StartOfLine)
-                # Select to the start of the next line (includes newline)
-                cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor)
-                # If we're at the last line, make sure we still delete it
-                if not cursor.hasSelection():
-                    cursor.movePosition(QTextCursor.StartOfLine)
-                    cursor.movePosition(QTextCursor.EndOfLine, QTextCursor.KeepAnchor)
+                cursor.movePosition(QTextCursor.EndOfLine, QTextCursor.KeepAnchor)
                 cursor.removeSelectedText()
+                target.setTextCursor(cursor)
+                return
+            else:
+                # Plain delete
+                if cursor.hasSelection():
+                    cursor.removeSelectedText()
+                else:
+                    cursor.deleteChar()
                 target.setTextCursor(cursor)
                 return
 
@@ -2150,15 +2382,50 @@ class MainWindow(QMainWindow):
     def _apply_vi_mode_statusbar_style(self) -> None:
         # Switch editor cursor styling for vi-mode; no banners/overlays
         self.editor.set_vi_mode(self._vi_mode_active)
+        # Show a brief status message when vi-mode toggles
+        try:
+            state = "ON" if self._vi_mode_active else "OFF"
+            self.statusBar().showMessage(f"Vi mode: {state}", 2000)
+            # Update permanent VI indicator badge background color
+            if hasattr(self, "_vi_status_label"):
+                if self._vi_mode_active:
+                    # Yellow background with dark text for visibility
+                    self._vi_status_label.setStyleSheet(
+                        self._vi_badge_base_style + " background-color: #ffd54d; color: #000;"
+                    )
+                else:
+                    # Transparent background (normal status bar look)
+                    self._vi_status_label.setStyleSheet(
+                        self._vi_badge_base_style + " background-color: transparent;"
+                    )
+        except Exception:
+            # Avoid breaking if status bar not yet initialized
+            pass
 
     # (Removed move/resize overlays; not used)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
+        """Handle window resize: reposition TOC and save geometry."""
         super().resizeEvent(event)
         self._position_toc_widget()
+        self.geometry_save_timer.start()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        # Stop any pending timers
+        self.autosave_timer.stop()
+        self.geometry_save_timer.stop()
+        
+        # Disconnect editor signals to prevent save attempts after HTTP client is closed
+        try:
+            self.editor.focusLost.disconnect()
+        except:
+            pass
+        
+        # Save current file and geometry
         self._save_current_file(auto=True)
+        self._save_geometry()
+        
+        # Close HTTP client and clean up
         self.http.close()
         config.set_active_vault(None)
         return super().closeEvent(event)

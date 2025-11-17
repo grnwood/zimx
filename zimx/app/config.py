@@ -131,6 +131,82 @@ def save_show_journal(show: bool) -> None:
     conn.commit()
 
 
+def load_last_file() -> Optional[str]:
+    """Load the last opened file path. Returns None if no file was previously opened."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("last_file",))
+    row = cur.fetchone()
+    return str(row[0]) if row else None
+
+
+def save_last_file(path: str) -> None:
+    """Save the last opened file path."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("last_file", path))
+    conn.commit()
+
+
+def load_window_geometry() -> Optional[str]:
+    """Load the saved window geometry (base64 encoded QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("window_geometry",))
+    row = cur.fetchone()
+    return str(row[0]) if row else None
+
+
+def save_window_geometry(geometry: str) -> None:
+    """Save the window geometry (base64 encoded QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("window_geometry", geometry))
+    conn.commit()
+
+
+def load_splitter_state() -> Optional[str]:
+    """Load the saved main splitter state (base64 encoded QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("splitter_state",))
+    row = cur.fetchone()
+    return str(row[0]) if row else None
+
+
+def save_splitter_state(state: str) -> None:
+    """Save the main splitter state (base64 encoded QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("splitter_state", state))
+    conn.commit()
+
+
+def load_editor_splitter_state() -> Optional[str]:
+    """Load the saved editor splitter state (base64 encoded QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("editor_splitter_state",))
+    row = cur.fetchone()
+    return str(row[0]) if row else None
+
+
+def save_editor_splitter_state(state: str) -> None:
+    """Save the editor splitter state (base64 encoded QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("editor_splitter_state", state))
+    conn.commit()
+
+
 def _update_global_config(updates: dict) -> None:
     """Merge updates into global config file."""
     existing = {}
