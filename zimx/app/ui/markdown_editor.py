@@ -1255,7 +1255,7 @@ class MarkdownEditor(QTextEdit):
                 cursor = self.textCursor()
                 cursor.setPosition(int(entry.get("position", 0)))
                 self.setTextCursor(cursor)
-                self.centerCursor()
+                self.ensureCursorVisible()
                 return True
         return False
 
