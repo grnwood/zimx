@@ -37,6 +37,12 @@ COLON_LINK_PATTERN = QRegularExpression(r"(?P<link>[\w]+(?::[\w]+)+(?:#[A-Za-z0-
 MARKDOWN_COLON_LINK_PATTERN = QRegularExpression(
     r"\[(?P<text>[^\]]+)\]\s*\((?P<link>[\w]+(?::[\w]+)+(?:#[A-Za-z0-9_-]+)?)\)"
 )
+# Generic markdown link for files (with an extension) e.g. [Report](report.pdf) or [Img](./image.png)
+# Accept optional leading ./ and subfolder segments; require a dot-extension 1-8 chars
+FILE_MARKDOWN_LINK_PATTERN = QRegularExpression(
+    # Allow spaces in filenames by excluding only closing paren and newlines; still require an extension
+    r"\[(?P<text>[^\]]+)\]\s*\((?P<file>(?:\./)?[^)\n]+\.[A-Za-z0-9]{1,8})\)"
+)
 # Storage pattern for markdown links (using Python re for easier replacement)
 # DOTALL flag makes . match newlines, \s* allows whitespace including newlines
 MARKDOWN_LINK_STORAGE_PATTERN = re.compile(
@@ -243,6 +249,29 @@ class MarkdownHighlighter(QSyntaxHighlighter):
             if not inside_md and not inside_display:
                 self.setFormat(s, e - s, link_format)
 
+        # Highlight generic file markdown links (exclude ones already treated as colon links)
+        file_iter = FILE_MARKDOWN_LINK_PATTERN.globalMatch(text)
+        while file_iter.hasNext():
+            fm = file_iter.next()
+            start = fm.capturedStart()
+            end = start + fm.capturedLength()
+            # Avoid double-formatting if overlaps colon link spans
+            overlap_colon = any(ms <= start and end <= me for (ms, me) in md_spans)
+            if overlap_colon:
+                continue
+            label = fm.captured("text")
+            label_start = start + 1  # after [
+            label_len = len(label)
+            # Hide leading '[' and any part up to label_start
+            if label_start > start:
+                self.setFormat(start, label_start - start, self.hidden_format)
+            # Highlight label itself
+            self.setFormat(label_start, label_len, link_format)
+            # Hide trailing ](file.ext) portion
+            label_end = label_start + label_len
+            if end > label_end:
+                self.setFormat(label_end, end - label_end, self.hidden_format)
+
 
 class MarkdownEditor(QTextEdit):
     imageSaved = Signal(str)
@@ -252,6 +281,8 @@ class MarkdownEditor(QTextEdit):
     linkHovered = Signal(str)  # Emits link path when hovering/cursor over a link
     headingsChanged = Signal(list)
     viewportResized = Signal()
+    editPageSourceRequested = Signal(str)  # Emits file path when user wants to edit page source
+    openFileLocationRequested = Signal(str)  # Emits file path when user wants to open file location
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -279,6 +310,8 @@ class MarkdownEditor(QTextEdit):
         self.textChanged.connect(self._schedule_heading_outline)
         # Enable mouse tracking for hover cursor changes
         self.viewport().setMouseTracking(True)
+        # Enable drag and drop for file attachments
+        self.setAcceptDrops(True)
 
     def paintEvent(self, event):  # type: ignore[override]
         """Custom paint to draw horizontal rules as visual lines."""
@@ -531,10 +564,85 @@ class MarkdownEditor(QTextEdit):
             menu.addSeparator()
             copy_action = menu.addAction("Copy Link to Location")
             copy_action.triggered.connect(self._copy_link_to_location)
+            
+            # Add Edit Page Source action (delegates to main window)
+            edit_src_action = menu.addAction("Edit Page Source")
+            edit_src_action.triggered.connect(lambda: self.editPageSourceRequested.emit(self._current_path))
+            
+            # Add Open File Location action (delegates to main window)
+            open_loc_action = menu.addAction("Open File Location")
+            open_loc_action.triggered.connect(lambda: self.openFileLocationRequested.emit(self._current_path))
+            
             menu.exec(event.globalPos())
             return
         
         super().contextMenuEvent(event)
+    
+    def dragEnterEvent(self, event):  # type: ignore[override]
+        """Accept drag events with file URLs."""
+        mime = event.mimeData()
+        print(f"[DragEnter] hasUrls: {mime.hasUrls()}, hasText: {mime.hasText()}")
+        if mime.hasUrls():
+            print(f"[DragEnter] URLs: {[url.toLocalFile() for url in mime.urls()]}")
+            event.acceptProposedAction()
+        elif mime.hasText():
+            print(f"[DragEnter] Text: {mime.text()}")
+            event.acceptProposedAction()
+        else:
+            print(f"[DragEnter] Formats: {mime.formats()}")
+            super().dragEnterEvent(event)
+    
+    def dragMoveEvent(self, event):  # type: ignore[override]
+        """Accept drag move events with file URLs."""
+        if event.mimeData().hasUrls() or event.mimeData().hasText():
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+    
+    def dropEvent(self, event):  # type: ignore[override]
+        """Handle dropped files - insert as image or file link."""
+        from pathlib import Path
+        
+        mime = event.mimeData()
+        print(f"[Drop] hasUrls: {mime.hasUrls()}, hasText: {mime.hasText()}")
+        
+        file_path = None
+        
+        if mime.hasUrls():
+            urls = mime.urls()
+            print(f"[Drop] URLs: {[url.toLocalFile() for url in urls]}")
+            if urls:
+                file_path = Path(urls[0].toLocalFile())
+        elif mime.hasText():
+            # Try to parse text as file path
+            text = mime.text().strip()
+            print(f"[Drop] Text: {text}")
+            if text.startswith('file://'):
+                file_path = Path(text[7:])
+            else:
+                file_path = Path(text)
+        
+        if file_path and file_path.exists() and file_path.is_file():
+            print(f"[Drop] Processing file: {file_path}")
+            # Check if it's an image
+            if file_path.suffix.lower() in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg']:
+                # Insert as image
+                print(f"[Drop] Inserting as image")
+                self._insert_image_from_path(file_path.name, alt=file_path.stem)
+            else:
+                # Insert as file link
+                print(f"[Drop] Inserting as file link")
+                cursor = self.cursorForPosition(event.pos())
+                self.setTextCursor(cursor)
+                link_text = f"[{file_path.name}](./{file_path.name})"
+                cursor.insertText(link_text)
+            
+            event.acceptProposedAction()
+            return
+        else:
+            print(f"[Drop] File not found or not valid: {file_path}")
+        
+        super().dropEvent(event)
 
     def mouseMoveEvent(self, event):  # type: ignore[override]
         # Show pointing hand cursor when hovering over a link
@@ -633,6 +741,17 @@ class MarkdownEditor(QTextEdit):
             text_end = text_start + len(text_val)
             if text_start <= rel < text_end:
                 return m.captured("link")
+
+        # Check generic file markdown links
+        file_iter = FILE_MARKDOWN_LINK_PATTERN.globalMatch(text)
+        while file_iter.hasNext():
+            fm = file_iter.next()
+            start = fm.capturedStart()
+            label = fm.captured("text")
+            label_start = start + 1
+            label_end = label_start + len(label)
+            if label_start <= rel < label_end:
+                return fm.captured("file")
         
         # Check for CamelCase links
         iterator = CAMEL_LINK_PATTERN.globalMatch(block.text())
@@ -693,6 +812,17 @@ class MarkdownEditor(QTextEdit):
             text_end = text_start + len(text_val)
             if text_start <= rel < text_end:
                 return (start, end, text_val, m.captured("link"))
+        # Check generic file markdown links
+        fit = FILE_MARKDOWN_LINK_PATTERN.globalMatch(text)
+        while fit.hasNext():
+            fm = fit.next()
+            start = fm.capturedStart()
+            end = start + fm.capturedLength()
+            text_val = fm.captured("text")
+            text_start = start + 1
+            text_end = text_start + len(text_val)
+            if text_start <= rel < text_end:
+                return (start, end, text_val, fm.captured("file"))
         return None
 
     def _remove_link_at_cursor(self, cursor: QTextCursor) -> None:

@@ -6,6 +6,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QTabWidget, QWidget
 
 from .task_panel import TaskPanel
+from .attachments_panel import AttachmentsPanel
 
 
 class TabbedRightPanel(QWidget):
@@ -25,9 +26,9 @@ class TabbedRightPanel(QWidget):
         self.task_panel = TaskPanel()
         self.tabs.addTab(self.task_panel, "Tasks")
         
-        # Create Attachments placeholder tab
-        self.attachments_placeholder = QWidget()
-        self.tabs.addTab(self.attachments_placeholder, "Attachments")
+        # Create Attachments tab
+        self.attachments_panel = AttachmentsPanel()
+        self.tabs.addTab(self.attachments_panel, "Attachments")
         
         # Set Tasks as default tab (index 0)
         self.tabs.setCurrentIndex(0)
@@ -65,3 +66,11 @@ class TabbedRightPanel(QWidget):
         from PySide6.QtCore import QDate
         date = QDate(year, month, day)
         self.task_panel.calendar.setSelectedDate(date)
+    
+    def set_current_page(self, page_path) -> None:
+        """Update the attachments panel with the current page."""
+        self.attachments_panel.set_page(page_path)
+    
+    def refresh_attachments(self) -> None:
+        """Refresh the attachments panel."""
+        self.attachments_panel.refresh()

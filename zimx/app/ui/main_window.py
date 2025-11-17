@@ -206,6 +206,8 @@ class MainWindow(QMainWindow):
         self.editor.focusLost.connect(lambda: self._save_current_file(auto=True))
         self.editor.linkActivated.connect(self._open_camel_link)
         self.editor.linkHovered.connect(self._on_link_hovered)
+        self.editor.editPageSourceRequested.connect(self._view_page_source)
+        self.editor.openFileLocationRequested.connect(self._open_tree_file_location)
         self.font_size = 14
         self.editor.set_font_point_size(self.font_size)
         # Load vi-mode block cursor preference
@@ -741,6 +743,14 @@ class MainWindow(QMainWindow):
         
         # Update calendar if this is a journal page
         self._update_calendar_for_journal_page(path)
+        
+        # Update attachments panel with current page
+        from pathlib import Path
+        if path:
+            full_path = Path(self.vault_root) / path.lstrip("/")
+            self.right_panel.set_current_page(full_path)
+        else:
+            self.right_panel.set_current_page(None)
 
     def _save_current_file(self, auto: bool = False) -> None:
         if self._suspend_autosave:
@@ -957,6 +967,8 @@ class MainWindow(QMainWindow):
 
     def _on_image_saved(self, filename: str) -> None:
         self.statusBar().showMessage(f"Image pasted as {filename}", 5000)
+        # Refresh attachments panel to show the new image
+        self.right_panel.refresh_attachments()
 
     def _jump_to_page(self) -> None:
         if not config.has_active_vault():
@@ -1164,6 +1176,14 @@ class MainWindow(QMainWindow):
         
         # Refresh tree to show italicized entry
         self._populate_vault_tree()
+        
+        # Update attachments panel (virtual pages may still have folders)
+        from pathlib import Path
+        if rel_path:
+            full_path = Path(self.vault_root) / rel_path.lstrip("/")
+            self.right_panel.set_current_page(full_path)
+        else:
+            self.right_panel.set_current_page(None)
     
     def _apply_journal_templates_for_date(self, day_file_path: str, year: int, month: int, day: int) -> None:
         """Apply journal templates for a specific date."""
@@ -1300,6 +1320,26 @@ class MainWindow(QMainWindow):
         
         # Save current page before following link to ensure it's indexed
         self._save_current_file(auto=True)
+
+        # Attachment file link: detect filename with extension (non .txt) and open via OS
+        if "." in name and ":" not in name and not name.endswith(".txt"):
+            # Resolve relative to current page folder
+            rel_current = Path(self.current_path.lstrip("/"))
+            page_folder = rel_current.parent
+            folder_path = Path(self.vault_root) / page_folder if self.vault_root else None
+            if folder_path:
+                # Strip optional leading ./
+                clean_name = name[2:] if name.startswith("./") else name
+                candidate = (folder_path / clean_name).resolve()
+                if candidate.exists() and candidate.is_file():
+                    try:
+                        from PySide6.QtGui import QDesktopServices
+                        from PySide6.QtCore import QUrl
+                        QDesktopServices.openUrl(QUrl.fromLocalFile(str(candidate)))
+                        return
+                    except Exception:
+                        pass  # fall through to normal handling if OS open fails
+
         target_name, anchor = self._split_link_anchor(name)
         anchor_slug = self._anchor_slug(anchor)
         
@@ -1455,6 +1495,10 @@ class MainWindow(QMainWindow):
             if file_path:
                 view_src = menu.addAction("Edit Page Source")
                 view_src.triggered.connect(lambda checked=False, fp=file_path: self._view_page_source(fp))
+                
+                # Open File Location
+                open_loc = menu.addAction("Open File Location")
+                open_loc.triggered.connect(lambda checked=False, fp=file_path: self._open_tree_file_location(fp))
         else:
             menu.addAction("New Page", lambda checked=False: self._start_inline_creation("/", global_pos, None))
         if menu.actions():
@@ -1484,6 +1528,19 @@ class MainWindow(QMainWindow):
             # Reload and render page (force reload even if already current)
             self._select_tree_path(file_path)
             self._open_file(file_path, force=True)
+    
+    def _open_tree_file_location(self, file_path: str) -> None:
+        """Open the folder containing the given page file."""
+        if not self.vault_root:
+            return
+        
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        
+        abs_path = (Path(self.vault_root) / file_path.lstrip("/")).resolve()
+        folder_path = abs_path.parent
+        
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder_path)))
 
     def _start_inline_creation(
         self,
