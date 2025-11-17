@@ -1362,7 +1362,6 @@ class MainWindow(QMainWindow):
         self._populate_vault_tree()
         
         # Update attachments panel (virtual pages may still have folders)
-        from pathlib import Path
         if rel_path:
             full_path = Path(self.vault_root) / rel_path.lstrip("/")
             self.right_panel.set_current_page(full_path)

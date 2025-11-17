@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Iterable
 
 from PySide6.QtCore import QEvent, Qt, Signal, QDate
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCalendarWidget,
@@ -217,7 +218,10 @@ class TaskPanel(QWidget):
         bold_format = QTextCharFormat()
         bold_font = QFont()
         bold_font.setBold(True)
+        bold_font.setWeight(QFont.Black)  # Maximum weight for prominence
         bold_format.setFont(bold_font)
+        # Add a distinct color to make it more visible on Windows
+        bold_format.setForeground(QColor(0, 100, 200))  # Dark blue color
         
         # Check each day in the current month
         year_path = journal_path / str(year)
