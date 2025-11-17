@@ -8,10 +8,55 @@ import time
 import uvicorn
 from PySide6.QtCore import QtMsgType, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QIcon
 
 from zimx.server.api import get_app
 from zimx.app import config
 from zimx.app.ui.main_window import MainWindow
+
+
+def _resource_candidates(rel_path: str) -> list[str]:
+    """Return likely absolute paths for a bundled resource.
+
+    Handles PyInstaller onedir/onefile via sys._MEIPASS, alongside the
+    executable, and package-relative source layout. The first existing
+    path from this list should be used.
+    """
+    candidates: list[str] = []
+    # PyInstaller staging directory (onefile and onedir)
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        candidates.append(os.path.join(base, rel_path))
+        # Some PyInstaller layouts stage package data under _internal
+        candidates.append(os.path.join(base, "_internal", rel_path))
+    # Next to the executable (dist root)
+    try:
+        exe_dir = os.path.abspath(os.path.dirname(sys.argv[0]))
+        candidates.append(os.path.join(exe_dir, rel_path))
+        candidates.append(os.path.join(exe_dir, "_internal", rel_path))
+    except Exception:
+        pass
+    # Package-relative (developer mode)
+    pkg_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    candidates.append(os.path.join(pkg_root, rel_path))
+    return candidates
+
+
+def _set_app_icon(app: QApplication) -> None:
+    """Attempt to set the application/window icon if an asset is bundled.
+
+    On Linux, PyInstaller does not embed a binary icon into the ELF. We set the
+    window icon at runtime using a PNG. On Windows/macOS the EXE/App icon is
+    handled by PyInstaller, but this also ensures the window/icon in the titlebar
+    matches.
+    """
+    for path in _resource_candidates(os.path.join("assets", "icon.png")):
+        if os.path.exists(path):
+            try:
+                app.setWindowIcon(QIcon(path))
+            except Exception:
+                pass
+            break
 
 
 def _qt_message_handler(mode: QtMsgType, context, message: str) -> None:
@@ -56,6 +101,8 @@ def main() -> None:
     qInstallMessageHandler(_qt_message_handler)
     port, _ = _start_api_server()
     qt_app = QApplication(sys.argv)
+    # Set window/app icon if available (especially needed on Linux)
+    _set_app_icon(qt_app)
     window = MainWindow(api_base=f"http://127.0.0.1:{port}")
     window.resize(1200, 800)
     window.show()
