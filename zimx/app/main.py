@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication
 
 from zimx.server.api import get_app
 from zimx.app import config
-from .ui.main_window import MainWindow
+from zimx.app.ui.main_window import MainWindow
 
 
 def _qt_message_handler(mode: QtMsgType, context, message: str) -> None:

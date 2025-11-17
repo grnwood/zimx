@@ -96,3 +96,116 @@ pytest zimx/tests
 * Flesh out the FastAPI search/indexing logic (see `zimx/server/indexer.py`).
 * Expand the Qt UI with dedicated panels for Tasks, Search, and AI interactions.
 * Package the app with PyInstaller for cross-platform distribution.
+
+## Packaging (PyInstaller)
+
+The repository includes a starter spec file at `packaging/zimx.spec` plus placeholder icons in `assets/`. Replace `assets/icon.png` and `assets/icon.ico` with real artwork before distributing.
+
+### 1. Install build dependencies (Linux & Windows)
+
+Make sure you are in a fresh virtual environment:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r zimx/requirements.txt
+pip install pyinstaller
+```
+
+### 2. Build
+
+Run PyInstaller with the provided spec:
+
+```bash
+pyinstaller -y packaging/zimx.spec
+```
+
+Artifacts will appear in `dist/ZimX/` (folder build). Test the executable before shipping.
+
+### 3. Optional: Single-file build
+
+Single-file executables start slower (temporary unpack). If desired:
+
+```bash
+pyinstaller -y --onefile --windowed --icon assets/icon.ico zimx/app/main.py
+```
+
+### 4. Windows Notes
+
+* The spec sets `console=False`, so no console window appears. (Equivalent to using `pythonw`.)
+* Replace `assets/icon.ico` with a multi-resolution icon (16, 32, 48, 256 px).
+* For SmartScreen reputation, code-sign the EXE (outside this repo):
+   ```powershell
+   signtool sign /fd SHA256 /a /tr http://timestamp.digicert.com /td SHA256 dist\ZimX\ZimX.exe
+   ```
+* Distribute via a zip or an installer (e.g. Inno Setup) once stable.
+
+### 5. Linux Notes
+
+* No console suppression needed; `console=False` is ignored if already windowed.
+* To integrate with desktop environments, create a `.desktop` file pointing to the executable:
+   ```ini
+   [Desktop Entry]
+   Type=Application
+   Name=ZimX
+   Exec=/opt/ZimX/ZimX
+   Icon=/opt/ZimX/assets/icon.png
+   Categories=Office;Utility;
+   ```
+   Place it in `~/.local/share/applications/` (user) or `/usr/share/applications/` (system).
+* You can convert the `dist/ZimX` folder into a `.deb`/`.rpm` using `fpm` if desired.
+
+### 6. Data & Settings Location
+
+Runtime settings (SQLite DB, cached geometry, etc.) should live outside the bundled directory. If you introduce a platform-dependent path, prefer [`platformdirs`](https://pypi.org/project/platformdirs/):
+
+```python
+from platformdirs import user_data_dir
+from pathlib import Path
+store = Path(user_data_dir("ZimX", "ZimX"))
+store.mkdir(exist_ok=True)
+settings_path = store / "settings.db"
+```
+
+Vault contents remain wherever the user selects—never inside `dist/`.
+
+### 7. Environment Flags (Optional)
+
+Performance experimentation flags you can set before launching the binary:
+
+```bash
+export ZIMX_INCREMENTAL_LOAD=1   # incremental text load batches
+export ZIMX_PORT=9000            # override API port
+```
+
+### 8. Verifying the Build
+
+Run through this quick checklist on both platforms:
+
+1. Launch (cold & warm) time acceptable.
+2. Open a vault; pages render; links clickable.
+3. Paste an image; it appears inline.
+4. Autosave triggers on navigation.
+5. Window geometry persists across restarts.
+6. API health: `curl http://127.0.0.1:${ZIMX_PORT:-8765}/api/health` returns `{"ok": true}`.
+
+### 9. Updating / Versioning
+
+Set a version when building:
+
+```bash
+ZIMX_VERSION=0.1.1 pyinstaller -y packaging/zimx.spec
+```
+
+Include a `CHANGELOG.md` and optionally an auto-update check comparing a remote JSON manifest to the local version.
+
+---
+
+For a more optimized build later, consider trying Nuitka:
+
+```bash
+pip install nuitka
+python -m nuitka --standalone --enable-plugin=pyside6 --windows-disable-console --output-dir=dist_nuitka zimx/app/main.py
+```
+
+But start with the PyInstaller baseline above.
