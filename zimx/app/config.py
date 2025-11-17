@@ -110,6 +110,27 @@ def save_bookmarks(paths: list[str]) -> None:
         )
 
 
+def load_show_journal() -> bool:
+    """Load show_journal setting. Defaults to True."""
+    conn = _get_conn()
+    if not conn:
+        return True
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("show_journal",))
+    row = cur.fetchone()
+    if not row:
+        return True
+    return str(row[0]).lower() == "true"
+
+
+def save_show_journal(show: bool) -> None:
+    """Save show_journal setting."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("show_journal", "true" if show else "false"))
+    conn.commit()
+
+
 def _update_global_config(updates: dict) -> None:
     """Merge updates into global config file."""
     existing = {}

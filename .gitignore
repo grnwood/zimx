@@ -6,3 +6,15 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.vscode/settings.json
+.vscode/launch.json
+venv/*
+plan.md
+*.pyc
+zimx/app/__pycache__/config.cpython-312.pyc
+zimx/app/__pycache__/config.cpython-312.pyc
+zimx/app/__pycache__/main.cpython-312.pyc
+zimx/app/ui/__pycache__/jump_dialog.cpython-312.pyc
+zimx/app/ui/__pycache__/main_window.cpython-312.pyc
+zimx/app/ui/__pycache__/markdown_editor.cpython-312.pyc
+zimx/app/ui/__pycache__/task_panel.cpython-312.pyc

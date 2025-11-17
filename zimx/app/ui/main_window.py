@@ -20,6 +20,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QFileDialog,
     QLineEdit,
     QMenu,
@@ -42,7 +43,7 @@ from zimx.app import config, indexer
 from zimx.server.adapters.files import PAGE_SUFFIX
 
 from .markdown_editor import MarkdownEditor
-from .task_panel import TaskPanel
+from .tabbed_right_panel import TabbedRightPanel
 from .jump_dialog import JumpToPageDialog
 from .toc_widget import TableOfContentsWidget
 from .heading_utils import heading_slug
@@ -156,6 +157,11 @@ class MainWindow(QMainWindow):
         # Guard to suppress auto-open on tree selection during programmatic navigation
         self._suspend_selection_open: bool = False
         
+        # Track virtual (unsaved) pages
+        self.virtual_pages: set[str] = set()
+        # Track original content of virtual pages to detect actual edits
+        self.virtual_page_original_content: dict[str, str] = {}
+        
         # Bookmarks
         self.bookmarks: list[str] = []
         self.bookmark_buttons: dict[str, QPushButton] = {}
@@ -171,6 +177,28 @@ class MainWindow(QMainWindow):
         self.tree_view.enterActivated.connect(self._focus_editor_from_tree)
         self.dir_icon = self.style().standardIcon(QStyle.SP_DirIcon)
         self.file_icon = self.style().standardIcon(QStyle.SP_FileIcon)
+        
+        # Create custom header widget with "Show Journal" checkbox
+        self.tree_header_widget = QWidget()
+        tree_header_layout = QHBoxLayout()
+        tree_header_layout.setContentsMargins(5, 2, 5, 2)
+        tree_header_layout.setSpacing(10)
+        
+        tree_header_label = QLabel("Vault")
+        tree_header_label.setStyleSheet("font-weight: bold;")
+        tree_header_layout.addWidget(tree_header_label)
+        
+        self.show_journal_checkbox = QCheckBox("Show Journal")
+        self.show_journal_checkbox.setChecked(True)
+        self.show_journal_checkbox.toggled.connect(self._on_show_journal_toggled)
+        tree_header_layout.addWidget(self.show_journal_checkbox)
+        
+        tree_header_layout.addStretch()
+        self.tree_header_widget.setLayout(tree_header_layout)
+        
+        # Set the custom header widget
+        self.tree_view.header().hide()
+        self.tree_view.setHeaderHidden(True)
 
         self.editor = MarkdownEditor()
         self.editor.imageSaved.connect(self._on_image_saved)
@@ -196,9 +224,10 @@ class MainWindow(QMainWindow):
         self.editor.viewportResized.connect(self._position_toc_widget)
         self.editor.verticalScrollBar().valueChanged.connect(self._position_toc_widget)
 
-        self.task_panel = TaskPanel()
-        self.task_panel.refresh()
-        self.task_panel.taskActivated.connect(self._open_task_from_panel)
+        self.right_panel = TabbedRightPanel()
+        self.right_panel.refresh_tasks()
+        self.right_panel.taskActivated.connect(self._open_task_from_panel)
+        self.right_panel.dateActivated.connect(self._open_journal_date)
         self._inline_editor: Optional[InlineNameEdit] = None
         self._pending_selection: Optional[str] = None
         self._suspend_autosave = False
@@ -214,12 +243,21 @@ class MainWindow(QMainWindow):
 
         editor_split = QSplitter()
         editor_split.addWidget(self.editor)
-        editor_split.addWidget(self.task_panel)
+        editor_split.addWidget(self.right_panel)
         editor_split.setStretchFactor(0, 4)
         editor_split.setStretchFactor(1, 2)
 
+        # Create tree container with custom header
+        tree_container = QWidget()
+        tree_layout = QVBoxLayout()
+        tree_layout.setContentsMargins(0, 0, 0, 0)
+        tree_layout.setSpacing(0)
+        tree_layout.addWidget(self.tree_header_widget)
+        tree_layout.addWidget(self.tree_view)
+        tree_container.setLayout(tree_layout)
+        
         splitter = QSplitter()
-        splitter.addWidget(self.tree_view)
+        splitter.addWidget(tree_container)
         splitter.addWidget(editor_split)
         splitter.setStretchFactor(1, 5)
         splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -429,7 +467,7 @@ class MainWindow(QMainWindow):
                 page_file.write_text(body, encoding="utf-8")
 
     def _set_vault(self, directory: str) -> None:
-        self.task_panel.clear()
+        self.right_panel.clear_tasks()
         config.set_active_vault(None)
         try:
             resp = self.http.post("/api/vault/select", json={"path": directory})
@@ -444,6 +482,9 @@ class MainWindow(QMainWindow):
             config.save_last_vault(self.vault_root)
             self.font_size = config.load_font_size(self.font_size)
             self.editor.set_font_point_size(self.font_size)
+            # Load show_journal setting
+            show_journal = config.load_show_journal()
+            self.show_journal_checkbox.setChecked(show_journal)
         self.editor.set_context(self.vault_root, None)
         self.editor.set_markdown("")
         self.current_path = None
@@ -452,6 +493,8 @@ class MainWindow(QMainWindow):
         self._populate_vault_tree()
         self._reindex_vault()
         self._load_bookmarks()
+        if self.vault_root:
+            self.right_panel.set_vault_root(self.vault_root)
 
     def _add_bookmark(self) -> None:
         """Add the current page to bookmarks."""
@@ -473,6 +516,12 @@ class MainWindow(QMainWindow):
         page_name = Path(self.current_path).stem
         self.statusBar().showMessage(f"Bookmarked: {page_name}", 3000)
 
+    def _on_show_journal_toggled(self, checked: bool) -> None:
+        """Handle Show Journal checkbox toggle."""
+        if config.has_active_vault():
+            config.save_show_journal(checked)
+        self._populate_vault_tree()
+    
     def _load_bookmarks(self) -> None:
         """Load bookmarks from config and refresh display."""
         if not config.has_active_vault():
@@ -561,10 +610,17 @@ class MainWindow(QMainWindow):
             return
         data = resp.json().get("tree", [])
         self.tree_model.removeRows(0, self.tree_model.rowCount())
+        
+        # Check if Journal should be filtered
+        show_journal = self.show_journal_checkbox.isChecked()
+        
         for node in data:
             # Hide the root vault node (path == "/") and render only its children
             if node.get("path") == "/":
                 for child in node.get("children", []):
+                    # Filter out Journal folder if checkbox is unchecked
+                    if not show_journal and child.get("name") == "Journal":
+                        continue
                     self._add_tree_node(self.tree_model.invisibleRootItem(), child)
             else:
                 self._add_tree_node(self.tree_model.invisibleRootItem(), node)
@@ -572,7 +628,8 @@ class MainWindow(QMainWindow):
         if self._pending_selection:
             self._select_tree_path(self._pending_selection)
             self._pending_selection = None
-        self.task_panel.refresh()
+        self.right_panel.refresh_tasks()
+        self.right_panel.refresh_calendar()
 
     def _add_tree_node(self, parent: QStandardItem, node: dict) -> None:
         item = QStandardItem(node["name"])
@@ -585,6 +642,13 @@ class MainWindow(QMainWindow):
         icon = self.dir_icon if has_children or folder_path == "/" else self.file_icon
         item.setIcon(icon)
         item.setEditable(False)
+        
+        # Check if this is a virtual (unsaved) page
+        if open_path and open_path in self.virtual_pages:
+            font = item.font()
+            font.setItalic(True)
+            item.setFont(font)
+        
         parent.appendRow(item)
         for child in node.get("children", []):
             self._add_tree_node(item, child)
@@ -596,6 +660,9 @@ class MainWindow(QMainWindow):
         if previous.isValid():
             prev_target = previous.data(OPEN_ROLE) or previous.data(PATH_ROLE)
             if prev_target and prev_target == self.current_path:
+                # Check if leaving an unsaved virtual page
+                if self.current_path in self.virtual_pages:
+                    self._cleanup_virtual_page_if_unchanged(self.current_path)
                 self._save_current_file(auto=True)
         if not current.isValid():
             self._debug("Tree selection cleared (no valid index).")
@@ -621,6 +688,11 @@ class MainWindow(QMainWindow):
     def _open_file(self, path: str, retry: bool = False, add_to_history: bool = True, force: bool = False, cursor_at_end: bool = False) -> None:
         if not path or (path == self.current_path and not force):
             return
+        
+        # Clean up current page if it's an unchanged virtual page
+        if self.current_path and self.current_path in self.virtual_pages:
+            self._cleanup_virtual_page_if_unchanged(self.current_path)
+        
         self.autosave_timer.stop()
         
         # Add to page history (unless we're navigating through history)
@@ -650,7 +722,7 @@ class MainWindow(QMainWindow):
         self._suspend_autosave = False
         updated = indexer.index_page(path, content)
         if updated:
-            self.task_panel.refresh()
+            self.right_panel.refresh_tasks()
         move_cursor_to_end = cursor_at_end or self._should_focus_hr_tail(content)
         if move_cursor_to_end:
             cursor = self.editor.textCursor()
@@ -666,6 +738,9 @@ class MainWindow(QMainWindow):
             self.editor.refresh_heading_outline()
         self.statusBar().showMessage(f"Editing {display_path}")
         self._update_window_title()
+        
+        # Update calendar if this is a journal page
+        self._update_calendar_for_journal_page(path)
 
     def _save_current_file(self, auto: bool = False) -> None:
         if self._suspend_autosave:
@@ -681,6 +756,26 @@ class MainWindow(QMainWindow):
                 f"Autosave skipped due to path mismatch editor={editor_path} window={self.current_path}"
             )
             return
+        
+        # Check if this is a virtual page with unchanged content
+        if self.current_path in self.virtual_pages:
+            current_content = self.editor.to_markdown()
+            original_content = self.virtual_page_original_content.get(self.current_path)
+            
+            # If content hasn't changed from the template, don't save
+            if original_content is not None and current_content == original_content:
+                self._debug(f"Virtual page {self.current_path} unchanged from template, skipping save.")
+                # Still stop the timer to prevent repeated attempts
+                self.autosave_timer.stop()
+                return
+            
+            # Content has changed, ensure folders exist before saving
+            folder_path = self._file_path_to_folder(self.current_path)
+            if not self._ensure_page_folder(folder_path, allow_existing=True):
+                if not auto:
+                    self._alert(f"Failed to create folder for {self.current_path}")
+                return
+        
         payload = {"path": self.current_path, "content": self.editor.to_markdown()}
         try:
             resp = self.http.post("/api/file/write", json=payload)
@@ -691,7 +786,16 @@ class MainWindow(QMainWindow):
             return
         if config.has_active_vault():
             indexer.index_page(self.current_path, payload["content"])
-            self.task_panel.refresh()
+            self.right_panel.refresh_tasks()
+        
+        # Mark page as saved (remove from virtual pages)
+        was_virtual = self.current_path in self.virtual_pages
+        if was_virtual:
+            self.virtual_pages.discard(self.current_path)
+            self.virtual_page_original_content.pop(self.current_path, None)
+            self._populate_vault_tree()  # Refresh to remove italics
+            self.right_panel.refresh_calendar()  # Update calendar bold dates
+        
         self.autosave_timer.stop()
         message = "Auto-saved" if auto else "Saved"
         display_path = path_to_colon(self.current_path) if self.current_path else ""
@@ -971,6 +1075,210 @@ class MainWindow(QMainWindow):
         # Focus first, then go to line so the selection isn't cleared
         self.editor.setFocus()
         self._goto_line(line, select_line=True)
+    
+    def _open_journal_date(self, year: int, month: int, day: int) -> None:
+        """Open or create journal entry for the selected date."""
+        if not self.vault_root:
+            self._alert("Select a vault before creating journal entries.")
+            return
+        
+        # Format paths: Journal/YYYY/MM/DD/DD.txt
+        month_str = f"{month:02d}"
+        day_str = f"{day:02d}"
+        
+        # Build the file path
+        rel_path = f"/Journal/{year}/{month_str}/{day_str}/{day_str}{PAGE_SUFFIX}"
+        
+        # Check if file already exists
+        from pathlib import Path
+        abs_path = Path(self.vault_root) / rel_path.lstrip("/")
+        file_exists = abs_path.exists()
+        
+        if file_exists:
+            # File exists, open it normally
+            self._pending_selection = rel_path
+            self._populate_vault_tree()
+            self._open_file(rel_path)
+        else:
+            # File doesn't exist yet - open virtual page
+            self._open_virtual_journal_page(rel_path, year, month, day)
+        
+        self.editor.setFocus()
+        self._apply_focus_borders()
+    
+    def _open_virtual_journal_page(self, rel_path: str, year: int, month: int, day: int) -> None:
+        """Open a virtual (not yet saved) journal page."""
+        # Generate template content but don't save to disk yet
+        from datetime import date
+        target_date = date(year, month, day)
+        
+        templates_root = Path(__file__).parent.parent.parent / "templates"
+        day_tpl = templates_root / "JournalDay.txt"
+        
+        vars_map = {
+            "{{YYYY}}": f"{year}",
+            "{{Month}}": target_date.strftime("%B"),
+            "{{DOW}}": target_date.strftime("%A"),
+            "{{dd}}": f"{day:02d}",
+        }
+        
+        content = ""
+        if day_tpl.exists():
+            try:
+                raw = day_tpl.read_text(encoding="utf-8")
+                content = raw
+                for k, v in vars_map.items():
+                    content = content.replace(k, v)
+            except Exception:
+                content = f"# {target_date.strftime('%A %d %B %Y')}\n\n"
+        else:
+            content = f"# {target_date.strftime('%A %d %B %Y')}\n\n"
+        
+        # Set up editor without saving to disk
+        self.editor.set_context(self.vault_root, rel_path)
+        self.current_path = rel_path
+        self._suspend_autosave = True
+        self.editor.set_markdown(content)
+        self._suspend_autosave = False
+        
+        # Mark as virtual page and store original template content
+        self.virtual_pages.add(rel_path)
+        self.virtual_page_original_content[rel_path] = content
+        
+        # Move cursor to end for immediate typing
+        cursor = self.editor.textCursor()
+        display_length = len(self.editor.toPlainText())
+        cursor.setPosition(display_length)
+        self.editor.setTextCursor(cursor)
+        
+        # Update UI
+        display_path = path_to_colon(rel_path) or rel_path
+        if hasattr(self, "toc_widget"):
+            self.toc_widget.set_base_path(display_path)
+            self.editor.refresh_heading_outline()
+        self.statusBar().showMessage(f"Editing (unsaved) {display_path}")
+        self._update_window_title()
+        
+        # Update calendar to show this date
+        self._update_calendar_for_journal_page(rel_path)
+        
+        # Refresh tree to show italicized entry
+        self._populate_vault_tree()
+    
+    def _apply_journal_templates_for_date(self, day_file_path: str, year: int, month: int, day: int) -> None:
+        """Apply journal templates for a specific date."""
+        if not self.vault_root:
+            return
+        
+        from datetime import date
+        target_date = date(year, month, day)
+        year_str = f"{year}"
+        month_num = f"{month:02d}"
+        month_name = target_date.strftime("%B")
+        day_num = f"{day:02d}"
+        dow_name = target_date.strftime("%A")
+        
+        vault_root = Path(self.vault_root)
+        journal_root = vault_root / "Journal"
+        year_dir = journal_root / year_str
+        month_dir = year_dir / month_num
+        day_dir = month_dir / day_num
+        
+        year_page = year_dir / f"{year_dir.name}{PAGE_SUFFIX}"
+        month_page = month_dir / f"{month_dir.name}{PAGE_SUFFIX}"
+        day_page = day_dir / f"{day_dir.name}{PAGE_SUFFIX}"
+        
+        templates_root = Path(__file__).parent.parent.parent / "templates"
+        year_tpl = templates_root / "JournalYear.txt"
+        month_tpl = templates_root / "JournalMonth.txt"
+        day_tpl = templates_root / "JournalDay.txt"
+        
+        vars_map = {
+            "{{YYYY}}": year_str,
+            "{{Month}}": month_name,
+            "{{DOW}}": dow_name,
+            "{{dd}}": day_num,
+        }
+        
+        def render(template_path: Path) -> str:
+            try:
+                raw = template_path.read_text(encoding="utf-8")
+            except Exception:
+                return ""
+            out = raw
+            for k, v in vars_map.items():
+                out = out.replace(k, v)
+            return out
+        
+        year_dir.mkdir(parents=True, exist_ok=True)
+        month_dir.mkdir(parents=True, exist_ok=True)
+        day_dir.mkdir(parents=True, exist_ok=True)
+        
+        def needs_write(path: Path) -> bool:
+            if not path.exists():
+                return True
+            try:
+                size = path.stat().st_size
+            except OSError:
+                return False
+            return size < 20
+        
+        if needs_write(year_page) and year_tpl.exists():
+            content = render(year_tpl)
+            if content:
+                year_page.write_text(content, encoding="utf-8")
+        
+        if needs_write(month_page) and month_tpl.exists():
+            content = render(month_tpl)
+            if content:
+                month_page.write_text(content, encoding="utf-8")
+        
+        if needs_write(day_page) and day_tpl.exists():
+            content = render(day_tpl)
+            if content:
+                day_page.write_text(content, encoding="utf-8")
+    
+    def _cleanup_virtual_page_if_unchanged(self, path: str) -> None:
+        """Remove virtual page tracking if it was never edited."""
+        if path not in self.virtual_pages:
+            return
+        
+        current_content = self.editor.to_markdown()
+        original_content = self.virtual_page_original_content.get(path)
+        
+        # If content hasn't changed from template, clean up virtual tracking
+        if original_content is not None and current_content == original_content:
+            self.virtual_pages.discard(path)
+            self.virtual_page_original_content.pop(path, None)
+            self._debug(f"Cleaned up unchanged virtual page: {path}")
+    
+    def _extract_journal_date(self, path: str) -> Optional[tuple[int, int, int]]:
+        """Extract year, month, day from a journal path like /Journal/2025/11/16/16.txt.
+        
+        Returns tuple of (year, month, day) or None if not a journal path.
+        """
+        if not path or not path.startswith("/Journal/"):
+            return None
+        
+        try:
+            # Split path: /Journal/YYYY/MM/DD/DD.txt
+            parts = path.split("/")
+            if len(parts) >= 5:  # ['', 'Journal', 'YYYY', 'MM', 'DD', ...]
+                year = int(parts[2])
+                month = int(parts[3])
+                day = int(parts[4])
+                return (year, month, day)
+        except (ValueError, IndexError):
+            pass
+        
+        return None
+    
+    def _update_calendar_for_journal_page(self, path: str) -> None:
+        """Update calendar selection if opening a journal page."""
+        date_tuple = self._extract_journal_date(path)
+        if date_tuple:
+            year, month, day = date_tuple
+            self.right_panel.set_calendar_date(year, month, day)
 
     def _on_link_hovered(self, link: str) -> None:
         """Update status bar when hovering over a link."""
@@ -1319,7 +1627,8 @@ class MainWindow(QMainWindow):
             self.editor.set_markdown("")
         
         self._populate_vault_tree()
-        self.task_panel.refresh()
+        self.right_panel.refresh_tasks()
+        self.right_panel.refresh_calendar()
 
     def _parent_path(self, index: QModelIndex) -> str:
         parent = index.parent()
@@ -1527,7 +1836,7 @@ class MainWindow(QMainWindow):
             except OSError:
                 continue
             indexer.index_page(rel, content)
-        self.task_panel.refresh()
+        self.right_panel.refresh_tasks()
 
     # --- Utilities -----------------------------------------------------
     def _alert(self, message: str) -> None:
@@ -1635,7 +1944,7 @@ class MainWindow(QMainWindow):
             return widget
         if widget is self.tree_view or self.tree_view.isAncestorOf(widget):
             return widget
-        if widget is self.task_panel or self.task_panel.isAncestorOf(widget):
+        if widget is self.right_panel or self.right_panel.isAncestorOf(widget):
             return widget
         return None
 
@@ -1741,16 +2050,10 @@ class MainWindow(QMainWindow):
                     cur.movePosition(QTextCursor.Up, keep)
                     target.setTextCursor(cur)
                     return
-                # Intercept ONLY plain Left/Right for single-char movement; let Alt+Left/Right propagate
-                # so vi-mode Alt+h / Alt+l (translated to Alt+Left / Alt+Right) trigger global page traversal.
-                if key == Qt.Key_Left and modifiers == Qt.KeyboardModifiers(Qt.NoModifier):
-                    cur.movePosition(QTextCursor.Left, keep)
-                    target.setTextCursor(cur)
-                    return
-                if key == Qt.Key_Right and modifiers == Qt.KeyboardModifiers(Qt.NoModifier):
-                    cur.movePosition(QTextCursor.Right, keep)
-                    target.setTextCursor(cur)
-                    return
+                # DON'T intercept Left/Right for the editor - let them pass through to editor's keyPressEvent
+                # so the special link boundary handling works correctly. The editor has logic to skip
+                # over hidden null bytes in display-format links.
+                # We'll let these fall through to synthetic event generation below.
                 if key == Qt.Key_Home:
                     cur.movePosition(QTextCursor.StartOfLine, keep)
                     target.setTextCursor(cur)

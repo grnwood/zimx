@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, Qt, Signal, QDate
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCalendarWidget,
     QCheckBox,
     QLineEdit,
     QListWidget,
@@ -24,9 +25,18 @@ from .path_utils import path_to_colon
 
 class TaskPanel(QWidget):
     taskActivated = Signal(str, int)
+    dateActivated = Signal(int, int, int)  # year, month, day
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        
+        # Calendar widget for journal date selection
+        self.calendar = QCalendarWidget()
+        self.calendar.setGridVisible(True)
+        self.calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
+        self.calendar.clicked.connect(self._on_date_clicked)
+        self.calendar.setSelectedDate(QDate.currentDate())
+        
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search tasks…")
         self.search.textChanged.connect(self._refresh_tasks)
@@ -69,9 +79,12 @@ class TaskPanel(QWidget):
         splitter.setSizes([180, 360])
 
         layout = QVBoxLayout()
+        layout.addWidget(self.calendar)
         layout.addWidget(self.search)
         layout.addWidget(splitter, 1)
         self.setLayout(layout)
+        
+        self.vault_root = None
 
     def eventFilter(self, obj, event):
         if obj is self.tag_list.viewport() and event.type() == QEvent.MouseButtonPress:
@@ -168,3 +181,58 @@ class TaskPanel(QWidget):
 
     def _present_path(self, path: str) -> str:
         return path_to_colon(path)
+    
+    def _on_date_clicked(self, date: QDate) -> None:
+        """Handle calendar date click - emit signal to create/open journal entry."""
+        year = date.year()
+        month = date.month()
+        day = date.day()
+        self.dateActivated.emit(year, month, day)
+    
+    def set_vault_root(self, vault_root: str) -> None:
+        """Set vault root for calendar date formatting."""
+        self.vault_root = vault_root
+        self._update_calendar_dates()
+    
+    def _update_calendar_dates(self) -> None:
+        """Scan journal folder and bold dates that have saved entries."""
+        if not self.vault_root:
+            return
+        
+        from pathlib import Path
+        from PySide6.QtGui import QTextCharFormat, QFont
+        
+        vault_path = Path(self.vault_root)
+        journal_path = vault_path / "Journal"
+        
+        if not journal_path.exists():
+            return
+        
+        # Get current month/year from calendar
+        current_date = self.calendar.selectedDate()
+        year = current_date.year()
+        month = current_date.month()
+        
+        # Bold format for dates with entries
+        bold_format = QTextCharFormat()
+        bold_font = QFont()
+        bold_font.setBold(True)
+        bold_format.setFont(bold_font)
+        
+        # Check each day in the current month
+        year_path = journal_path / str(year)
+        month_path = year_path / f"{month:02d}"
+        
+        if month_path.exists():
+            for day_dir in month_path.iterdir():
+                if day_dir.is_dir():
+                    try:
+                        day_num = int(day_dir.name)
+                        day_file = day_dir / f"{day_dir.name}{PAGE_SUFFIX}"
+                        
+                        # Check if the file exists (saved page)
+                        if day_file.exists():
+                            date = QDate(year, month, day_num)
+                            self.calendar.setDateTextFormat(date, bold_format)
+                    except (ValueError, OSError):
+                        continue
