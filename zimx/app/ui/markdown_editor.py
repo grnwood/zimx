@@ -31,14 +31,18 @@ DISPLAY_TASK_PATTERN = re.compile(r"^(\s*)([☐☑])(\s+)", re.MULTILINE)
 # Bullet patterns for storage and display
 BULLET_STORAGE_PATTERN = re.compile(r"^(\s*)\* ", re.MULTILINE)
 BULLET_DISPLAY_PATTERN = re.compile(r"^(\s*)• ", re.MULTILINE)
-# Plus-prefixed link pattern: +PageName or +Projects (any word after +)
-CAMEL_LINK_PATTERN = QRegularExpression(r"\+(?P<link>[A-Za-z]\w*)")
-# Colon link pattern with optional anchor: PageA:PageB#heading-12
-COLON_LINK_PATTERN = QRegularExpression(r"(?P<link>[\w]+(?::[\w]+)+(?:#[A-Za-z0-9_-]+)?)")
+# Plus-prefixed link pattern: +PageName or +Projects (any word after +, allowing spaces)
+CAMEL_LINK_PATTERN = QRegularExpression(r"\+(?P<link>[A-Za-z][\w ]*)")
+# Colon link pattern with optional anchor: PageA:PageB#heading-12 or Page Name:Another Page#heading
+# Also matches single page names with anchors: Marketing Strategy#anchor
+# Matches either: (PageName:PageName...) OR (PageName#anchor) OR (PageName:PageName#anchor)
+# Now allows spaces in page names
+COLON_LINK_PATTERN = QRegularExpression(r"(?P<link>(?:[\w ]+:[\w ]+(?::[\w ]+)*(?:#[A-Za-z0-9_-]+)?)|(?:[\w ]+#[A-Za-z0-9_-]+))")
 # Markdown-style link with colon target (optionally with anchor): [Text](PageA:PageB#anchor)
-# Allow optional whitespace (including newlines) between ]( 
+# Also supports single page with anchor: [Text](PageName#anchor)
+# Allow optional whitespace (including newlines) between ]( and spaces in page names
 MARKDOWN_COLON_LINK_PATTERN = QRegularExpression(
-    r"\[(?P<text>[^\]]+)\]\s*\((?P<link>[\w]+(?::[\w]+)+(?:#[A-Za-z0-9_-]+)?)\)"
+    r"\[(?P<text>[^\]]+)\]\s*\((?P<link>(?:[\w ]+:[\w ]+(?::[\w ]+)*(?:#[A-Za-z0-9_-]+)?)|(?:[\w ]+#[A-Za-z0-9_-]+))\)"
 )
 # Generic markdown link for files (with an extension) e.g. [Report](report.pdf) or [Img](./image.png)
 # Accept optional leading ./ and subfolder segments; require a dot-extension 1-8 chars
@@ -48,12 +52,14 @@ FILE_MARKDOWN_LINK_PATTERN = QRegularExpression(
 )
 # Storage pattern for markdown links (using Python re for easier replacement)
 # DOTALL flag makes . match newlines, \s* allows whitespace including newlines
+# Now allows spaces in page names and supports single page with anchor
 MARKDOWN_LINK_STORAGE_PATTERN = re.compile(
-    r"\[(?P<text>[^\]]+)\]\s*\((?P<link>[\w]+(?::[\w]+)+(?:#[A-Za-z0-9_-]+)?)\)",
+    r"\[(?P<text>[^\]]+)\]\s*\((?P<link>(?:[\w ]+:[\w ]+(?::[\w ]+)*(?:#[A-Za-z0-9_-]+)?)|(?:[\w ]+#[A-Za-z0-9_-]+))\)",
     re.MULTILINE | re.DOTALL,
 )
 # Display pattern for rendered links (sentinel + null separator + label)
-MARKDOWN_LINK_DISPLAY_PATTERN = re.compile(r"\x00(?P<link>[\w:#\-]+)\x00(?P<text>[^\x00]+)")
+# Now allows spaces in link paths
+MARKDOWN_LINK_DISPLAY_PATTERN = re.compile(r"\x00(?P<link>[\w :# \-]+)\x00(?P<text>[^\x00]+)")
 HEADING_MAX_LEVEL = 5
 HEADING_SENTINEL_BASE = 0xE000
 HEADING_MARK_PATTERN = re.compile(r"^(\s*)(#{1,5})(\s+)(.+)$", re.MULTILINE)
@@ -87,6 +93,14 @@ def heading_level_from_char(char: str) -> int:
 class MarkdownHighlighter(QSyntaxHighlighter):
     def __init__(self, parent) -> None:  # type: ignore[override]
         super().__init__(parent)
+        # Precompile regex patterns (avoid per-block construction)
+        self._code_pattern = QRegularExpression(r"`[^`]+`")
+        self._bold_pattern = QRegularExpression(r"\*\*([^*]+)\*\*")
+        self._italic_pattern = QRegularExpression(r"\*([^*]+)\*")
+        # Timing instrumentation
+        self._timing_enabled = False
+        self._timing_total = 0.0
+        self._timing_blocks = 0
         self.heading_format = QTextCharFormat()
         self.heading_format.setForeground(QColor("#6cb4ff"))
         self.heading_format.setFontWeight(QFont.Weight.DemiBold)
@@ -133,12 +147,12 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.hr_format.setBackground(QColor("#333333"))
 
     def highlightBlock(self, text: str) -> None:  # type: ignore[override]
+        import time
+        t0 = time.perf_counter() if self._timing_enabled else 0.0
+
         stripped = text.lstrip()
         indent = len(text) - len(stripped)
-        if stripped:
-            level = heading_level_from_char(stripped[0])
-        else:
-            level = 0
+        level = heading_level_from_char(stripped[0]) if stripped else 0
         if level:
             fmt = self.heading_styles[min(level, len(self.heading_styles)) - 1]
             self.setFormat(indent + 1, max(0, len(stripped) - 1), fmt)
@@ -151,32 +165,24 @@ class MarkdownHighlighter(QSyntaxHighlighter):
 
         if text.strip().startswith(("- ", "* ", "+ ")):
             self.setFormat(0, len(text), self.list_format)
-
         if text.strip().startswith(">"):
             self.setFormat(0, len(text), self.quote_format)
-
-        # Horizontal rule: --- on its own line
         if text.strip() == "---":
             self.setFormat(0, len(text), self.hr_format)
 
-        code_pattern = QRegularExpression(r"`[^`]+`")
-        iterator = code_pattern.globalMatch(text)
+        # Inline code / bold / italic
+        iterator = self._code_pattern.globalMatch(text)
         while iterator.hasNext():
             match = iterator.next()
             self.setFormat(match.capturedStart(), match.capturedLength(), self.code_format)
-
-        bold_pattern = QRegularExpression(r"\*\*([^*]+)\*\*")
-        iterator = bold_pattern.globalMatch(text)
+        iterator = self._bold_pattern.globalMatch(text)
         while iterator.hasNext():
             match = iterator.next()
             self.setFormat(match.capturedStart(), match.capturedLength(), self.bold_format)
-
-        italic_pattern = QRegularExpression(r"\*([^*]+)\*")
-        iterator = italic_pattern.globalMatch(text)
+        iterator = self._italic_pattern.globalMatch(text)
         while iterator.hasNext():
             match = iterator.next()
             self.setFormat(match.capturedStart(), match.capturedLength(), self.italic_format)
-
         if text.startswith("```"):
             self.setFormat(0, len(text), self.code_block)
 
@@ -184,96 +190,87 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         while iterator.hasNext():
             match = iterator.next()
             self.setFormat(match.capturedStart(), match.capturedLength(), self.tag_format)
-        stripped = text.lstrip()
-        if stripped.startswith("☐") or stripped.startswith("☑"):
-            offset = len(text) - len(stripped)
+
+        stripped2 = text.lstrip()
+        if stripped2.startswith("☐") or stripped2.startswith("☑"):
+            offset = len(text) - len(stripped2)
             self.setFormat(offset, 1, self.checkbox_format)
 
-        # Format for clickable links (both CamelCase and colon notation)
+        # Link formatting
         link_format = QTextCharFormat()
         link_format.setForeground(QColor("#4fa3ff"))
         link_format.setFontUnderline(True)
-        
-        # Highlight display-format markdown links: \x00Link\x00Label
-        # Find all null-separated link patterns and highlight only the label portion
-        display_link_spans: list[tuple[int,int]] = []
+
+        display_link_spans: list[tuple[int, int]] = []
         idx = 0
         while idx < len(text):
-            if text[idx] == '\x00':
-                # Start of encoded link
+            if text[idx] == "\x00":
                 link_start = idx + 1
-                link_end = text.find('\x00', link_start)
+                link_end = text.find("\x00", link_start)
                 if link_end > link_start:
                     label_start = link_end + 1
-                    # Find the end of the label (could be space, newline, or another \x00)
                     label_end = label_start
-                    while label_end < len(text) and text[label_end] not in ('\x00', '\n'):
+                    while label_end < len(text) and text[label_end] not in ("\x00", "\n"):
                         label_end += 1
-                    # Hide the null bytes and link portion, show only label
-                    # Format: \x00Link\x00Label
-                    # Hide: idx to label_start (the \x00Link\x00 part)
-                    # Show and highlight: label_start to label_end
                     if label_end > label_start:
-                        self.setFormat(idx, label_start - idx, self.hidden_format)  # Hide \x00Link\x00
-                        self.setFormat(label_start, label_end - label_start, link_format)  # Highlight label
+                        self.setFormat(idx, label_start - idx, self.hidden_format)
+                        self.setFormat(label_start, label_end - label_start, link_format)
                         display_link_spans.append((idx, label_end))
                         idx = label_end
                         continue
             idx += 1
-        
-        # Highlight markdown colon links (storage format): underline only the visible text
+
         md_iter = MARKDOWN_COLON_LINK_PATTERN.globalMatch(text)
-        md_spans: list[tuple[int,int]] = []
+        md_spans: list[tuple[int, int]] = []
         while md_iter.hasNext():
             m = md_iter.next()
-            start = m.capturedStart()
-            end = start + m.capturedLength()
+            start = m.capturedStart(); end = start + m.capturedLength()
             md_spans.append((start, end))
-            # text inside [] starts at start+1 with length of 'text'
             text_val = m.captured("text")
             text_start = start + 1
             self.setFormat(text_start, len(text_val), link_format)
 
-        # Highlight CamelCase links
         camel_iter = CAMEL_LINK_PATTERN.globalMatch(text)
         while camel_iter.hasNext():
             match = camel_iter.next()
             self.setFormat(match.capturedStart(), match.capturedLength(), link_format)
-        
-        # Highlight colon notation links (PageA:PageB:PageC)
+
         colon_iter = COLON_LINK_PATTERN.globalMatch(text)
         while colon_iter.hasNext():
             match = colon_iter.next()
-            s = match.capturedStart()
-            e = s + match.capturedLength()
-            # Skip colon highlighting if inside a markdown link span OR display link span
+            s = match.capturedStart(); e = s + match.capturedLength()
             inside_md = any(ms <= s and e <= me for (ms, me) in md_spans)
             inside_display = any(ds <= s and e <= de for (ds, de) in display_link_spans)
             if not inside_md and not inside_display:
                 self.setFormat(s, e - s, link_format)
 
-        # Highlight generic file markdown links (exclude ones already treated as colon links)
         file_iter = FILE_MARKDOWN_LINK_PATTERN.globalMatch(text)
         while file_iter.hasNext():
             fm = file_iter.next()
-            start = fm.capturedStart()
-            end = start + fm.capturedLength()
-            # Avoid double-formatting if overlaps colon link spans
+            start = fm.capturedStart(); end = start + fm.capturedLength()
             overlap_colon = any(ms <= start and end <= me for (ms, me) in md_spans)
             if overlap_colon:
                 continue
             label = fm.captured("text")
-            label_start = start + 1  # after [
+            label_start = start + 1
             label_len = len(label)
-            # Hide leading '[' and any part up to label_start
             if label_start > start:
                 self.setFormat(start, label_start - start, self.hidden_format)
-            # Highlight label itself
             self.setFormat(label_start, label_len, link_format)
-            # Hide trailing ](file.ext) portion
             label_end = label_start + label_len
             if end > label_end:
                 self.setFormat(label_end, end - label_end, self.hidden_format)
+
+        if self._timing_enabled:
+            self._timing_total += (time.perf_counter() - t0)
+            self._timing_blocks += 1
+
+    def reset_timing(self):
+        self._timing_total = 0.0
+        self._timing_blocks = 0
+
+    def enable_timing(self, enabled: bool):
+        self._timing_enabled = enabled
 
 
 class MarkdownEditor(QTextEdit):
@@ -347,16 +344,73 @@ class MarkdownEditor(QTextEdit):
         return self._current_path
 
     def set_markdown(self, content: str) -> None:
+        import time
+        t0 = time.perf_counter()
+        
         normalized = self._normalize_markdown_images(content)
+        t1 = time.perf_counter()
+        
         display = self._to_display(normalized)
+        t2 = time.perf_counter()
+        
+        # Enable highlighter timing instrumentation (will be disabled at end)
+        self.highlighter.enable_timing(True)
+        self.highlighter.reset_timing()
         self._display_guard = True
+        self.setUpdatesEnabled(False)
         self.document().clear()
-        self.setPlainText(display)
-        self._render_images(display)
+        incremental = False
+        batch_ms_total = 0.0
+        batches = 0
+        from os import getenv
+        if getenv("ZIMX_INCREMENTAL_LOAD") == "1":
+            # Incremental batch insertion to compare performance with setPlainText
+            incremental = True
+            lines = display.splitlines(keepends=True)
+            batch_size = 50  # tune if needed
+            buf = []
+            import time as _time
+            for i, line in enumerate(lines):
+                buf.append(line)
+                if len(buf) >= batch_size or i == len(lines) - 1:
+                    b0 = _time.perf_counter()
+                    self.insertPlainText("".join(buf))
+                    b1 = _time.perf_counter()
+                    batch_ms_total += (b1 - b0) * 1000.0
+                    batches += 1
+                    buf = []
+            t3 = time.perf_counter()
+        else:
+            self.setPlainText(display)
+            t3 = time.perf_counter()
+        self.setUpdatesEnabled(True)
+        
+        # Lazy load images after a short delay to let the UI render first
+        QTimer.singleShot(0, lambda: self._render_images(display))
+        t4 = time.perf_counter()
+        
         self._display_guard = False
         self._schedule_heading_outline()
         # Ensure scroll-past-end margin is applied after new content
         self._apply_scroll_past_end_margin()
+        t5 = time.perf_counter()
+        
+        print(f"[TIMING] set_markdown breakdown:")
+        print(f"  normalize_images: {(t1-t0)*1000:.1f}ms")
+        print(f"  to_display: {(t2-t1)*1000:.1f}ms")
+        print(f"  setPlainText: {(t3-t2)*1000:.1f}ms")
+        print(f"  render_images: {(t4-t3)*1000:.1f}ms (lazy - deferred)")
+        print(f"  schedule_outline+margin: {(t5-t4)*1000:.1f}ms")
+        print(f"  TOTAL: {(t5-t0)*1000:.1f}ms")
+        if incremental:
+            print(f"[TIMING] Incremental batches={batches} cumulative_insert={batch_ms_total:.1f}ms avg_batch={(batch_ms_total/max(batches,1)):.1f}ms")
+        # Report highlighter timing
+        if self.highlighter._timing_blocks:
+            avg = (self.highlighter._timing_total / self.highlighter._timing_blocks) * 1000.0
+            total = self.highlighter._timing_total * 1000.0
+            print(f"[TIMING] Highlighter: blocks={self.highlighter._timing_blocks} total={total:.1f}ms avg={avg:.2f}ms")
+        # Disable timing to avoid overhead for subsequent edits
+        self.highlighter.enable_timing(False)
 
     def to_markdown(self) -> str:
         markdown = self._doc_to_markdown()
@@ -618,7 +672,9 @@ class MarkdownEditor(QTextEdit):
             menu = self.createStandardContextMenu()
             menu.addSeparator()
             copy_action = menu.addAction("Copy Link to Location")
-            copy_action.triggered.connect(self._copy_link_to_location)
+            # Get heading slug if cursor is on a heading line
+            slug = self.current_heading_slug()
+            copy_action.triggered.connect(lambda: self._copy_link_to_location(link_text=None, anchor_slug=slug))
             
             # Add Edit Page Source action (delegates to main window)
             edit_src_action = menu.addAction("Edit Page Source")
@@ -1637,26 +1693,37 @@ class MarkdownEditor(QTextEdit):
         This operates on the current document by selecting each pattern range
         and inserting a QTextImageFormat created from the resolved path.
         """
+        import time
         matches = list(IMAGE_PATTERN.finditer(display_text))
         if not matches:
             return
+        
+        print(f"[TIMING] Rendering {len(matches)} images...")
         cursor = self.textCursor()
         cursor.beginEditBlock()
         try:
-            for match in reversed(matches):
+            for idx, match in enumerate(reversed(matches)):
+                t_img_start = time.perf_counter()
                 start, end = match.span()
                 cursor.setPosition(start)
                 cursor.setPosition(end, QTextCursor.KeepAnchor)
+                
+                path = match.group("path")
                 fmt = self._create_image_format(
-                    match.group("path"),
+                    path,
                     match.group("alt") or "",
                     match.group("width"),
                 )
+                t_img_end = time.perf_counter()
+                
                 if fmt is None:
                     # If the image can't be resolved, leave the markdown text as-is
+                    print(f"  Image {idx+1}/{len(matches)} ({path}): FAILED")
                     continue
+                
                 cursor.removeSelectedText()
                 cursor.insertImage(fmt)
+                print(f"  Image {idx+1}/{len(matches)} ({path}): {(t_img_end - t_img_start)*1000:.1f}ms")
         finally:
             cursor.endEditBlock()
 
