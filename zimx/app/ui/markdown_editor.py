@@ -20,7 +20,7 @@ from PySide6.QtGui import (
     QPen,
 )
 from PySide6.QtWidgets import QTextEdit, QMenu, QInputDialog, QDialog
-from .path_utils import path_to_colon, colon_to_path
+from .path_utils import path_to_colon, colon_to_path, ensure_root_colon_link
 from .heading_utils import heading_slug
 
 
@@ -31,18 +31,23 @@ DISPLAY_TASK_PATTERN = re.compile(r"^(\s*)([☐☑])(\s+)", re.MULTILINE)
 # Bullet patterns for storage and display
 BULLET_STORAGE_PATTERN = re.compile(r"^(\s*)\* ", re.MULTILINE)
 BULLET_DISPLAY_PATTERN = re.compile(r"^(\s*)• ", re.MULTILINE)
-# Plus-prefixed link pattern: +PageName or +Projects (any word after +, allowing spaces)
-CAMEL_LINK_PATTERN = QRegularExpression(r"\+(?P<link>[A-Za-z][\w ]*)")
-# Colon link pattern with optional anchor: PageA:PageB#heading-12 or Page Name:Another Page#heading
-# Also matches single page names with anchors: Marketing Strategy#anchor
-# Matches either: (PageName:PageName...) OR (PageName#anchor) OR (PageName:PageName#anchor)
-# Now allows spaces in page names
-COLON_LINK_PATTERN = QRegularExpression(r"(?P<link>(?:[\w ]+:[\w ]+(?::[\w ]+)*(?:#[A-Za-z0-9_-]+)?)|(?:[\w ]+#[A-Za-z0-9_-]+))")
-# Markdown-style link with colon target (optionally with anchor): [Text](PageA:PageB#anchor)
-# Also supports single page with anchor: [Text](PageName#anchor)
-# Allow optional whitespace (including newlines) between ]( and spaces in page names
+# Plus-prefixed link pattern: +PageName or +Projects (CamelCase style, no trailing spaces)
+CAMEL_LINK_PATTERN = QRegularExpression(r"\+(?P<link>[A-Za-z][\w]*)")
+
+_COLON_SEGMENT = r"[\w ]+"
+_ROOT_COLON_PATH = rf":{_COLON_SEGMENT}(?::{_COLON_SEGMENT})*"
+_MULTI_COLON_PATH = rf"{_COLON_SEGMENT}:{_COLON_SEGMENT}(?::{_COLON_SEGMENT})*"
+_ANCHOR_SUFFIX = r"(?:#[A-Za-z0-9_-]+)?"
+_SINGLE_WITH_ANCHOR = rf":?{_COLON_SEGMENT}#[A-Za-z0-9_-]+"
+COLON_LINK_BODY_PATTERN = (
+    rf"(?:{_ROOT_COLON_PATH}{_ANCHOR_SUFFIX}|{_MULTI_COLON_PATH}{_ANCHOR_SUFFIX}|{_SINGLE_WITH_ANCHOR})"
+)
+
+# Colon link pattern with optional anchor; now supports leading ':' for root links.
+COLON_LINK_PATTERN = QRegularExpression(rf"(?P<link>{COLON_LINK_BODY_PATTERN})")
+# Markdown-style link with colon target (optionally with anchor)
 MARKDOWN_COLON_LINK_PATTERN = QRegularExpression(
-    r"\[(?P<text>[^\]]+)\]\s*\((?P<link>(?:[\w ]+:[\w ]+(?::[\w ]+)*(?:#[A-Za-z0-9_-]+)?)|(?:[\w ]+#[A-Za-z0-9_-]+))\)"
+    rf"\[(?P<text>[^\]]+)\]\s*\((?P<link>{COLON_LINK_BODY_PATTERN})\)"
 )
 # Generic markdown link for files (with an extension) e.g. [Report](report.pdf) or [Img](./image.png)
 # Accept optional leading ./ and subfolder segments; require a dot-extension 1-8 chars
@@ -52,9 +57,9 @@ FILE_MARKDOWN_LINK_PATTERN = QRegularExpression(
 )
 # Storage pattern for markdown links (using Python re for easier replacement)
 # Limit whitespace to prevent catastrophic backtracking with malformed links
-# Now allows spaces in page names and supports single page with anchor
+# Now allows spaces in page names and supports single page with anchor/root prefix
 MARKDOWN_LINK_STORAGE_PATTERN = re.compile(
-    r"\[(?P<text>[^\]]+)\][ \t]*\((?P<link>(?:[\w ]+:[\w ]+(?::[\w ]+)*(?:#[A-Za-z0-9_-]+)?)|(?:[\w ]+#[A-Za-z0-9_-]+))\)",
+    rf"\[(?P<text>[^\]]+)\][ \t]*\((?P<link>{COLON_LINK_BODY_PATTERN})\)",
     re.MULTILINE,
 )
 # Display pattern for rendered links (sentinel + null separator + label)
@@ -456,6 +461,7 @@ class MarkdownEditor(QTextEdit):
         """
         if not colon_path:
             return
+        colon_path = ensure_root_colon_link(colon_path)
         cursor = self.textCursor()
         pos_before = cursor.position()
         
@@ -569,6 +575,11 @@ class MarkdownEditor(QTextEdit):
                     self.setTextCursor(c)
                     event.accept()
                     return
+            if event.modifiers() == Qt.AltModifier and event.key() in (Qt.Key_H, Qt.Key_L):
+                qt_key = Qt.Key_Left if event.key() == Qt.Key_H else Qt.Key_Right
+                self._trigger_history_navigation(qt_key)
+                event.accept()
+                return
             # ctrl-shift-j: PageUp
             if (event.modifiers() & Qt.ControlModifier) and (event.modifiers() & Qt.ShiftModifier):
                 if event.key() == Qt.Key_K:
@@ -584,6 +595,11 @@ class MarkdownEditor(QTextEdit):
         block = cursor.block()
         text = block.text()
         is_bullet, indent, content = self._is_bullet_line(text)
+        # Ctrl+E: edit link under cursor
+        if event.key() == Qt.Key_E and event.modifiers() == Qt.ControlModifier:
+            self._edit_link_at_cursor(cursor)
+            event.accept()
+            return
         # Tab: indent bullet
         if is_bullet and event.key() == Qt.Key_Tab and not event.modifiers():
             if self._handle_bullet_indent():
@@ -901,34 +917,19 @@ class MarkdownEditor(QTextEdit):
             idx += 1
         
         return False
-    
-    def _is_cursor_at_link_activation_point(self, cursor: QTextCursor) -> bool:
-        """Check if cursor is positioned where Enter should activate a link vs insert newline."""
-        block = cursor.block()
-        rel_pos = cursor.position() - block.position()
-        text = block.text()
-        
-        # Check if cursor is in the middle of a link label (not at boundaries)
-        idx = 0
-        while idx < len(text):
-            if text[idx] == '\x00':
-                link_start = idx + 1
-                link_end = text.find('\x00', link_start)
-                if link_end > link_start:
-                    label_start = link_end + 1
-                    label_end = label_start
-                    while label_end < len(text) and text[label_end] not in ('\x00', '\n'):
-                        label_end += 1
-                    # Activate if cursor is within the link label, but not at the very end
-                    if label_start <= rel_pos < label_end:
-                        return True
-                    idx = label_end
-                    continue
-            idx += 1
-        
-        return False
 
-    def _link_under_cursor(self, cursor: QTextCursor | None = None) -> Optional[str]:
+    def _trigger_history_navigation(self, qt_key: int) -> None:
+        """Simulate Alt+Left/Right to leverage MainWindow history shortcuts."""
+        window = self.window()
+        if not window:
+            return
+        press = QKeyEvent(QEvent.KeyPress, qt_key, Qt.AltModifier)
+        release = QKeyEvent(QEvent.KeyRelease, qt_key, Qt.AltModifier)
+        QApplication.sendEvent(window, press)
+        QApplication.sendEvent(window, release)
+    
+    def _link_region_at_cursor(self, cursor: QTextCursor | None = None) -> Optional[tuple[str, int, int]]:
+        """Return (link_text, start_pos, end_pos) for the link under the cursor, if any."""
         cursor = cursor or self.textCursor()
         block = cursor.block()
         rel = cursor.position() - block.position()
@@ -945,9 +946,8 @@ class MarkdownEditor(QTextEdit):
                     label_end = label_start
                     while label_end < len(text) and text[label_end] not in ('\x00', '\n'):
                         label_end += 1
-                    # Check if cursor is in the visible label portion (exclude end position)
                     if label_start <= rel < label_end:
-                        return text[link_start:link_end]
+                        return (text[link_start:link_end], label_start, label_end)
                     idx = label_end
                     continue
             idx += 1
@@ -961,7 +961,7 @@ class MarkdownEditor(QTextEdit):
             text_start = start + 1
             text_end = text_start + len(text_val)
             if text_start <= rel < text_end:
-                return m.captured("link")
+                return (m.captured("link"), text_start, text_end)
 
         # Check generic file markdown links
         file_iter = FILE_MARKDOWN_LINK_PATTERN.globalMatch(text)
@@ -972,7 +972,7 @@ class MarkdownEditor(QTextEdit):
             label_start = start + 1
             label_end = label_start + len(label)
             if label_start <= rel < label_end:
-                return fm.captured("file")
+                return (fm.captured("file"), label_start, label_end)
         
         # Check for CamelCase links
         iterator = CAMEL_LINK_PATTERN.globalMatch(block.text())
@@ -980,9 +980,8 @@ class MarkdownEditor(QTextEdit):
             match = iterator.next()
             start = match.capturedStart()
             end = start + match.capturedLength()
-            # Cursor must be INSIDE the link (exclude end position)
             if start <= rel < end:
-                return match.captured("link")
+                return (match.captured("link"), start, end)
         
         # Check for colon notation links (PageA:PageB:PageC)
         colon_iterator = COLON_LINK_PATTERN.globalMatch(block.text())
@@ -990,11 +989,24 @@ class MarkdownEditor(QTextEdit):
             match = colon_iterator.next()
             start = match.capturedStart()
             end = start + match.capturedLength()
-            # Cursor must be INSIDE the link (exclude end position)
             if start <= rel < end:
-                return match.captured("link")
+                return (match.captured("link"), start, end)
         
         return None
+
+    def _is_cursor_at_link_activation_point(self, cursor: QTextCursor) -> bool:
+        """Check if cursor is positioned where Enter should activate a link vs insert newline."""
+        region = self._link_region_at_cursor(cursor)
+        if not region:
+            return False
+        _, start, end = region
+        rel_pos = cursor.position() - cursor.block().position()
+        # Only treat as activation when cursor is strictly inside the link (not touching the ends)
+        return start < rel_pos < end
+
+    def _link_under_cursor(self, cursor: QTextCursor | None = None) -> Optional[str]:
+        region = self._link_region_at_cursor(cursor)
+        return region[0] if region else None
 
     def _markdown_link_at_cursor(self, cursor: QTextCursor) -> Optional[tuple[int,int,str,str]]:
         """Return (start, end, text, link) for a markdown link under cursor, or None."""
@@ -1129,15 +1141,18 @@ class MarkdownEditor(QTextEdit):
         dlg = EditLinkDialog(link_to=link_val, link_text=text_val, parent=self)
         if dlg.exec() == QDialog.Accepted:
             new_to = dlg.link_to() or link_val
-            new_text = dlg.link_text() or new_to
-            # Replace region with markdown link syntax
+            raw_label = dlg.link_text()
+            link_label = raw_label or None
+            if new_to:
+                match = COLON_LINK_PATTERN.match(new_to)
+                if match.hasMatch():
+                    new_to = ensure_root_colon_link(new_to)
             tc = QTextCursor(block)
             tc.setPosition(block.position() + start)
             tc.setPosition(block.position() + end, QTextCursor.KeepAnchor)
-            tc.insertText(f"[{new_text}]({new_to})")
-            
-            # Force full document re-render to apply display transformation
-            self._refresh_display()
+            tc.removeSelectedText()
+            self.setTextCursor(tc)
+            self.insert_link(new_to, link_label)
     
     def _copy_link_to_location(self, link_text: str | None = None, anchor_slug: Optional[str] = None) -> Optional[str]:
         """Copy a link location as colon-notation to clipboard.
@@ -1170,6 +1185,7 @@ class MarkdownEditor(QTextEdit):
             colon_path = path_to_colon(self._current_path)
 
         if colon_path:
+            colon_path = ensure_root_colon_link(colon_path)
             if anchor_slug and "#" not in colon_path:
                 colon_path = f"{colon_path}#{anchor_slug}"
             clipboard = QGuiApplication.clipboard()
