@@ -18,8 +18,9 @@ from PySide6.QtGui import (
     QGuiApplication,
     QPainter,
     QPen,
+    QKeyEvent,
 )
-from PySide6.QtWidgets import QTextEdit, QMenu, QInputDialog, QDialog
+from PySide6.QtWidgets import QTextEdit, QMenu, QInputDialog, QDialog, QApplication
 from .path_utils import path_to_colon, colon_to_path, ensure_root_colon_link
 from .heading_utils import heading_slug
 
@@ -100,8 +101,11 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         super().__init__(parent)
         # Precompile regex patterns (avoid per-block construction)
         self._code_pattern = QRegularExpression(r"`[^`]+`")
+        self._bold_italic_pattern = QRegularExpression(r"\*\*\*([^*]+)\*\*\*")
         self._bold_pattern = QRegularExpression(r"\*\*([^*]+)\*\*")
-        self._italic_pattern = QRegularExpression(r"\*([^*]+)\*")
+        self._italic_pattern = QRegularExpression(r"(?<!\*)\*([^*]+)\*(?!\*)")
+        self._strikethrough_pattern = QRegularExpression(r"~~([^~]+)~~")
+        self._highlight_pattern = QRegularExpression(r"==([^=]+)==")
         # Timing instrumentation
         self._timing_enabled = False
         self._timing_total = 0.0
@@ -128,17 +132,23 @@ class MarkdownHighlighter(QSyntaxHighlighter):
 
         self.code_format = QTextCharFormat()
         self.code_format.setForeground(QColor("#a3ffab"))
+        self.code_format.setBackground(QColor("#2a2a2a"))
         self.code_format.setFontFamily("Fira Code")
 
         self.quote_format = QTextCharFormat()
         self.quote_format.setForeground(QColor("#7fdbff"))
+        self.quote_format.setFontItalic(True)
 
         self.list_format = QTextCharFormat()
         self.list_format.setForeground(QColor("#ffffff"))
 
         self.code_block = QTextCharFormat()
         self.code_block.setBackground(QColor("#2a2a2a"))
+        self.code_block.setForeground(QColor("#a3ffab"))
         self.code_block.setFontFamily("Fira Code")
+        
+        self.code_fence_format = QTextCharFormat()
+        self.code_fence_format.setForeground(QColor("#555555"))
 
         self.tag_format = QTextCharFormat()
         self.tag_format.setForeground(QColor("#ffa657"))
@@ -150,10 +160,52 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.hr_format = QTextCharFormat()
         self.hr_format.setForeground(QColor("#555555"))
         self.hr_format.setBackground(QColor("#333333"))
+        
+        # Strikethrough format
+        self.strikethrough_format = QTextCharFormat()
+        self.strikethrough_format.setForeground(QColor("#888888"))
+        self.strikethrough_format.setFontStrikeOut(True)
+        
+        # Highlight format
+        self.highlight_format = QTextCharFormat()
+        self.highlight_format.setBackground(QColor("#ffff00"))
+        self.highlight_format.setForeground(QColor("#000000"))
+        
+        # Bold+Italic combined format
+        self.bold_italic_format = QTextCharFormat()
+        self.bold_italic_format.setForeground(QColor("#ffb8d1"))
+        self.bold_italic_format.setFontWeight(QFont.Weight.Bold)
+        self.bold_italic_format.setFontItalic(True)
 
     def highlightBlock(self, text: str) -> None:  # type: ignore[override]
         import time
         t0 = time.perf_counter() if self._timing_enabled else 0.0
+
+        # Block states: 0 = normal, 1 = inside code block
+        prev_state = self.previousBlockState()
+        in_code_block = (prev_state == 1)
+        
+        # Check if this line starts or ends a code block
+        if text.startswith("```"):
+            # Toggle code block state
+            in_code_block = not in_code_block
+            self.setCurrentBlockState(1 if in_code_block else 0)
+            # Dim the fence line
+            self.setFormat(0, len(text), self.code_fence_format)
+            if self._timing_enabled:
+                self._timing_blocks += 1
+                self._timing_total += time.perf_counter() - t0
+            return
+        elif in_code_block:
+            # Inside code block - style everything as code
+            self.setCurrentBlockState(1)
+            self.setFormat(0, len(text), self.code_block)
+            if self._timing_enabled:
+                self._timing_blocks += 1
+                self._timing_total += time.perf_counter() - t0
+            return
+        else:
+            self.setCurrentBlockState(0)
 
         stripped = text.lstrip()
         indent = len(text) - len(stripped)
@@ -170,26 +222,181 @@ class MarkdownHighlighter(QSyntaxHighlighter):
 
         if text.strip().startswith(("- ", "* ", "+ ")):
             self.setFormat(0, len(text), self.list_format)
-        if text.strip().startswith(">"):
-            self.setFormat(0, len(text), self.quote_format)
+        
+        # Blockquotes - handle > and >> (nested)
+        stripped_for_quote = text.lstrip()
+        if stripped_for_quote.startswith(">"):
+            # Count the number of > markers
+            quote_depth = 0
+            idx = 0
+            while idx < len(stripped_for_quote) and stripped_for_quote[idx] == '>':
+                quote_depth += 1
+                idx += 1
+            # Skip optional space after >
+            if idx < len(stripped_for_quote) and stripped_for_quote[idx] == ' ':
+                idx += 1
+            
+            # Hide the > markers and optional spaces
+            quote_start = len(text) - len(stripped_for_quote)
+            self.setFormat(quote_start, idx, self.hidden_format)
+            
+            # Style the remaining text as quote
+            remaining_length = len(text) - quote_start - idx
+            if remaining_length > 0:
+                self.setFormat(quote_start + idx, remaining_length, self.quote_format)
+        
         if text.strip() == "---":
             self.setFormat(0, len(text), self.hr_format)
-
-        # Inline code / bold / italic
+        
+        # Inline code - hide backticks and style content
         iterator = self._code_pattern.globalMatch(text)
         while iterator.hasNext():
             match = iterator.next()
-            self.setFormat(match.capturedStart(), match.capturedLength(), self.code_format)
+            start = match.capturedStart()
+            length = match.capturedLength()
+            
+            # Pattern: `content`
+            if length >= 2:  # At least `x`
+                content_start = start + 1  # Skip opening `
+                content_length = length - 2  # Exclude both ` markers
+                
+                # Hide opening `
+                self.setFormat(start, 1, self.hidden_format)
+                
+                # Apply code format to content
+                if content_length > 0:
+                    self.setFormat(content_start, content_length, self.code_format)
+                
+                # Hide closing `
+                self.setFormat(start + length - 1, 1, self.hidden_format)
+        
+        # Bold+Italic (must be checked before bold and italic separately)
+        iterator = self._bold_italic_pattern.globalMatch(text)
+        bold_italic_ranges = []
+        while iterator.hasNext():
+            match = iterator.next()
+            start = match.capturedStart()
+            length = match.capturedLength()
+            bold_italic_ranges.append((start, start + length))
+            
+            # Hide the *** markers and style the content
+            # Pattern: ***content***
+            content_start = start + 3  # Skip opening ***
+            content_length = length - 6  # Exclude both *** markers
+            
+            # Hide opening ***
+            self.setFormat(start, 3, self.hidden_format)
+            
+            # Apply format to content with actual bold+italic styling
+            if content_length > 0:
+                fmt = QTextCharFormat()
+                fmt.setFontWeight(QFont.Weight.Bold)
+                fmt.setFontItalic(True)
+                fmt.setForeground(QColor("#ffb8d1"))
+                self.setFormat(content_start, content_length, fmt)
+            
+            # Hide closing ***
+            self.setFormat(start + length - 3, 3, self.hidden_format)
+        
+        # Bold (skip ranges already formatted as bold+italic)
         iterator = self._bold_pattern.globalMatch(text)
         while iterator.hasNext():
             match = iterator.next()
-            self.setFormat(match.capturedStart(), match.capturedLength(), self.bold_format)
+            start = match.capturedStart()
+            length = match.capturedLength()
+            # Check if this range overlaps with bold+italic
+            overlaps = any(bi_start <= start < bi_end or bi_start < start + length <= bi_end 
+                          for bi_start, bi_end in bold_italic_ranges)
+            if not overlaps:
+                # Hide the ** markers and style the content
+                # Pattern: **content**
+                content_start = start + 2  # Skip opening **
+                content_length = length - 4  # Exclude both ** markers
+                
+                # Hide opening **
+                self.setFormat(start, 2, self.hidden_format)
+                
+                # Apply format to content with actual bold font weight
+                if content_length > 0:
+                    fmt = QTextCharFormat()
+                    fmt.setFontWeight(QFont.Weight.Bold)
+                    fmt.setForeground(QColor("#ffd479"))
+                    self.setFormat(content_start, content_length, fmt)
+                
+                # Hide closing **
+                self.setFormat(start + length - 2, 2, self.hidden_format)
+        
+        # Italic (skip ranges already formatted as bold+italic)
         iterator = self._italic_pattern.globalMatch(text)
         while iterator.hasNext():
             match = iterator.next()
-            self.setFormat(match.capturedStart(), match.capturedLength(), self.italic_format)
-        if text.startswith("```"):
-            self.setFormat(0, len(text), self.code_block)
+            start = match.capturedStart()
+            length = match.capturedLength()
+            # Check if this range overlaps with bold+italic
+            overlaps = any(bi_start <= start < bi_end or bi_start < start + length <= bi_end 
+                          for bi_start, bi_end in bold_italic_ranges)
+            if not overlaps:
+                # Hide the * markers and style the content
+                # Pattern: *content*
+                content_start = start + 1  # Skip opening *
+                content_length = length - 2  # Exclude both * markers
+                
+                # Hide opening *
+                self.setFormat(start, 1, self.hidden_format)
+                
+                # Apply format to content with actual italic styling
+                if content_length > 0:
+                    fmt = QTextCharFormat()
+                    fmt.setFontItalic(True)
+                    fmt.setForeground(QColor("#ffa7c4"))
+                    self.setFormat(content_start, content_length, fmt)
+                
+                # Hide closing *
+                self.setFormat(start + length - 1, 1, self.hidden_format)
+        
+        # Strikethrough
+        iterator = self._strikethrough_pattern.globalMatch(text)
+        while iterator.hasNext():
+            match = iterator.next()
+            start = match.capturedStart()
+            length = match.capturedLength()
+            
+            # Hide the ~~ markers and style the content
+            # Pattern: ~~content~~
+            content_start = start + 2  # Skip opening ~~
+            content_length = length - 4  # Exclude both ~~ markers
+            
+            # Hide opening ~~
+            self.setFormat(start, 2, self.hidden_format)
+            
+            # Apply strikethrough format to content
+            if content_length > 0:
+                self.setFormat(content_start, content_length, self.strikethrough_format)
+            
+            # Hide closing ~~
+            self.setFormat(start + length - 2, 2, self.hidden_format)
+        
+        # Highlight
+        iterator = self._highlight_pattern.globalMatch(text)
+        while iterator.hasNext():
+            match = iterator.next()
+            start = match.capturedStart()
+            length = match.capturedLength()
+            
+            # Hide the == markers and style the content
+            # Pattern: ==content==
+            content_start = start + 2  # Skip opening ==
+            content_length = length - 4  # Exclude both == markers
+            
+            # Hide opening ==
+            self.setFormat(start, 2, self.hidden_format)
+            
+            # Apply highlight format to content
+            if content_length > 0:
+                self.setFormat(content_start, content_length, self.highlight_format)
+            
+            # Hide closing ==
+            self.setFormat(start + length - 2, 2, self.hidden_format)
 
         iterator = TAG_PATTERN.globalMatch(text)
         while iterator.hasNext():
@@ -555,11 +762,140 @@ class MarkdownEditor(QTextEdit):
     
     # (Removed old _copy_link_to_location; newer implementation exists later in file)
 
+    def _toggle_markdown_format(self, prefix: str, suffix: str = None) -> None:
+        """Toggle markdown formatting around selected text or word at cursor.
+        
+        Args:
+            prefix: The markdown prefix (e.g., '**' for bold)
+            suffix: The markdown suffix (defaults to prefix if None)
+        """
+        if suffix is None:
+            suffix = prefix
+        
+        cursor = self.textCursor()
+        
+        # If no selection, select the word under cursor
+        if not cursor.hasSelection():
+            cursor.select(QTextCursor.WordUnderCursor)
+        
+        selected_text = cursor.selectedText()
+        if not selected_text:
+            return
+        
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+        
+        # Get the full document text to check surrounding characters
+        doc_text = self.toPlainText()
+        
+        # Check if selection is already wrapped with these markers
+        prefix_len = len(prefix)
+        suffix_len = len(suffix)
+        
+        already_wrapped = False
+        if (start >= prefix_len and end + suffix_len <= len(doc_text)):
+            before = doc_text[start - prefix_len:start]
+            after = doc_text[end:end + suffix_len]
+            if before == prefix and after == suffix:
+                already_wrapped = True
+        
+        cursor.beginEditBlock()
+        
+        if already_wrapped:
+            # Remove the wrapping markers
+            # First remove suffix
+            cursor.setPosition(end)
+            cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, suffix_len)
+            cursor.removeSelectedText()
+            
+            # Then remove prefix
+            cursor.setPosition(start - prefix_len)
+            cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, prefix_len)
+            cursor.removeSelectedText()
+            
+            # Restore selection without the markers
+            cursor.setPosition(start - prefix_len)
+            cursor.setPosition(start - prefix_len + len(selected_text), QTextCursor.KeepAnchor)
+        else:
+            # Add the wrapping markers
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.KeepAnchor)
+            wrapped_text = f"{prefix}{selected_text}{suffix}"
+            cursor.insertText(wrapped_text)
+            
+            # Select the content (without the markers)
+            cursor.setPosition(start + prefix_len)
+            cursor.setPosition(start + prefix_len + len(selected_text), QTextCursor.KeepAnchor)
+        
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+    
+    def _toggle_bold(self) -> None:
+        """Toggle bold formatting (**text**)."""
+        cursor = self.textCursor()
+        selected = cursor.selectedText()
+        
+        # Check if already italic with * - if so, upgrade to bold+italic
+        if selected and len(selected) >= 2:
+            if selected[0] == '*' and selected[-1] == '*' and not (selected.startswith('**') or selected.startswith('***')):
+                # Already italic with *, upgrade to ***
+                cursor.beginEditBlock()
+                new_text = f"**{selected}*"
+                cursor.insertText(new_text)
+                cursor.endEditBlock()
+                return
+        
+        self._toggle_markdown_format('**')
+    
+    def _toggle_italic(self) -> None:
+        """Toggle italic formatting (*text*)."""
+        cursor = self.textCursor()
+        selected = cursor.selectedText()
+        
+        # Check if already bold with ** - if so, upgrade to bold+italic
+        if selected and len(selected) >= 4:
+            if selected.startswith('**') and selected.endswith('**'):
+                # Already bold, upgrade to ***
+                cursor.beginEditBlock()
+                new_text = f"*{selected}*"
+                cursor.insertText(new_text)
+                cursor.endEditBlock()
+                return
+        
+        self._toggle_markdown_format('*')
+    
+    def _toggle_strikethrough(self) -> None:
+        """Toggle strikethrough formatting (~~text~~)."""
+        self._toggle_markdown_format('~~')
+    
+    def _toggle_highlight(self) -> None:
+        """Toggle highlight formatting (==text==)."""
+        self._toggle_markdown_format('==')
+
     def focusOutEvent(self, event):  # type: ignore[override]
         super().focusOutEvent(event)
         self.focusLost.emit()
 
     def keyPressEvent(self, event):  # type: ignore[override]
+        # Markdown formatting shortcuts (Ctrl+B, Ctrl+I, Ctrl+K, Ctrl+H)
+        if event.modifiers() == Qt.ControlModifier:
+            if event.key() == Qt.Key_B:
+                self._toggle_bold()
+                event.accept()
+                return
+            elif event.key() == Qt.Key_I:
+                self._toggle_italic()
+                event.accept()
+                return
+            elif event.key() == Qt.Key_K:
+                self._toggle_strikethrough()
+                event.accept()
+                return
+            elif event.key() == Qt.Key_H:
+                self._toggle_highlight()
+                event.accept()
+                return
+        
         # Vi-mode: Shift+H selects left, Shift+L selects right (like Shift+Arrow)
         if self._vi_mode_active:
             if (event.modifiers() & Qt.ShiftModifier) and not (event.modifiers() & Qt.ControlModifier):
@@ -577,6 +913,11 @@ class MarkdownEditor(QTextEdit):
                     return
             if event.modifiers() == Qt.AltModifier and event.key() in (Qt.Key_H, Qt.Key_L):
                 qt_key = Qt.Key_Left if event.key() == Qt.Key_H else Qt.Key_Right
+                # Set a flag on the window to restore vi mode after navigation
+                window = self.window()
+                if window:
+                    window._restore_vi_mode_after_nav = True
+                    print(f"[DEBUG] Editor: Alt+{'H' if event.key() == Qt.Key_H else 'L'} pressed, window={id(window)}, flag set to True, vi_mode={self._vi_mode_active}")
                 self._trigger_history_navigation(qt_key)
                 event.accept()
                 return

@@ -1986,8 +1986,15 @@ class MainWindow(QMainWindow):
 
     def _navigate_history_back(self) -> None:
         """Navigate to previous page in history (Alt+Left)."""
+        import traceback
+        print(f"[DEBUG] _navigate_history_back called from:")
+        for line in traceback.format_stack()[-4:-1]:
+            print(line.strip())
         if self.history_index <= 0:
             return
+        # Remember vi mode state before navigation - check MAIN WINDOW's state, not editor's
+        print(f"[DEBUG] self._vi_mode_active = {getattr(self, '_vi_mode_active', 'ATTRIBUTE_MISSING')}")
+        vi_mode_was_active = self._vi_mode_active
         self.history_index -= 1
         target_path = self.page_history[self.history_index]
         self._suspend_selection_open = True
@@ -1996,11 +2003,23 @@ class MainWindow(QMainWindow):
         finally:
             self._suspend_selection_open = False
         self._open_file(target_path, add_to_history=False)
+        # Restore vi mode state and focus after navigation (deferred to ensure it happens after all events)
+        # Also check for the flag set by Alt+H/Alt+L in vi mode
+        flag_value = getattr(self, '_restore_vi_mode_after_nav', False)
+        print(f"[DEBUG] _navigate_history_back: self={id(self)}, vi_mode_was_active={vi_mode_was_active}, flag={flag_value}, hasattr={hasattr(self, '_restore_vi_mode_after_nav')}")
+        should_restore_vi = vi_mode_was_active or flag_value
+        if should_restore_vi:
+            print(f"[DEBUG] Restoring vi mode via QTimer")
+            self._restore_vi_mode_after_nav = False  # Clear the flag
+            QTimer.singleShot(0, lambda: self.editor.set_vi_mode(True))
+        QTimer.singleShot(0, self.editor.setFocus)
 
     def _navigate_history_forward(self) -> None:
         """Navigate to next page in history (Alt+Right)."""
         if self.history_index >= len(self.page_history) - 1:
             return
+        # Remember vi mode state before navigation - check MAIN WINDOW's state, not editor's
+        vi_mode_was_active = self._vi_mode_active
         self.history_index += 1
         target_path = self.page_history[self.history_index]
         self._suspend_selection_open = True
@@ -2009,6 +2028,13 @@ class MainWindow(QMainWindow):
         finally:
             self._suspend_selection_open = False
         self._open_file(target_path, add_to_history=False)
+        # Restore vi mode state and focus after navigation (deferred to ensure it happens after all events)
+        # Also check for the flag set by Alt+H/Alt+L in vi mode
+        should_restore_vi = vi_mode_was_active or getattr(self, '_restore_vi_mode_after_nav', False)
+        if should_restore_vi:
+            self._restore_vi_mode_after_nav = False  # Clear the flag
+            QTimer.singleShot(0, lambda: self.editor.set_vi_mode(True))
+        QTimer.singleShot(0, self.editor.setFocus)
 
     def _should_focus_hr_tail(self, content: str) -> bool:
         """Return True if cursor should jump to trailing newline after a horizontal rule."""
@@ -2261,12 +2287,32 @@ class MainWindow(QMainWindow):
                 return True
             if event.key() == Qt.Key_CapsLock:
                 # Toggle vi-mode and consume the event to prevent CapsLock from activating
+                # But first check if this is a synthetic event from _neutralize_capslock
+                if getattr(self, '_neutralizing_capslock', False):
+                    return True  # Block it but don't toggle
+                
                 self._toggle_vi_mode()
                 # After Qt processes this, ensure OS CapsLock state is OFF
                 from PySide6.QtCore import QTimer
                 QTimer.singleShot(0, self._neutralize_capslock)
                 return True  # Block the event completely
             if self._vi_mode_active:
+                # Handle Alt+H and Alt+L for history navigation while preserving vi mode
+                key = event.key()
+                alt = bool(event.modifiers() & Qt.AltModifier)
+                shift = bool(event.modifiers() & Qt.ShiftModifier)
+                if alt and not shift:
+                    if key == Qt.Key_H:
+                        print(f"[DEBUG] EventFilter caught Alt+H in vi mode")
+                        self._restore_vi_mode_after_nav = True
+                        self._navigate_history_back()
+                        return True
+                    elif key == Qt.Key_L:
+                        print(f"[DEBUG] EventFilter caught Alt+L in vi mode")
+                        self._restore_vi_mode_after_nav = True
+                        self._navigate_history_forward()
+                        return True
+                
                 target = self._vi_mode_target_widget()
                 if target:
                     mapping = self._translate_vi_key_event(event)
@@ -2316,8 +2362,13 @@ class MainWindow(QMainWindow):
                 KEYEVENTF_KEYUP = 0x0002
                 state = user32.GetKeyState(VK_CAPITAL) & 0x0001
                 if state:  # CapsLock is ON, send another press to turn OFF
+                    # Set flag to prevent the synthetic CapsLock from toggling vi mode
+                    self._neutralizing_capslock = True
                     user32.keybd_event(VK_CAPITAL, 0, 0, 0)
                     user32.keybd_event(VK_CAPITAL, 0, KEYEVENTF_KEYUP, 0)
+                    # Clear flag after a short delay
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(100, lambda: setattr(self, '_neutralizing_capslock', False))
             # Linux / others: no-op (documented limitation)
         except Exception:
             pass
