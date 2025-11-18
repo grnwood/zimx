@@ -81,11 +81,15 @@ def _qt_message_handler(mode: QtMsgType, context, message: str) -> None:
 
 def _start_api_server() -> tuple[int, uvicorn.Server]:
     port = int(os.getenv("ZIMX_PORT", "8765"))
+    # Disable uvicorn's logging config when bundled with PyInstaller
+    # to avoid "Unable to configure formatter 'default'" errors
+    log_config = None if getattr(sys, "frozen", False) else None
     config = uvicorn.Config(
         get_app(),
         host="127.0.0.1",
         port=port,
         log_level=os.getenv("UVICORN_LOG_LEVEL", "debug"),
+        log_config=log_config,
     )
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
