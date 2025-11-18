@@ -97,6 +97,8 @@ class JumpToPageDialog(QDialog):
 
     def _refresh(self) -> None:
         term = self.search.text().strip()
+        if term.startswith(":"):
+            term = term.lstrip(":")
         pages = config.search_pages(term)
         self.list_widget.clear()
         for page in pages:

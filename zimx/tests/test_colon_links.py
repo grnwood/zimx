@@ -3,7 +3,14 @@ from __future__ import annotations
 
 import pytest
 
-from zimx.app.ui.path_utils import path_to_colon, colon_to_path, colon_to_folder_path
+from zimx.app.ui.path_utils import (
+    path_to_colon,
+    colon_to_path,
+    colon_to_folder_path,
+    ensure_root_colon_link,
+    strip_root_prefix,
+    normalize_link_target,
+)
 
 
 class TestPathToColon:
@@ -118,6 +125,15 @@ class TestColonToPath:
         result = colon_to_path("My_Page:Sub_Page")
         assert result == "/My_Page/Sub_Page/Sub_Page.txt"
 
+    def test_root_prefixed_single_level(self):
+        """Leading ':' should still resolve correctly"""
+        result = colon_to_path(":Finance")
+        assert result == "/Finance/Finance.txt"
+
+    def test_root_prefixed_multi_level(self):
+        result = colon_to_path(":Parent:Child")
+        assert result == "/Parent/Child/Child.txt"
+
 
 class TestColonToFolderPath:
     """Test converting colon notation to folder paths (without .txt file)."""
@@ -141,6 +157,10 @@ class TestColonToFolderPath:
         """Empty path should return /"""
         result = colon_to_folder_path("")
         assert result == "/"
+
+    def test_root_prefixed_path(self):
+        result = colon_to_folder_path(":Parent:Child")
+        assert result == "/Parent/Child"
 
 
 class TestRoundTrip:
@@ -191,6 +211,14 @@ class TestRoundTrip:
         assert back.count("JoeBob2") == 2  # Once in folder, once in filename
         assert "/JoeBob2/JoeBob2/" not in back  # No duplicate folder structure
 
+    def test_root_prefixed_round_trip(self):
+        colon = ensure_root_colon_link("Parent:Child")
+        assert colon == ":Parent:Child"
+        file_path = colon_to_path(colon)
+        assert file_path == "/Parent/Child/Child.txt"
+        back = ensure_root_colon_link(path_to_colon(file_path))
+        assert back == ":Parent:Child"
+
 
 class TestEdgeCases:
     """Test edge cases and error conditions."""
@@ -198,7 +226,46 @@ class TestEdgeCases:
     def test_single_character_names(self):
         """Single character page names"""
         assert path_to_colon("/A/B/B.txt") == "A:B"
+
+    def test_strip_root_prefix(self):
+        """strip_root_prefix removes only leading ':'"""
+        assert strip_root_prefix(":Parent:Child") == "Parent:Child"
+        assert strip_root_prefix("::Parent") == "Parent"
+        assert strip_root_prefix("") == ""
+
+
+class TestEnsureRootPrefix:
+    """Ensure emitted links always mark the root."""
+
+    def test_adds_prefix(self):
+        assert ensure_root_colon_link("Finance") == ":Finance"
+
+    def test_preserves_anchor(self):
+        assert ensure_root_colon_link("Finance#plan") == ":Finance#plan"
+
+    def test_handles_existing_prefix(self):
+        assert ensure_root_colon_link(":Finance") == ":Finance"
+
+    def test_ignores_pure_anchor(self):
+        assert ensure_root_colon_link("#heading") == "#heading"
         assert colon_to_path("A:B") == "/A/B/B.txt"
+
+
+class TestNormalizeLinkTarget:
+    def test_spaces_replaced_and_lowered(self):
+        assert normalize_link_target("My Page") == "my_page"
+
+    def test_multi_segment(self):
+        assert normalize_link_target("Parent Page:Child Page") == "parent_page:child_page"
+
+    def test_preserves_root_prefix(self):
+        assert normalize_link_target(":Root Page:Child") == ":root_page:child"
+
+    def test_preserves_anchor(self):
+        assert normalize_link_target("Page Name#Section") == "page_name#Section"
+
+    def test_handles_extra_whitespace(self):
+        assert normalize_link_target("  Mixed   Case  ") == "mixed_case"
     
     def test_names_with_numbers(self):
         """Names mixing letters and numbers"""

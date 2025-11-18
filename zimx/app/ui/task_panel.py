@@ -66,6 +66,7 @@ class TaskPanel(QWidget):
         header = self.task_tree.header()
         header.sectionClicked.connect(self._handle_header_click)
         header.setSortIndicator(self.sort_column, self.sort_order)
+        self.task_tree.setColumnWidth(0, 40)
 
         sidebar = QVBoxLayout()
         sidebar.addWidget(QLabel("Tags"))
@@ -99,6 +100,7 @@ class TaskPanel(QWidget):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
             self.active_tags.clear()
+            self.search.clear()
             self._refresh_tags()
             self._refresh_tasks()
             event.accept()

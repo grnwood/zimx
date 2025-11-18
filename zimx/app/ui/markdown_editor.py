@@ -1268,9 +1268,9 @@ class MarkdownEditor(QTextEdit):
         extra = QTextEdit.ExtraSelection()
         extra.cursor = block_cursor
         fmt = extra.format
-        fmt.setBackground(QColor("#ff7acb"))  # pink background
-        fmt.setForeground(QColor("#000"))     # dark text for contrast
-        fmt.setProperty(QTextFormat.FullWidthSelection, True)
+        fmt.setBackground(QColor("#b259ff"))  # purple block
+        fmt.setForeground(QColor("#111"))     # dark text for contrast
+        fmt.setProperty(QTextFormat.FullWidthSelection, False)
         self.setExtraSelections([extra])
 
     def eventFilter(self, obj, event):  # type: ignore[override]
@@ -1896,6 +1896,9 @@ class MarkdownEditor(QTextEdit):
             base_dir = (self._vault_root / self._current_path.lstrip("/")).parent
         elif self._vault_root:
             base_dir = self._vault_root
+        path_obj = Path(raw_path)
+        if path_obj.is_absolute():
+            return path_obj.resolve()
         if raw_path.startswith("/"):
             if self._vault_root:
                 return (self._vault_root / raw_path.lstrip("/")).resolve()

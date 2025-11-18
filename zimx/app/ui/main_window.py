@@ -50,7 +50,7 @@ from .heading_utils import heading_slug
 from .preferences_dialog import PreferencesDialog
 from .insert_link_dialog import InsertLinkDialog
 from .new_page_dialog import NewPageDialog
-from .path_utils import colon_to_path, path_to_colon
+from .path_utils import colon_to_path, path_to_colon, ensure_root_colon_link
 
 
 PATH_ROLE = int(Qt.ItemDataRole.UserRole)
@@ -382,6 +382,19 @@ class MainWindow(QMainWindow):
         self.bookmark_button.setText("+")
         # We'll apply color via stylesheet after adding to toolbar
         self.toolbar.addAction(self.bookmark_button)
+
+        # History navigation buttons
+        self.nav_back_action = QAction(self)
+        self.nav_back_action.setIcon(self.style().standardIcon(QStyle.SP_ArrowBack))
+        self.nav_back_action.setToolTip("Back (Alt+Left)")
+        self.nav_back_action.triggered.connect(self._navigate_history_back)
+        self.toolbar.addAction(self.nav_back_action)
+
+        self.nav_forward_action = QAction(self)
+        self.nav_forward_action.setIcon(self.style().standardIcon(QStyle.SP_ArrowForward))
+        self.nav_forward_action.setToolTip("Forward (Alt+Right)")
+        self.nav_forward_action.triggered.connect(self._navigate_history_forward)
+        self.toolbar.addAction(self.nav_forward_action)
         
         # Add bookmark display area (will be populated with bookmark buttons)
         self.bookmark_container = QWidget()
@@ -923,7 +936,8 @@ class MainWindow(QMainWindow):
         # Always show editing status; vi-mode banner is separate
         display_path = path_to_colon(path) or path
         if hasattr(self, "toc_widget"):
-            self.toc_widget.set_base_path(display_path)
+            root_base = ensure_root_colon_link(display_path) if display_path else ""
+            self.toc_widget.set_base_path(root_base)
             self.editor.refresh_heading_outline()
         self.statusBar().showMessage(f"Editing {display_path}")
         self._update_window_title()
@@ -1212,7 +1226,8 @@ class MainWindow(QMainWindow):
         else:
             colon_path = path_to_colon(self.current_path)
             if colon_path:
-                self.statusBar().showMessage(f"Copied link: {colon_path}", 3000)
+                rooted = ensure_root_colon_link(colon_path)
+                self.statusBar().showMessage(f"Copied link: {rooted}", 3000)
 
     def _show_new_page_dialog(self) -> None:
         """Show dialog to create a new page with template selection (Ctrl+N)."""
@@ -1373,7 +1388,8 @@ class MainWindow(QMainWindow):
         # Update UI
         display_path = path_to_colon(rel_path) or rel_path
         if hasattr(self, "toc_widget"):
-            self.toc_widget.set_base_path(display_path)
+            root_base = ensure_root_colon_link(display_path) if display_path else ""
+            self.toc_widget.set_base_path(root_base)
             self.editor.refresh_heading_outline()
         self.statusBar().showMessage(f"Editing (unsaved) {display_path}")
         self._update_window_title()
@@ -1556,6 +1572,7 @@ class MainWindow(QMainWindow):
             if not target_file:
                 self._alert(f"Invalid link format: {name}")
                 return
+            target_file = self._resolve_case_insensitive_rel_path(target_file)
             folder_path = self._file_path_to_folder(target_file)
             # Check if file already exists before creating
             file_existed = self.vault_root and Path(self.vault_root, target_file.lstrip("/")).exists()
@@ -1580,6 +1597,8 @@ class MainWindow(QMainWindow):
             target_file = self._folder_to_file_path(folder_path)
             if not target_file:
                 return
+            target_file = self._resolve_case_insensitive_rel_path(target_file)
+            folder_path = self._file_path_to_folder(target_file)
             # Check if file already exists before creating
             file_existed = self.vault_root and Path(self.vault_root, target_file.lstrip("/")).exists()
             if not self._ensure_page_folder(folder_path, allow_existing=True):
@@ -1671,6 +1690,26 @@ class MainWindow(QMainWindow):
         name = rel.name or self.vault_root_name
         rel_file = rel / f"{name}{PAGE_SUFFIX}"
         return f"/{rel_file.as_posix()}"
+
+    def _resolve_case_insensitive_rel_path(self, rel_path: str) -> str:
+        """Resolve a vault-relative path by ignoring case in existing filesystem entries."""
+        if not self.vault_root:
+            return rel_path
+        cleaned = (rel_path or "").strip().lstrip("/")
+        if not cleaned:
+            return rel_path
+        current = Path(self.vault_root)
+        resolved: list[str] = []
+        parts = cleaned.split("/")
+        for part in parts:
+            try:
+                match = next((child.name for child in current.iterdir() if child.name.lower() == part.lower()), None)
+            except OSError:
+                match = None
+            name = match or part
+            resolved.append(name)
+            current = current / name
+        return "/" + "/".join(resolved)
 
     def _file_path_to_folder(self, file_path: str) -> str:
         """Convert file path like /PageA/PageB/PageC/PageC.txt to folder path /PageA/PageB/PageC."""

@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from zimx.app import config
+from .path_utils import path_to_colon, normalize_link_target
 
 
 class EditLinkDialog(QDialog):
@@ -32,12 +33,13 @@ class EditLinkDialog(QDialog):
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
-        self.search_edit = QLineEdit(link_to)
+        normalized_link = normalize_link_target(link_to)
+        self.search_edit = QLineEdit(normalized_link)
         self.search_edit.setPlaceholderText("Type to filter pages…")
         self.search_edit.textChanged.connect(self._on_search_changed)
         form.addRow("Link to:", self.search_edit)
 
-        self.text_edit = QLineEdit(link_text)
+        self.text_edit = QLineEdit(link_text or normalized_link)
         self.text_edit.setPlaceholderText("Display name (defaults to link target)")
         self.text_edit.textChanged.connect(self._on_link_name_changed)
         self.text_edit.installEventFilter(self)
@@ -70,7 +72,8 @@ class EditLinkDialog(QDialog):
     def _accept_from_list(self):
         item = self.list_widget.currentItem()
         if item:
-            self.search_edit.setText(item.data(Qt.UserRole))
+            normalized = item.data(Qt.UserRole)
+            self.search_edit.setText(normalized)
             self.accept()
     
     def _on_search_changed(self):
@@ -99,29 +102,33 @@ class EditLinkDialog(QDialog):
                 self.text_edit.blockSignals(False)
 
     def _refresh(self) -> None:
-        term = self.search_edit.text().strip()
-        pages = config.search_pages(term)
+        orig_term = self.search_edit.text().strip()
+        search_term = orig_term
+        if "#" in search_term:
+            search_term = search_term.split("#", 1)[0].strip()
+        normalized_term = search_term.lstrip(":")
+        pages = config.search_pages(normalized_term)
         self.list_widget.clear()
         for page in pages:
-            from .path_utils import path_to_colon
             colon = path_to_colon(page["path"]) or ""
             if not colon:
                 continue
-            item = QListWidgetItem(colon)
-            item.setToolTip(colon)
-            item.setData(Qt.UserRole, colon)
+            normalized_colon = normalize_link_target(colon)
+            item = QListWidgetItem(normalized_colon)
+            item.setToolTip(normalized_colon)
+            item.setData(Qt.UserRole, normalized_colon)
             self.list_widget.addItem(item)
         if self.list_widget.count() > 0:
-            # Try to select exact match if present
+            match_value = normalize_link_target(orig_term) if orig_term else normalized_term
             for i in range(self.list_widget.count()):
-                if self.list_widget.item(i).data(Qt.UserRole) == term:
+                if self.list_widget.item(i).data(Qt.UserRole) == match_value:
                     self.list_widget.setCurrentRow(i)
                     break
             else:
                 self.list_widget.setCurrentRow(0)
 
     def link_to(self) -> str:
-        return self.search_edit.text().strip()
+        return normalize_link_target(self.search_edit.text().strip())
 
     def link_text(self) -> str:
         return self.text_edit.text().strip()

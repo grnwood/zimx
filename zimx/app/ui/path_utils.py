@@ -5,6 +5,67 @@ from pathlib import Path
 from zimx.server.adapters.files import PAGE_SUFFIX
 
 
+def strip_root_prefix(colon_path: str) -> str:
+    """Remove a leading ':' that denotes a root-relative colon path."""
+    if not colon_path:
+        return ""
+    return colon_path.lstrip(":").strip()
+
+
+def ensure_root_colon_link(link: str) -> str:
+    """Ensure a colon link is explicitly marked as root-relative with a leading ':'.
+
+    This only affects the page portion (before any #anchor). Existing content that
+    already includes ':' separators keeps working, but we now emit ':Page' so single
+    pages are no longer mistaken for CamelCase relatives.
+    """
+    text = (link or "").strip()
+    if not text or text.startswith("#"):
+        return text  # Pure anchors or empty strings stay untouched
+
+    anchor = None
+    base = text
+    if "#" in text:
+        base, anchor = text.split("#", 1)
+    base = (base or "").strip()
+    if not base:
+        return f"#{anchor}" if anchor else ""
+    normalized = f":{base.lstrip(':')}"
+    return f"{normalized}#{anchor}" if anchor else normalized
+
+
+def normalize_link_target(link: str) -> str:
+    """Normalize link target by lowercasing and replacing spaces with underscores.
+
+    Each colon-separated component is normalized independently. Anchors (after #)
+    are preserved as-is.
+    """
+    if not link:
+        return ""
+    text = link.strip()
+    anchor = ""
+    if "#" in text:
+        base, anchor = text.split("#", 1)
+    else:
+        base = text
+    has_root = base.startswith(":")
+    cleaned_base = base.lstrip(":")
+    parts = []
+    for part in cleaned_base.split(":"):
+        stripped = part.strip()
+        if not stripped:
+            continue
+        underscored = "_".join(stripped.split())
+        parts.append(underscored.lower())
+    normalized = ":".join(parts)
+    if has_root and normalized:
+        normalized = f":{normalized}"
+    result = normalized
+    if anchor:
+        result = f"{result}#{anchor.strip()}"
+    return result
+
+
 def path_to_colon(file_path: str) -> str:
     """Convert a filesystem path like /PageA/PageB/PageC/PageC.txt to PageA:PageB:PageC.
     
@@ -50,12 +111,16 @@ def colon_to_path(colon_path: str, vault_root_name: str = "") -> str:
     Returns:
         Vault-relative filesystem path (e.g., "/PageA/PageB/PageC/PageC.txt")
     """
-    if not colon_path:
+    cleaned = (colon_path or "").strip()
+    if "#" in cleaned:
+        cleaned = cleaned.split("#", 1)[0]
+    cleaned = strip_root_prefix(cleaned)
+    if not cleaned:
         if vault_root_name:
             return f"/{vault_root_name}{PAGE_SUFFIX}"
         return "/"
     
-    parts = colon_path.split(":")
+    parts = cleaned.split(":")
     # Each page lives in a folder with the same name
     # Final path is /Part1/Part2/.../PartN/PartN.txt
     folder_path = "/".join(parts)
@@ -72,8 +137,12 @@ def colon_to_folder_path(colon_path: str) -> str:
     Returns:
         Folder path (e.g., "/PageA/PageB/PageC")
     """
-    if not colon_path:
+    cleaned = (colon_path or "").strip()
+    if "#" in cleaned:
+        cleaned = cleaned.split("#", 1)[0]
+    cleaned = strip_root_prefix(cleaned)
+    if not cleaned:
         return "/"
     
-    parts = colon_path.split(":")
+    parts = cleaned.split(":")
     return "/" + "/".join(parts)
