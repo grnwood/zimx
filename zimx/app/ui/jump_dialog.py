@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QByteArray, QTimer
+from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -21,7 +22,15 @@ class JumpToPageDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Jump to page")
         self.setModal(True)
-        self.resize(420, 320)
+        
+        # Set up geometry save timer (debounced)
+        self.geometry_save_timer = QTimer(self)
+        self.geometry_save_timer.setInterval(500)  # 500ms debounce
+        self.geometry_save_timer.setSingleShot(True)
+        self.geometry_save_timer.timeout.connect(self._save_geometry)
+        
+        # Make dialog same size as insert link dialog
+        self.resize(640, 360)
         layout = QVBoxLayout()
 
         self.search = QLineEdit()
@@ -39,6 +48,10 @@ class JumpToPageDialog(QDialog):
         layout.addWidget(buttons)
 
         self.setLayout(layout)
+        
+        # Restore saved geometry after layout is set up
+        self._restore_geometry()
+        
         self.search.setFocus()
         self._refresh()
 
@@ -47,9 +60,27 @@ class JumpToPageDialog(QDialog):
         return item.data(Qt.UserRole) if item else None
 
     def keyPressEvent(self, event):  # type: ignore[override]
+        # Handle arrow keys and vi-mode shortcuts (Shift+J/K)
         if event.key() in (Qt.Key_Up, Qt.Key_Down):
             previous_focus = self.focusWidget()
             QApplication.sendEvent(self.list_widget, event)
+            if previous_focus is not self.list_widget:
+                previous_focus.setFocus()
+            return
+        # Handle Shift+J (down) and Shift+K (up) as arrow key equivalents
+        elif event.key() == Qt.Key_J and (event.modifiers() & Qt.ShiftModifier):
+            previous_focus = self.focusWidget()
+            # Create a synthetic Down arrow key event
+            down_event = event.__class__(event.type(), Qt.Key_Down, Qt.NoModifier)
+            QApplication.sendEvent(self.list_widget, down_event)
+            if previous_focus is not self.list_widget:
+                previous_focus.setFocus()
+            return
+        elif event.key() == Qt.Key_K and (event.modifiers() & Qt.ShiftModifier):
+            previous_focus = self.focusWidget()
+            # Create a synthetic Up arrow key event
+            up_event = event.__class__(event.type(), Qt.Key_Up, Qt.NoModifier)
+            QApplication.sendEvent(self.list_widget, up_event)
             if previous_focus is not self.list_widget:
                 previous_focus.setFocus()
             return
@@ -79,3 +110,38 @@ class JumpToPageDialog(QDialog):
 
     def _friendly_path(self, path: str) -> str:
         return path_to_colon(path)
+    
+    def _restore_geometry(self) -> None:
+        """Restore saved dialog geometry."""
+        saved_geometry = config.load_dialog_geometry("jump_dialog")
+        if saved_geometry:
+            try:
+                print(f"[Dialog] Restoring jump dialog geometry: {len(saved_geometry)} chars")
+                geometry_bytes = QByteArray.fromBase64(saved_geometry.encode('ascii'))
+                result = self.restoreGeometry(geometry_bytes)
+                print(f"[Dialog] Jump dialog geometry restore result: {result}")
+            except Exception as e:
+                print(f"[Dialog] Failed to restore jump dialog geometry: {e}")
+        else:
+            print("[Dialog] No saved jump dialog geometry found")
+    
+    def _save_geometry(self) -> None:
+        """Save current dialog geometry."""
+        try:
+            geometry_bytes = self.saveGeometry()
+            geometry_b64 = geometry_bytes.toBase64().data().decode('ascii')
+            config.save_dialog_geometry("jump_dialog", geometry_b64)
+            print(f"[Dialog] Saved jump dialog geometry: {len(geometry_b64)} chars")
+        except Exception as e:
+            print(f"[Dialog] Failed to save jump dialog geometry: {e}")
+    
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        """Handle dialog resize: save geometry with debounce."""
+        super().resizeEvent(event)
+        self.geometry_save_timer.start()
+    
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        """Save dialog geometry when closing."""
+        self.geometry_save_timer.stop()  # Cancel any pending save
+        self._save_geometry()  # Immediate save on close
+        super().closeEvent(event)

@@ -207,6 +207,25 @@ def save_editor_splitter_state(state: str) -> None:
     conn.commit()
 
 
+def load_dialog_geometry(dialog_name: str) -> Optional[str]:
+    """Load the saved dialog geometry (base64 encoded QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", (f"{dialog_name}_geometry",))
+    row = cur.fetchone()
+    return str(row[0]) if row else None
+
+
+def save_dialog_geometry(dialog_name: str, geometry: str) -> None:
+    """Save the dialog geometry (base64 encoded QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", (f"{dialog_name}_geometry", geometry))
+    conn.commit()
+
+
 def _update_global_config(updates: dict) -> None:
     """Merge updates into global config file."""
     existing = {}

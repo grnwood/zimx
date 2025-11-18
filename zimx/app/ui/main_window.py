@@ -1178,11 +1178,26 @@ class MainWindow(QMainWindow):
         # Save current page before inserting link to ensure it's indexed
         if self.current_path:
             self._save_current_file(auto=True)
-        dlg = InsertLinkDialog(self)
+        
+        # Get selected text if any
+        selected_text = ""
+        if self.editor.textCursor().hasSelection():
+            selected_text = self.editor.textCursor().selectedText()
+            # Clean up selected text - remove line breaks and paragraph separators
+            # Qt returns paragraph separators as U+2029 which cause line breaks in links
+            selected_text = selected_text.replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ').strip()
+        
+        dlg = InsertLinkDialog(self, selected_text=selected_text)
         if dlg.exec() == QDialog.Accepted:
             colon_path = dlg.selected_colon_path()
             link_name = dlg.selected_link_name()
             if colon_path:
+                # If there was selected text, replace it with the link
+                if selected_text:
+                    cursor = self.editor.textCursor()
+                    if cursor.hasSelection():
+                        cursor.removeSelectedText()
+                        self.editor.setTextCursor(cursor)
                 self.editor.insert_link(colon_path, link_name)
                 self.editor.setFocus()
 

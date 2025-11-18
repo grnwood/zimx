@@ -1,7 +1,8 @@
 """Dialog for inserting links to other pages in colon notation."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QByteArray, QTimer
+from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -20,11 +21,19 @@ from .path_utils import path_to_colon
 class InsertLinkDialog(QDialog):
     """Dialog for searching and inserting page links in colon notation (PageA:PageB:PageC)."""
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, selected_text: str = "") -> None:
         super().__init__(parent)
         self.setWindowTitle("Insert Link")
         self.setModal(True)
-        self.resize(520, 420)
+        
+        # Set up geometry save timer (debounced)
+        self.geometry_save_timer = QTimer(self)
+        self.geometry_save_timer.setInterval(500)  # 500ms debounce
+        self.geometry_save_timer.setSingleShot(True)
+        self.geometry_save_timer.timeout.connect(self._save_geometry)
+        
+        # Make dialog wider than tall (~80 chars wide)
+        self.resize(640, 360)
         layout = QVBoxLayout()
 
         # Track whether user has manually edited the link name
@@ -34,9 +43,9 @@ class InsertLinkDialog(QDialog):
         form = QFormLayout()
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Type at least 3 characters to search…")
+        self.search.setPlaceholderText("Type to search pages…")
         self.search.textChanged.connect(self._on_search_changed)
-        self.search.returnPressed.connect(self._activate_current)
+        self.search.returnPressed.connect(self._on_search_return)
         # Disable autocomplete to prevent Qt from suggesting completions
         self.search.setCompleter(None)
         form.addRow("Link to:", self.search)
@@ -57,11 +66,21 @@ class InsertLinkDialog(QDialog):
         except Exception:
             pass
         form.addRow("Link Name:", self.link_name)
+        
+        # Initialize with selected text if provided
+        if selected_text:
+            # Clean up selected text - remove any line breaks that could break markdown links
+            clean_text = selected_text.replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ').strip()
+            self.search.setText(clean_text)
+            self.link_name.setText(clean_text)
+            # Select all text in search field so typing replaces it
+            self.search.selectAll()
 
         layout.addLayout(form)
 
         self.list_widget = QListWidget()
         self.list_widget.itemDoubleClicked.connect(self._accept_from_list)
+        self.list_widget.currentItemChanged.connect(self._on_selection_changed)
         layout.addWidget(self.list_widget, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -70,9 +89,13 @@ class InsertLinkDialog(QDialog):
         layout.addWidget(buttons)
 
         self.setLayout(layout)
+        
+        # Restore saved geometry after layout is set up
+        self._restore_geometry()
+        
         self.search.setFocus()
-        # Start with an empty list; only search after >= 3 chars
-        self.list_widget.clear()
+        # Start with all pages displayed
+        self._refresh()
 
     def selected_colon_path(self) -> str | None:
         """Return the selected page in colon notation (e.g., 'PageA:PageB:PageC')."""
@@ -94,15 +117,27 @@ class InsertLinkDialog(QDialog):
 
     def _on_search_changed(self):
         """Called when user types in the search field."""
-        text = self.search.text().strip()
-        if len(text) >= 3:
-            self._refresh()
-        else:
-            self.list_widget.clear()
+        # Remove character limits - search immediately on any input
+        self._refresh()
 
     def _on_link_name_changed(self):
         """Track that user has manually edited the link name."""
         self._link_name_manually_edited = True
+
+    def _on_selection_changed(self, current, previous):
+        """Called when user navigates through the list with arrow keys or Shift+J/K."""
+        if current:
+            colon_path = current.data(Qt.UserRole)
+            if colon_path:
+                # Update the search field with the selected item
+                self.search.blockSignals(True)
+                self.search.setText(colon_path)
+                self.search.blockSignals(False)
+                # Update link name if not manually edited
+                if not self._link_name_manually_edited:
+                    self.link_name.blockSignals(True)
+                    self.link_name.setText(colon_path)
+                    self.link_name.blockSignals(False)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         """Event filter for link name field."""
@@ -110,6 +145,7 @@ class InsertLinkDialog(QDialog):
         return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event):  # type: ignore[override]
+        # Handle arrow keys and vi-mode shortcuts (Shift+J/K)
         if event.key() in (Qt.Key_Up, Qt.Key_Down):
             # Only pass arrow keys to list if search field has focus
             # Don't interfere with arrow keys in link_name field
@@ -119,10 +155,46 @@ class InsertLinkDialog(QDialog):
                 if previous_focus is not self.list_widget:
                     previous_focus.setFocus()
                 return
+        # Handle Shift+J (down) and Shift+K (up) as arrow key equivalents
+        elif event.key() == Qt.Key_J and (event.modifiers() & Qt.ShiftModifier):
+            previous_focus = self.focusWidget()
+            # Create a synthetic Down arrow key event
+            down_event = QKeyEvent(event.type(), Qt.Key_Down, Qt.NoModifier)
+            QApplication.sendEvent(self.list_widget, down_event)
+            if previous_focus is not self.list_widget:
+                previous_focus.setFocus()
+            return
+        elif event.key() == Qt.Key_K and (event.modifiers() & Qt.ShiftModifier):
+            previous_focus = self.focusWidget()
+            # Create a synthetic Up arrow key event
+            up_event = QKeyEvent(event.type(), Qt.Key_Up, Qt.NoModifier)
+            QApplication.sendEvent(self.list_widget, up_event)
+            if previous_focus is not self.list_widget:
+                previous_focus.setFocus()
+            return
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
             if self._activate_current():
                 return
         super().keyPressEvent(event)
+
+    def _on_search_return(self) -> None:
+        """Handle Enter key in search field - create new page if needed."""
+        # Check if current text matches an existing page
+        current_text = self.search.text().strip()
+        if not current_text:
+            return
+            
+        # Check if exact match exists in list
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            if item and item.data(Qt.UserRole) == current_text:
+                # Exact match found, just accept
+                self.list_widget.setCurrentItem(item)
+                self.accept()
+                return
+        
+        # No exact match - this will create a new page
+        self.accept()
 
     def _activate_current(self) -> bool:
         """Accept dialog if an item is selected, or use what's typed in the search field."""
@@ -139,11 +211,8 @@ class InsertLinkDialog(QDialog):
         return False
 
     def _refresh(self) -> None:
-        """Refresh the list of pages based on search term (only called if >= 3 chars)."""
+        """Refresh the list of pages based on search term."""
         term = self.search.text().strip()
-        if len(term) < 3:
-            self.list_widget.clear()
-            return
         pages = config.search_pages(term)
         self.list_widget.clear()
 
@@ -170,3 +239,38 @@ class InsertLinkDialog(QDialog):
         if self.list_widget.count() > 0:
             # Select first item by default; user will press Enter/double-click to commit
             self.list_widget.setCurrentRow(0)
+    
+    def _restore_geometry(self) -> None:
+        """Restore saved dialog geometry."""
+        saved_geometry = config.load_dialog_geometry("insert_link_dialog")
+        if saved_geometry:
+            try:
+                print(f"[Dialog] Restoring insert link dialog geometry: {len(saved_geometry)} chars")
+                geometry_bytes = QByteArray.fromBase64(saved_geometry.encode('ascii'))
+                result = self.restoreGeometry(geometry_bytes)
+                print(f"[Dialog] Insert link dialog geometry restore result: {result}")
+            except Exception as e:
+                print(f"[Dialog] Failed to restore insert link dialog geometry: {e}")
+        else:
+            print("[Dialog] No saved insert link dialog geometry found")
+    
+    def _save_geometry(self) -> None:
+        """Save current dialog geometry."""
+        try:
+            geometry_bytes = self.saveGeometry()
+            geometry_b64 = geometry_bytes.toBase64().data().decode('ascii')
+            config.save_dialog_geometry("insert_link_dialog", geometry_b64)
+            print(f"[Dialog] Saved insert link dialog geometry: {len(geometry_b64)} chars")
+        except Exception as e:
+            print(f"[Dialog] Failed to save insert link dialog geometry: {e}")
+    
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        """Handle dialog resize: save geometry with debounce."""
+        super().resizeEvent(event)
+        self.geometry_save_timer.start()
+    
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        """Save dialog geometry when closing."""
+        self.geometry_save_timer.stop()  # Cancel any pending save
+        self._save_geometry()  # Immediate save on close
+        super().closeEvent(event)

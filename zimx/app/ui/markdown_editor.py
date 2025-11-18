@@ -51,11 +51,11 @@ FILE_MARKDOWN_LINK_PATTERN = QRegularExpression(
     r"\[(?P<text>[^\]]+)\]\s*\((?P<file>(?:\./)?[^)\n]+\.[A-Za-z0-9]{1,8})\)"
 )
 # Storage pattern for markdown links (using Python re for easier replacement)
-# DOTALL flag makes . match newlines, \s* allows whitespace including newlines
+# Limit whitespace to prevent catastrophic backtracking with malformed links
 # Now allows spaces in page names and supports single page with anchor
 MARKDOWN_LINK_STORAGE_PATTERN = re.compile(
-    r"\[(?P<text>[^\]]+)\]\s*\((?P<link>(?:[\w ]+:[\w ]+(?::[\w ]+)*(?:#[A-Za-z0-9_-]+)?)|(?:[\w ]+#[A-Za-z0-9_-]+))\)",
-    re.MULTILINE | re.DOTALL,
+    r"\[(?P<text>[^\]]+)\][ \t]*\((?P<link>(?:[\w ]+:[\w ]+(?::[\w ]+)*(?:#[A-Za-z0-9_-]+)?)|(?:[\w ]+#[A-Za-z0-9_-]+))\)",
+    re.MULTILINE,
 )
 # Display pattern for rendered links (sentinel + null separator + label)
 # Now allows spaces in link paths
@@ -345,6 +345,7 @@ class MarkdownEditor(QTextEdit):
 
     def set_markdown(self, content: str) -> None:
         import time
+        from os import getenv
         t0 = time.perf_counter()
         
         normalized = self._normalize_markdown_images(content)
@@ -359,10 +360,20 @@ class MarkdownEditor(QTextEdit):
         self._display_guard = True
         self.setUpdatesEnabled(False)
         self.document().clear()
+        
+        # Temporarily disconnect expensive textChanged handlers during bulk loading
+        self.textChanged.disconnect(self._enforce_display_symbols)
+        self.textChanged.disconnect(self._schedule_heading_outline)
+        
+        # Also temporarily disable highlighter for very slow documents
+        highlighter_disabled = False
+        if getenv("ZIMX_DISABLE_HIGHLIGHTER_LOAD") == "1":
+            highlighter_disabled = True
+            self.highlighter.setDocument(None)
+        
         incremental = False
         batch_ms_total = 0.0
         batches = 0
-        from os import getenv
         if getenv("ZIMX_INCREMENTAL_LOAD") == "1":
             # Incremental batch insertion to compare performance with setPlainText
             incremental = True
@@ -383,6 +394,14 @@ class MarkdownEditor(QTextEdit):
         else:
             self.setPlainText(display)
             t3 = time.perf_counter()
+        
+        # Reconnect the textChanged handlers
+        self.textChanged.connect(self._enforce_display_symbols)
+        self.textChanged.connect(self._schedule_heading_outline)
+        
+        # Re-enable highlighter if it was disabled
+        if highlighter_disabled:
+            self.highlighter.setDocument(self.document())
         self.setUpdatesEnabled(True)
         
         # Lazy load images after a short delay to let the UI render first
@@ -402,6 +421,13 @@ class MarkdownEditor(QTextEdit):
         print(f"  render_images: {(t4-t3)*1000:.1f}ms (lazy - deferred)")
         print(f"  schedule_outline+margin: {(t5-t4)*1000:.1f}ms")
         print(f"  TOTAL: {(t5-t0)*1000:.1f}ms")
+        
+        # Warn about potential performance issues
+        setPlainText_time_ms = (t3-t2)*1000
+        if setPlainText_time_ms > 1000:
+            print(f"[PERF WARNING] setPlainText took {setPlainText_time_ms:.1f}ms - unusually slow!")
+            print("  This may indicate regex backtracking or signal cascade issues.")
+            print("  Try environment variable ZIMX_DISABLE_HIGHLIGHTER_LOAD=1 for testing.")
         if incremental:
             print(f"[TIMING] Incremental batches={batches} cumulative_insert={batch_ms_total:.1f}ms avg_batch={(batch_ms_total/max(batches,1)):.1f}ms")
         # Report highlighter timing
@@ -591,19 +617,30 @@ class MarkdownEditor(QTextEdit):
                 self._scroll_one_line_down()
                 event.accept()
                 return
+        # Handle Left/Right arrow keys for proper link boundary navigation
+        if event.key() in (Qt.Key_Left, Qt.Key_Right) and not event.modifiers():
+            if self._handle_link_boundary_navigation(event.key()):
+                event.accept()
+                return
+        
         if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not event.modifiers():
-            link = self._link_under_cursor()
-            if link:
-                self.linkActivated.emit(link)
-                return
-            # Handle bullet list continuation (non-bullet lines)
-            if self._handle_bullet_enter():
-                event.accept()
-                return
-            # For non-bullets: carry over leading indentation on new line
-            if self._handle_enter_indent_same_level():
-                event.accept()
-                return
+            # Check if cursor is within a link - if so, just insert newline, don't activate
+            cursor = self.textCursor()
+            if not self._is_cursor_at_link_activation_point(cursor):
+                # Handle bullet list continuation (non-bullet lines)
+                if self._handle_bullet_enter():
+                    event.accept()
+                    return
+                # For non-bullets: carry over leading indentation on new line
+                if self._handle_enter_indent_same_level():
+                    event.accept()
+                    return
+            else:
+                # Cursor is at a link activation point - activate the link
+                link = self._link_under_cursor()
+                if link:
+                    self.linkActivated.emit(link)
+                    return
         # ...existing code...
         super().keyPressEvent(event)
 
@@ -818,6 +855,79 @@ class MarkdownEditor(QTextEdit):
         block_cursor.insertText(new_line)
         return True
 
+    def _handle_link_boundary_navigation(self, key: int) -> bool:
+        """Handle Left/Right arrow navigation over link boundaries. Returns True if handled."""
+        cursor = self.textCursor()
+        block = cursor.block()
+        rel_pos = cursor.position() - block.position()
+        text = block.text()
+        
+        # Find link boundaries in display format (\x00Link\x00Label)
+        idx = 0
+        while idx < len(text):
+            if text[idx] == '\x00':
+                link_start = idx + 1
+                link_end = text.find('\x00', link_start)
+                if link_end > link_start:
+                    label_start = link_end + 1
+                    label_end = label_start
+                    while label_end < len(text) and text[label_end] not in ('\x00', '\n'):
+                        label_end += 1
+                    
+                    if key == Qt.Key_Right:
+                        # Moving right: if cursor is in the hidden part, jump to label start
+                        if idx <= rel_pos < label_start:
+                            new_cursor = QTextCursor(cursor)
+                            new_cursor.setPosition(block.position() + label_start)
+                            self.setTextCursor(new_cursor)
+                            return True
+                        # If at the end of label, move past it
+                        elif rel_pos == label_end and label_end < len(text):
+                            new_cursor = QTextCursor(cursor)
+                            new_cursor.setPosition(block.position() + label_end)
+                            self.setTextCursor(new_cursor)
+                            return True
+                    
+                    elif key == Qt.Key_Left:
+                        # Moving left: if cursor is in the label, jump to before the link
+                        if label_start < rel_pos <= label_end:
+                            new_cursor = QTextCursor(cursor)
+                            new_cursor.setPosition(block.position() + idx)
+                            self.setTextCursor(new_cursor)
+                            return True
+                    
+                    idx = label_end
+                    continue
+            idx += 1
+        
+        return False
+    
+    def _is_cursor_at_link_activation_point(self, cursor: QTextCursor) -> bool:
+        """Check if cursor is positioned where Enter should activate a link vs insert newline."""
+        block = cursor.block()
+        rel_pos = cursor.position() - block.position()
+        text = block.text()
+        
+        # Check if cursor is in the middle of a link label (not at boundaries)
+        idx = 0
+        while idx < len(text):
+            if text[idx] == '\x00':
+                link_start = idx + 1
+                link_end = text.find('\x00', link_start)
+                if link_end > link_start:
+                    label_start = link_end + 1
+                    label_end = label_start
+                    while label_end < len(text) and text[label_end] not in ('\x00', '\n'):
+                        label_end += 1
+                    # Activate if cursor is within the link label, but not at the very end
+                    if label_start <= rel_pos < label_end:
+                        return True
+                    idx = label_end
+                    continue
+            idx += 1
+        
+        return False
+
     def _link_under_cursor(self, cursor: QTextCursor | None = None) -> Optional[str]:
         cursor = cursor or self.textCursor()
         block = cursor.block()
@@ -835,7 +945,7 @@ class MarkdownEditor(QTextEdit):
                     label_end = label_start
                     while label_end < len(text) and text[label_end] not in ('\x00', '\n'):
                         label_end += 1
-                    # Check if cursor is in the visible label portion
+                    # Check if cursor is in the visible label portion (exclude end position)
                     if label_start <= rel < label_end:
                         return text[link_start:link_end]
                     idx = label_end
@@ -870,7 +980,7 @@ class MarkdownEditor(QTextEdit):
             match = iterator.next()
             start = match.capturedStart()
             end = start + match.capturedLength()
-            # Cursor must be INSIDE the link, not at the end
+            # Cursor must be INSIDE the link (exclude end position)
             if start <= rel < end:
                 return match.captured("link")
         
@@ -880,7 +990,7 @@ class MarkdownEditor(QTextEdit):
             match = colon_iterator.next()
             start = match.capturedStart()
             end = start + match.capturedLength()
-            # Cursor must be INSIDE the link, not at the end
+            # Cursor must be INSIDE the link (exclude end position)
             if start <= rel < end:
                 return match.captured("link")
         
@@ -903,7 +1013,7 @@ class MarkdownEditor(QTextEdit):
                     label_end = label_start
                     while label_end < len(text) and text[label_end] not in ('\x00', '\n'):
                         label_end += 1
-                    # Check if cursor is in the visible label portion
+                    # Check if cursor is in the visible label portion (exclude end position)
                     if label_start <= rel < label_end:
                         link = text[link_start:link_end]
                         label = text[label_start:label_end]
