@@ -95,6 +95,9 @@ def path_to_colon(file_path: str) -> str:
         # Remove the duplicate file name
         parts = parts[:-1]
     
+    # Convert spaces to underscores in each part for consistent link format
+    parts = [part.replace(" ", "_") for part in parts]
+    
     return ":".join(parts)
 
 
@@ -103,6 +106,7 @@ def colon_to_path(colon_path: str, vault_root_name: str = "") -> str:
     
     The structure is: Each page lives in a folder with the same name.
     PageA:PageB:PageC becomes /PageA/PageB/PageC/PageC.txt
+    Underscores in colon notation are converted to spaces to match actual folder names.
     
     Args:
         colon_path: Colon-separated page hierarchy (e.g., "PageA:PageB:PageC")
@@ -121,6 +125,8 @@ def colon_to_path(colon_path: str, vault_root_name: str = "") -> str:
         return "/"
     
     parts = cleaned.split(":")
+    # Convert underscores to spaces in each part to match actual folder/file names
+    parts = [part.replace("_", " ") for part in parts]
     # Each page lives in a folder with the same name
     # Final path is /Part1/Part2/.../PartN/PartN.txt
     folder_path = "/".join(parts)
@@ -130,6 +136,8 @@ def colon_to_path(colon_path: str, vault_root_name: str = "") -> str:
 
 def colon_to_folder_path(colon_path: str) -> str:
     """Convert colon notation to folder path (without the .txt file).
+    
+    Underscores in colon notation are converted to spaces to match actual folder names.
     
     Args:
         colon_path: Colon-separated page hierarchy (e.g., "PageA:PageB:PageC")
@@ -145,4 +153,6 @@ def colon_to_folder_path(colon_path: str) -> str:
         return "/"
     
     parts = cleaned.split(":")
+    # Convert underscores to spaces in each part to match actual folder names
+    parts = [part.replace("_", " ") for part in parts]
     return "/" + "/".join(parts)
