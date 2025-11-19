@@ -1990,7 +1990,7 @@ class MainWindow(QMainWindow):
         print(f"[DEBUG] _navigate_history_back called from:")
         for line in traceback.format_stack()[-4:-1]:
             print(line.strip())
-        if self.history_index <= 0:
+        if not self.page_history or self.history_index <= 0:
             return
         # Remember vi mode state before navigation - check MAIN WINDOW's state, not editor's
         print(f"[DEBUG] self._vi_mode_active = {getattr(self, '_vi_mode_active', 'ATTRIBUTE_MISSING')}")
@@ -2003,20 +2003,13 @@ class MainWindow(QMainWindow):
         finally:
             self._suspend_selection_open = False
         self._open_file(target_path, add_to_history=False)
-        # Restore vi mode state and focus after navigation (deferred to ensure it happens after all events)
-        # Also check for the flag set by Alt+H/Alt+L in vi mode
-        flag_value = getattr(self, '_restore_vi_mode_after_nav', False)
-        print(f"[DEBUG] _navigate_history_back: self={id(self)}, vi_mode_was_active={vi_mode_was_active}, flag={flag_value}, hasattr={hasattr(self, '_restore_vi_mode_after_nav')}")
-        should_restore_vi = vi_mode_was_active or flag_value
-        if should_restore_vi:
-            print(f"[DEBUG] Restoring vi mode via QTimer")
-            self._restore_vi_mode_after_nav = False  # Clear the flag
-            # QTimer.singleShot(0, lambda: self.editor.set_vi_mode(True))  # Commented out for testing
+        # Restore vi mode flag if set (no delayed timers needed anymore)
+        self._restore_vi_mode_after_nav = False
         QTimer.singleShot(0, self.editor.setFocus)
 
     def _navigate_history_forward(self) -> None:
         """Navigate to next page in history (Alt+Right)."""
-        if self.history_index >= len(self.page_history) - 1:
+        if not self.page_history or self.history_index >= len(self.page_history) - 1:
             return
         # Remember vi mode state before navigation - check MAIN WINDOW's state, not editor's
         vi_mode_was_active = self._vi_mode_active
@@ -2028,13 +2021,17 @@ class MainWindow(QMainWindow):
         finally:
             self._suspend_selection_open = False
         self._open_file(target_path, add_to_history=False)
-        # Restore vi mode state and focus after navigation (deferred to ensure it happens after all events)
-        # Also check for the flag set by Alt+H/Alt+L in vi mode
-        should_restore_vi = vi_mode_was_active or getattr(self, '_restore_vi_mode_after_nav', False)
-        if should_restore_vi:
-            self._restore_vi_mode_after_nav = False  # Clear the flag
-            # QTimer.singleShot(0, lambda: self.editor.set_vi_mode(True))  # Commented out for testing
+        # Clear vi mode restore flag; no timer needed now that vi-mode stays stable
+        self._restore_vi_mode_after_nav = False
         QTimer.singleShot(0, self.editor.setFocus)
+
+    def _history_can_go_back(self) -> bool:
+        """Return True if history has a previous entry to navigate to."""
+        return bool(self.page_history) and self.history_index > 0
+
+    def _history_can_go_forward(self) -> bool:
+        """Return True if history has a forward entry."""
+        return bool(self.page_history) and self.history_index < len(self.page_history) - 1
 
     def _should_focus_hr_tail(self, content: str) -> bool:
         """Return True if cursor should jump to trailing newline after a horizontal rule."""
@@ -2306,12 +2303,14 @@ class MainWindow(QMainWindow):
                 
                 if alt and not shift:
                     if key == Qt.Key_H:
-                        self._restore_vi_mode_after_nav = True
-                        self._navigate_history_back()
+                        if self._history_can_go_back():
+                            self._restore_vi_mode_after_nav = True
+                            self._navigate_history_back()
                         return True
                     elif key == Qt.Key_L:
-                        self._restore_vi_mode_after_nav = True
-                        self._navigate_history_forward()
+                        if self._history_can_go_forward():
+                            self._restore_vi_mode_after_nav = True
+                            self._navigate_history_forward()
                         return True
                     elif key == Qt.Key_K:
                         self._restore_vi_mode_after_nav = True
