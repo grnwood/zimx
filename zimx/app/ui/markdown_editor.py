@@ -876,6 +876,7 @@ class MarkdownEditor(QTextEdit):
         super().focusOutEvent(event)
         self.focusLost.emit()
 
+    def keyPressEvent(self, event):  # type: ignore[override]
         # Markdown formatting shortcuts (Ctrl+B, Ctrl+I, Ctrl+K, Ctrl+H)
         if event.modifiers() == Qt.ControlModifier:
             if event.key() == Qt.Key_B:
