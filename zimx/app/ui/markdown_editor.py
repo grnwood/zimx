@@ -931,6 +931,10 @@ class MarkdownEditor(QTextEdit):
                     self._vi_page_down()
                     event.accept()
                     return
+        # Check for meaningful modifiers (ignore KeypadModifier which Qt may add on some platforms)
+        # This is used throughout the keyPressEvent for cross-platform compatibility
+        meaningful_modifiers = event.modifiers() & ~Qt.KeypadModifier
+        
         # Bullet mode key handling
         cursor = self.textCursor()
         block = cursor.block()
@@ -942,7 +946,7 @@ class MarkdownEditor(QTextEdit):
             event.accept()
             return
         # Tab: indent bullet
-        if is_bullet and event.key() == Qt.Key_Tab and not event.modifiers():
+        if is_bullet and event.key() == Qt.Key_Tab and not meaningful_modifiers:
             if self._handle_bullet_indent():
                 event.accept()
                 return
@@ -952,7 +956,7 @@ class MarkdownEditor(QTextEdit):
                 event.accept()
                 return
         # Enter: continue bullet or terminate if empty
-        if is_bullet and event.key() in (Qt.Key_Return, Qt.Key_Enter) and not event.modifiers():
+        if is_bullet and event.key() in (Qt.Key_Return, Qt.Key_Enter) and not meaningful_modifiers:
             if self._handle_bullet_enter():
                 event.accept()
                 return
@@ -969,18 +973,18 @@ class MarkdownEditor(QTextEdit):
             return
         # ...existing code...
         # When at end-of-buffer, Down should still scroll the viewport
-        if event.key() == Qt.Key_Down and not event.modifiers():
+        if event.key() == Qt.Key_Down and not meaningful_modifiers:
             if self.textCursor().atEnd():
                 self._scroll_one_line_down()
                 event.accept()
                 return
         # Handle Left/Right arrow keys for proper link boundary navigation
-        if event.key() in (Qt.Key_Left, Qt.Key_Right) and not event.modifiers():
+        if event.key() in (Qt.Key_Left, Qt.Key_Right) and not meaningful_modifiers:
             if self._handle_link_boundary_navigation(event.key()):
                 event.accept()
                 return
         
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not event.modifiers():
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not meaningful_modifiers:
             # Check if cursor is within a link - if so, just insert newline, don't activate
             cursor = self.textCursor()
             if not self._is_cursor_at_link_activation_point(cursor):
