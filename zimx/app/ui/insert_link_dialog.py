@@ -71,9 +71,14 @@ class InsertLinkDialog(QDialog):
         # Initialize with selected text if provided
         if selected_text:
             clean_text = selected_text.replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ').strip()
-            normalized = normalize_link_target(clean_text)
-            self.search.setText(normalized)
-            self.link_name.setText(normalized)
+            # Check if it's an HTTP URL - if so, don't normalize it
+            if clean_text.startswith(("http://", "https://")):
+                self.search.setText(clean_text)
+                self.link_name.setText(clean_text)
+            else:
+                normalized = normalize_link_target(clean_text)
+                self.search.setText(normalized)
+                self.link_name.setText(normalized)
             # Select all text in search field so typing replaces it
             self.search.selectAll()
 
@@ -101,13 +106,19 @@ class InsertLinkDialog(QDialog):
             self.list_widget.clear()
 
     def selected_colon_path(self) -> str | None:
-        """Return the selected page in colon notation (e.g., 'PageA:PageB:PageC')."""
-        normalized = normalize_link_target(self.search.text().strip())
+        """Return the selected page in colon notation or HTTP URL."""
+        text = self.search.text().strip()
+        # Don't normalize HTTP URLs
+        if text.startswith(("http://", "https://")):
+            return text or None
+        normalized = normalize_link_target(text)
         return normalized or None
 
     def selected_link_name(self) -> str | None:
         """Return the display name for the link, or None if empty."""
         name = self.link_name.text().strip()
+        # Clean any line breaks or paragraph separators that might have been pasted
+        name = name.replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ').strip()
         return name or None
 
     def _accept_from_list(self):
@@ -123,6 +134,16 @@ class InsertLinkDialog(QDialog):
     def _on_search_changed(self):
         """Called when user types in the search field."""
         if self._ignore_search_change:
+            return
+        # If typing an HTTP URL, skip page search
+        text = self.search.text().strip()
+        if text.startswith(("http://", "https://")):
+            self.list_widget.clear()
+            # Auto-populate link name with URL if not manually edited
+            if not self._link_name_manually_edited:
+                self.link_name.blockSignals(True)
+                self.link_name.setText(text)
+                self.link_name.blockSignals(False)
             return
         self._refresh()
 
