@@ -2579,8 +2579,11 @@ class MainWindow(QMainWindow):
                 pass
 
         # Fallback: synthesize key events for non-editor targets or unhandled keys
-        press_event = QKeyEvent(QEvent.KeyPress, key, modifiers)
-        release_event = QKeyEvent(QEvent.KeyRelease, key, modifiers)
+        # Use the full QKeyEvent constructor for cross-platform compatibility
+        # QKeyEvent(type, key, modifiers, nativeScanCode, nativeVirtualKey, nativeModifiers, text, autorep, count)
+        # For synthetic events, we pass empty string for text and defaults for native parameters
+        press_event = QKeyEvent(QEvent.KeyPress, key, modifiers, "", False, 1)
+        release_event = QKeyEvent(QEvent.KeyRelease, key, modifiers, "", False, 1)
         QApplication.sendEvent(target, press_event)
         QApplication.sendEvent(target, release_event)
 
