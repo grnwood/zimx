@@ -35,49 +35,31 @@ BULLET_DISPLAY_PATTERN = re.compile(r"^(\s*)• ", re.MULTILINE)
 # Plus-prefixed link pattern: +PageName or +Projects (CamelCase style, no trailing spaces)
 CAMEL_LINK_PATTERN = QRegularExpression(r"\+(?P<link>[A-Za-z][\w]*)")
 
-_COLON_SEGMENT = r"[\w ]+"
-_ROOT_COLON_PATH = rf":{_COLON_SEGMENT}(?::{_COLON_SEGMENT})*"
-_MULTI_COLON_PATH = rf"{_COLON_SEGMENT}:{_COLON_SEGMENT}(?::{_COLON_SEGMENT})*"
-_ANCHOR_SUFFIX = r"(?:#[A-Za-z0-9_-]+)?"
-_SINGLE_WITH_ANCHOR = rf":?{_COLON_SEGMENT}#[A-Za-z0-9_-]+"
-COLON_LINK_BODY_PATTERN = (
-    rf"(?:{_ROOT_COLON_PATH}{_ANCHOR_SUFFIX}|{_MULTI_COLON_PATH}{_ANCHOR_SUFFIX}|{_SINGLE_WITH_ANCHOR})"
-)
+# CamelCase link pattern: +PageName (deprecated but kept for compatibility)
+CAMEL_LINK_PATTERN = QRegularExpression(r"\+(?P<link>[A-Za-z][\w]*)")
 
-# Colon link pattern with optional anchor; now supports leading ':' for root links.
-COLON_LINK_PATTERN = QRegularExpression(rf"(?P<link>{COLON_LINK_BODY_PATTERN})")
-# Markdown-style link with colon target (optionally with anchor)
-MARKDOWN_COLON_LINK_PATTERN = QRegularExpression(
-    rf"\[(?P<text>[^\]]+)\]\s*\((?P<link>{COLON_LINK_BODY_PATTERN})\)"
-)
-# Generic markdown link for files (with an extension) e.g. [Report](report.pdf) or [Img](./image.png)
-# Accept optional leading ./ and subfolder segments; require a dot-extension 1-8 chars
-FILE_MARKDOWN_LINK_PATTERN = QRegularExpression(
-    # Allow spaces in filenames by excluding only closing paren and newlines; still require an extension
+# File link pattern for attachments: [text](./file.ext) or [text](file.ext)
+WIKI_FILE_LINK_PATTERN = QRegularExpression(
     r"\[(?P<text>[^\]]+)\]\s*\((?P<file>(?:\./)?[^)\n]+\.[A-Za-z0-9]{1,8})\)"
 )
-# Storage pattern for markdown links (using Python re for easier replacement)
-# Limit whitespace to prevent catastrophic backtracking with malformed links
-# Now allows spaces in page names and supports single page with anchor/root prefix
-MARKDOWN_LINK_STORAGE_PATTERN = re.compile(
-    rf"\[(?P<text>[^\]]+)\][ \t]*\((?P<link>{COLON_LINK_BODY_PATTERN})\)",
-    re.MULTILINE,
-)
-# Display pattern for rendered links (sentinel + null separator + label + closing sentinel)
-# Now allows spaces in link paths, exclude newlines from text
-MARKDOWN_LINK_DISPLAY_PATTERN = re.compile(r"\x00(?P<link>[\w :# \-]+)\x00(?P<text>[^\x00\n]+)\x00")
 
-# HTTP/HTTPS link patterns
-# Plain HTTP URL pattern (for highlighting and detection)
+# Unified wiki-style link format: [link|label]
+# Works for both HTTP URLs and page links (colon notation)
+# Plain HTTP URL pattern (for highlighting plain URLs without labels)
 HTTP_URL_PATTERN = QRegularExpression(r"(?P<url>https?://[^\s<>\"{}|\\^`\[\]]+)")
-# Wiki-style HTTP link storage format: [url|label]
-HTTP_LINK_STORAGE_PATTERN = re.compile(
-    r"\[(?P<url>https?://[^\]|]+)\|(?P<label>[^\]]+)\]",
+# Plain colon link pattern (for highlighting plain colon links without labels)
+COLON_LINK_PATTERN = QRegularExpression(r"(?P<link>:[^\s\[\]]+(?:#[^\s\[\]]+)?)")
+
+# Unified wiki-style link storage format: [link|label]
+# Matches both HTTP and page links (label can be empty)
+WIKI_LINK_STORAGE_PATTERN = re.compile(
+    r"\[(?P<link>[^\]|]+)\|(?P<label>[^\]]*)\]",
     re.MULTILINE
 )
-# HTTP link display format: \x01url\x01label\x01 (using \x01 sentinel with closing marker)
-# Exclude newlines from label to prevent malformed output
-HTTP_LINK_DISPLAY_PATTERN = re.compile(r"\x01(?P<url>[^\x01\n]+)\x01(?P<label>[^\x01\n]+)\x01")
+
+# Display pattern for rendered links (sentinel + link + sentinel + label + sentinel)
+# Uses \x00 sentinel for all links (both HTTP and page links)
+WIKI_LINK_DISPLAY_PATTERN = re.compile(r"\x00(?P<link>[^\x00\n]+)\x00(?P<label>[^\x00\n]*)\x00")
 
 HEADING_MAX_LEVEL = 5
 HEADING_SENTINEL_BASE = 0xE000
@@ -435,45 +417,58 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                 if link_end > link_start:
                     label_start = link_end + 1
                     label_end = text.find("\x00", label_start)
-                    if label_end > label_start:
+                    if label_end >= label_start:  # Changed: >= instead of > to handle empty labels
+                        # Hide opening sentinel and link
                         self.setFormat(idx, label_start - idx, self.hidden_format)
-                        self.setFormat(label_start, label_end - label_start, link_format)
+                        # If label is empty, show the link; otherwise show the label
+                        if label_end == label_start:  # Empty label
+                            # Show the link part instead
+                            self.setFormat(link_start, link_end - link_start, link_format)
+                        else:  # Non-empty label
+                            self.setFormat(label_start, label_end - label_start, link_format)
                         self.setFormat(label_end, 1, self.hidden_format)  # Hide closing sentinel
                         display_link_spans.append((idx, label_end + 1))
                         idx = label_end + 1
                         continue
             idx += 1
 
-        md_iter = MARKDOWN_COLON_LINK_PATTERN.globalMatch(text)
-        md_spans: list[tuple[int, int]] = []
-        while md_iter.hasNext():
-            m = md_iter.next()
-            start = m.capturedStart(); end = start + m.capturedLength()
-            md_spans.append((start, end))
-            text_val = m.captured("text")
-            text_start = start + 1
-            self.setFormat(text_start, len(text_val), link_format)
+        # Wiki-style links in storage format: [link|label]
+        wiki_pattern = r"\[([^\]|]+)\|([^\]]*)\]"
+        import re as regex_module
+        wiki_spans: list[tuple[int, int]] = []
+        for match in regex_module.finditer(wiki_pattern, text):
+            start = match.start()
+            end = match.end()
+            wiki_spans.append((start, end))
+            link = match.group(1)
+            label = match.group(2)
+            # Highlight the label part
+            label_start = start + 1 + len(link) + 1  # After '[link|'
+            self.setFormat(label_start, len(label), link_format)
 
+        # CamelCase links: +PageName
         camel_iter = CAMEL_LINK_PATTERN.globalMatch(text)
         while camel_iter.hasNext():
             match = camel_iter.next()
             self.setFormat(match.capturedStart(), match.capturedLength(), link_format)
 
+        # Plain colon links: :Page:Name
         colon_iter = COLON_LINK_PATTERN.globalMatch(text)
         while colon_iter.hasNext():
             match = colon_iter.next()
             s = match.capturedStart(); e = s + match.capturedLength()
-            inside_md = any(ms <= s and e <= me for (ms, me) in md_spans)
+            inside_wiki = any(ws <= s and e <= we for (ws, we) in wiki_spans)
             inside_display = any(ds <= s and e <= de for (ds, de) in display_link_spans)
-            if not inside_md and not inside_display:
+            if not inside_wiki and not inside_display:
                 self.setFormat(s, e - s, link_format)
 
-        file_iter = FILE_MARKDOWN_LINK_PATTERN.globalMatch(text)
+        # File links: [text](./file.ext)
+        file_iter = WIKI_FILE_LINK_PATTERN.globalMatch(text)
         while file_iter.hasNext():
             fm = file_iter.next()
             start = fm.capturedStart(); end = start + fm.capturedLength()
-            overlap_colon = any(ms <= start and end <= me for (ms, me) in md_spans)
-            if overlap_colon:
+            overlap = any(ws <= start and end <= we for (ws, we) in wiki_spans)
+            if overlap:
                 continue
             label = fm.captured("text")
             label_start = start + 1
@@ -485,37 +480,17 @@ class MarkdownHighlighter(QSyntaxHighlighter):
             if end > label_end:
                 self.setFormat(label_end, end - label_end, self.hidden_format)
 
-        # HTTP link display format: \x01url\x01label\x01 (hide markers, show label as link)
-        http_display_spans: list[tuple[int, int]] = []
-        idx2 = 0
-        while idx2 < len(text):
-            if text[idx2] == "\x01":
-                url_start = idx2 + 1
-                url_end = text.find("\x01", url_start)
-                if url_end > url_start:
-                    label_start = url_end + 1
-                    label_end = text.find("\x01", label_start)
-                    if label_end > label_start:
-                        # Hide the markers and URL, show only the label
-                        self.setFormat(idx2, label_start - idx2, self.hidden_format)
-                        self.setFormat(label_start, label_end - label_start, link_format)
-                        self.setFormat(label_end, 1, self.hidden_format)  # Hide closing sentinel
-                        http_display_spans.append((idx2, label_end + 1))
-                        idx2 = label_end + 1
-                        continue
-            idx2 += 1
-
-        # Plain HTTP URLs (not already part of wiki-style links)
+        # Plain HTTP URLs (not in wiki-style links)
         http_iter = HTTP_URL_PATTERN.globalMatch(text)
         while http_iter.hasNext():
             match = http_iter.next()
-            start = match.capturedStart()
-            end = start + match.capturedLength()
-            # Skip if inside any display link span
-            inside_http_display = any(ds <= start and end <= de for (ds, de) in http_display_spans)
-            inside_page_display = any(ds <= start and end <= de for (ds, de) in display_link_spans)
-            if not inside_http_display and not inside_page_display:
-                self.setFormat(start, end - start, link_format)
+            s = match.capturedStart(); e = s + match.capturedLength()
+            inside_wiki = any(ws <= s and e <= we for (ws, we) in wiki_spans)
+            inside_display = any(ds <= s and e <= de for (ds, de) in display_link_spans)
+            if not inside_wiki and not inside_display:
+                self.setFormat(s, e - s, link_format)
+
+
 
         if self._timing_enabled:
             self._timing_total += (time.perf_counter() - t0)
@@ -707,10 +682,9 @@ class MarkdownEditor(QTextEdit):
     def insert_link(self, colon_path: str, link_name: str | None = None) -> None:
         """Insert a link at the current cursor position.
         
-        If link_name is provided, creates markdown-style link [link_name](colon_path) or
-        wiki-style HTTP link [url|label].
-        Otherwise inserts plain colon-notation link or plain HTTP URL.
-        Adds a space after the link if there's text following to prevent link continuation.
+        Uses unified wiki-style format [link|label] for all labeled links.
+        If link_name provided: [link|label] format (for both HTTP and page links)
+        If no label: plain link (:Page or https://url)
         """
         if not colon_path:
             return
@@ -724,57 +698,24 @@ class MarkdownEditor(QTextEdit):
         cursor = self.textCursor()
         pos_before = cursor.position()
         
-        # Check if there's text immediately after cursor (not whitespace or end of line)
-        block = cursor.block()
-        rel_pos = pos_before - block.position()
-        text_after = block.text()[rel_pos:rel_pos+1] if rel_pos < len(block.text()) else ""
-        needs_space = text_after and not text_after.isspace()
-        
-        # Handle HTTP URLs
-        if is_http_url:
-            if link_name and link_name != colon_path:
-                # Use wiki-style format [url|label] if label differs from URL
-                link_text = f"[{colon_path}|{link_name}]"
-            else:
-                # Plain URL if no label or label same as URL
-                link_text = colon_path
-        else:
-            # Handle page links
-            if link_name:
-                link_text = f"[{link_name}]({colon_path})"
-            else:
-                link_text = colon_path
-        
-        # Add space after link if needed to separate from following text
-        if needs_space:
-            link_text += " "
+        # Always use [link|label] format - easier to add label later
+        # If no label provided, use empty label: [link|]
+        label = link_name if link_name else ""
+        link_text = f"[{colon_path}|{label}]"
             
         # Calculate expected length in display format to position cursor correctly
-        # In display format: \x00link\x00label or \x01url\x01label\x01 (hidden format)
-        # The visible part is just the label, but we need to skip past all hidden characters
-        if link_name:
-            # Link with label: in storage [label](link) or [url|label]
-            # In display: \x00link\x00label or \x01url\x01label\x01
-            # We want cursor after the visible label part and closing sentinel
-            if is_http_url:
-                display_length = 1 + len(colon_path) + 1 + len(link_name) + 1  # sentinel + url + sentinel + label + closing sentinel
-            else:
-                display_length = 1 + len(colon_path) + 1 + len(link_name) + 1  # sentinel + link + sentinel + label + closing sentinel
-        else:
-            # Plain link/URL - no special display format
-            display_length = len(link_text)
-        
-        # Add the space to length if we added it
-        if needs_space:
-            display_length += 1
+        # In display format: \x00link\x00label\x00 (hidden format)
+        # The visible part is just the label
+        # We want cursor after the visible label part (or at the label position if empty)
+        display_length = 1 + len(colon_path) + 1 + len(label) + 1  # sentinel + link + sentinel + label + closing sentinel
             
         cursor.insertText(link_text)
         # Calculate target position (where we are now, which is after the inserted text)
         target_pos = pos_before + display_length
         self.setTextCursor(cursor)
-        # Full refresh ensures markdown links convert to hidden-display format immediately.
+        # Full refresh ensures wiki links convert to hidden-display format immediately.
         self._refresh_display()
-        # Position cursor after the link in display format
+        # Position cursor after the link in display format (or at empty label position)
         new_cursor = self.textCursor()
         new_cursor.setPosition(min(target_pos, self.document().characterCount() - 1))
         self.setTextCursor(new_cursor)
@@ -819,25 +760,25 @@ class MarkdownEditor(QTextEdit):
                     self.imageSaved.emit(saved.name)
                     return
         
-        # Check if pasting an HTTP URL - browsers often provide both HTML and plain text
+        # Check if pasting a URL - force plain text to avoid browser's HTML with title
         if source.hasText():
             text = source.text().strip()
-            # If it's a plain HTTP URL, insert it as plain text to avoid HTML formatting
-            if text.startswith(("http://", "https://")) and '\n' not in text:
-                # Insert as plain text URL
+            # If it's a single-line HTTP URL, insert in wiki format [url|] to ensure clean display
+            if '\n' not in text and text.startswith(("http://", "https://")):
                 cursor = self.textCursor()
-                cursor.insertText(text)
+                cursor.insertText(f"[{text}|]")
+                self._refresh_display()
                 return
         
         # Remember position before paste
         pos_before = self.textCursor().position()
         super().insertFromMimeData(source)
         
-        # After pasting text, check if it contains markdown links and re-render if needed
+        # After pasting text, check if it contains wiki links and re-render if needed
         if source.hasText():
             text = source.text()
-            # Quick check: does pasted text contain markdown link pattern or HTTP link pattern?
-            if ('[' in text and '](' in text and ':' in text) or ('[' in text and '|' in text):
+            # Quick check: does pasted text contain wiki link pattern?
+            if '[' in text and '|' in text:
                 # Force full document re-render to apply display transformation
                 self._refresh_display()
 
@@ -1176,9 +1117,9 @@ class MarkdownEditor(QTextEdit):
             menu = self.createStandardContextMenu()
             menu.addSeparator()
             copy_action = menu.addAction("Copy Link to Location")
-            # Get heading slug if cursor is on a heading line
-            slug = self.current_heading_slug()
-            copy_action.triggered.connect(lambda: self._copy_link_to_location(link_text=None, anchor_slug=slug))
+            # Get heading text if cursor is on a heading line
+            heading_text = self.current_heading_text()
+            copy_action.triggered.connect(lambda: self._copy_link_to_location(link_text=None, anchor_text=heading_text))
             
             # Add Edit Page Source action (delegates to main window)
             edit_src_action = menu.addAction("Edit Page Source")
@@ -1329,43 +1270,54 @@ class MarkdownEditor(QTextEdit):
         rel_pos = cursor.position() - block.position()
         text = block.text()
         
-        # Find link boundaries in display format (\x00Link\x00Label for pages, \x01url\x01label for HTTP)
+        # Find link boundaries in display format: \x00link\x00label\x00
         idx = 0
         while idx < len(text):
-            if text[idx] in ('\x00', '\x01'):
-                sentinel = text[idx]
+            if text[idx] == '\x00':
                 link_start = idx + 1
-                link_end = text.find(sentinel, link_start)
+                link_end = text.find('\x00', link_start)
                 if link_end > link_start:
                     label_start = link_end + 1
-                    label_end = label_start
-                    while label_end < len(text) and text[label_end] not in ('\x00', '\x01', '\n'):
-                        label_end += 1
-                    
-                    if key == Qt.Key_Right:
-                        # Moving right: if cursor is in the hidden part, jump to label start
-                        if idx <= rel_pos < label_start:
-                            new_cursor = QTextCursor(cursor)
-                            new_cursor.setPosition(block.position() + label_start)
-                            self.setTextCursor(new_cursor)
-                            return True
-                        # If at the end of label, move past it
-                        elif rel_pos == label_end and label_end < len(text):
-                            new_cursor = QTextCursor(cursor)
-                            new_cursor.setPosition(block.position() + label_end)
-                            self.setTextCursor(new_cursor)
-                            return True
-                    
-                    elif key == Qt.Key_Left:
-                        # Moving left: if cursor is in the label, jump to before the link
-                        if label_start < rel_pos <= label_end:
-                            new_cursor = QTextCursor(cursor)
-                            new_cursor.setPosition(block.position() + idx)
-                            self.setTextCursor(new_cursor)
-                            return True
-                    
-                    idx = label_end
-                    continue
+                    label_end = text.find('\x00', label_start)
+                    if label_end >= label_start:  # >= to handle empty labels
+                        # Determine visible region: if label empty, show link; otherwise show label
+                        if label_end == label_start:  # Empty label - link is visible
+                            visible_start = link_start
+                            visible_end = link_end
+                        else:  # Non-empty label - label is visible
+                            visible_start = label_start
+                            visible_end = label_end
+                        
+                        if key == Qt.Key_Right:
+                            # Moving right: if cursor is in the hidden part, jump to visible start
+                            if idx <= rel_pos < visible_start:
+                                new_cursor = QTextCursor(cursor)
+                                new_cursor.setPosition(block.position() + visible_start)
+                                self.setTextCursor(new_cursor)
+                                return True
+                            # If at the end of visible part, move past the closing sentinel
+                            elif rel_pos == visible_end:
+                                new_cursor = QTextCursor(cursor)
+                                new_cursor.setPosition(block.position() + label_end + 1)
+                                self.setTextCursor(new_cursor)
+                                return True
+                        
+                        elif key == Qt.Key_Left:
+                            # Moving left: if cursor is in the visible part, jump to before the link
+                            if visible_start < rel_pos <= visible_end:
+                                new_cursor = QTextCursor(cursor)
+                                new_cursor.setPosition(block.position() + idx)
+                                self.setTextCursor(new_cursor)
+                                return True
+                            # If at start of visible part, jump before the link
+                            elif rel_pos == visible_start:
+                                new_cursor = QTextCursor(cursor)
+                                new_cursor.setPosition(block.position() + idx)
+                                self.setTextCursor(new_cursor)
+                                return True
+                        
+                        idx = label_end + 1
+                        continue
             idx += 1
         
         return False
@@ -1423,19 +1375,21 @@ class MarkdownEditor(QTextEdit):
                     continue
             idx += 1
         
-        # Check storage-format markdown links (return target)
-        md_iter = MARKDOWN_COLON_LINK_PATTERN.globalMatch(text)
-        while md_iter.hasNext():
-            m = md_iter.next()
-            start = m.capturedStart()
-            text_val = m.captured("text")
-            text_start = start + 1
-            text_end = text_start + len(text_val)
-            if text_start <= rel < text_end:
-                return (m.captured("link"), text_start, text_end)
+        # Check storage-format wiki-style links: [link|label]
+        # Find all [link|label] patterns (label can be empty)
+        wiki_pattern = r"\[([^\]|]+)\|([^\]]*)\]"
+        import re as regex_module
+        for match in regex_module.finditer(wiki_pattern, text):
+            link = match.group(1)
+            label = match.group(2)
+            # Label is visible part
+            label_start = match.start() + 1 + len(link) + 1  # After '[link|'
+            label_end = label_start + len(label)
+            if label_start <= rel < label_end:
+                return (link, label_start, label_end)
 
-        # Check generic file markdown links
-        file_iter = FILE_MARKDOWN_LINK_PATTERN.globalMatch(text)
+        # Check file links: [text](./file.ext) or [text](file.ext)
+        file_iter = WIKI_FILE_LINK_PATTERN.globalMatch(text)
         while file_iter.hasNext():
             fm = file_iter.next()
             start = fm.capturedStart()
@@ -1489,33 +1443,12 @@ class MarkdownEditor(QTextEdit):
         return region[0] if region else None
 
     def _markdown_link_at_cursor(self, cursor: QTextCursor) -> Optional[tuple[int,int,str,str]]:
-        """Return (start, end, text, link) for a markdown link under cursor, or None."""
+        """Return (start, end, text, link) for a wiki-style link under cursor, or None."""
         block = cursor.block()
         rel = cursor.position() - block.position()
         text = block.text()
         
-        # Check HTTP display-format first: \x01url\x01label\x01
-        idx = 0
-        while idx < len(text):
-            if text[idx] == '\x01':
-                url_start = idx + 1
-                url_end = text.find('\x01', url_start)
-                if url_end > url_start:
-                    label_start = url_end + 1
-                    label_end = text.find('\x01', label_start)
-                    # Check if cursor is in the visible label portion
-                    if label_end > label_start and label_start <= rel < label_end:
-                        url = text[url_start:url_end]
-                        label = text[label_start:label_end]
-                        return (idx, label_end + 1, label, url)  # +1 to include closing sentinel
-                    if label_end > label_start:
-                        idx = label_end + 1
-                    else:
-                        idx = url_end + 1
-                    continue
-            idx += 1
-        
-        # Check page link display-format: \x00Link\x00Label\x00
+        # Check display-format: \x00link\x00label\x00 (unified for both HTTP and page links)
         idx = 0
         while idx < len(text):
             if text[idx] == '\x00':
@@ -1524,31 +1457,50 @@ class MarkdownEditor(QTextEdit):
                 if link_end > link_start:
                     label_start = link_end + 1
                     label_end = text.find('\x00', label_start)
-                    # Check if cursor is in the visible label portion (exclude end position)
-                    if label_end > label_start and label_start <= rel < label_end:
-                        link = text[link_start:link_end]
-                        label = text[label_start:label_end]
-                        return (idx, label_end + 1, label, link)  # +1 to include closing sentinel
-                    if label_end > label_start:
+                    if label_end >= label_start:  # >= to handle empty labels
+                        # Determine visible region
+                        if label_end == label_start:  # Empty label - link is visible
+                            visible_start = link_start
+                            visible_end = link_end
+                            visible_text = text[link_start:link_end]
+                        else:  # Non-empty label - label is visible
+                            visible_start = label_start
+                            visible_end = label_end
+                            visible_text = text[label_start:label_end]
+                        
+                        # Check if cursor is in the visible portion
+                        if visible_start <= rel <= visible_end:
+                            link = text[link_start:link_end]
+                            label = text[label_start:label_end]
+                            return (idx, label_end + 1, label if label else link, link)
+                        
                         idx = label_end + 1
-                    else:
-                        idx = link_end + 1
-                    continue
+                        continue
             idx += 1
         
-        # Check storage-format: [Label](Link)
-        it = MARKDOWN_COLON_LINK_PATTERN.globalMatch(text)
-        while it.hasNext():
-            m = it.next()
-            start = m.capturedStart()
-            end = start + m.capturedLength()
-            text_val = m.captured("text")
-            text_start = start + 1
-            text_end = text_start + len(text_val)
-            if text_start <= rel < text_end:
-                return (start, end, text_val, m.captured("link"))
-        # Check generic file markdown links
-        fit = FILE_MARKDOWN_LINK_PATTERN.globalMatch(text)
+        # Check storage-format wiki-style links: [link|label]
+        wiki_pattern = r"\[([^\]|]+)\|([^\]]*)\]"
+        import re as regex_module
+        for match in regex_module.finditer(wiki_pattern, text):
+            start = match.start()
+            end = match.end()
+            link = match.group(1)
+            label = match.group(2)
+            # Determine visible part (label if non-empty, otherwise link)
+            if label:
+                visible_start = start + 1 + len(link) + 1  # After '[link|'
+                visible_end = visible_start + len(label)
+                visible_text = label
+            else:
+                visible_start = start + 1  # After '['
+                visible_end = start + 1 + len(link)
+                visible_text = link
+            
+            if visible_start <= rel <= visible_end:
+                return (start, end, visible_text, link)
+        
+        # Check file links: [text](./file.ext) or [text](file.ext)
+        fit = WIKI_FILE_LINK_PATTERN.globalMatch(text)
         while fit.hasNext():
             fm = fit.next()
             start = fm.capturedStart()
@@ -1655,7 +1607,8 @@ class MarkdownEditor(QTextEdit):
             new_to = dlg.link_to() or link_val
             raw_label = dlg.link_text()
             link_label = raw_label or None
-            if new_to:
+            # Only normalize colon notation paths, not HTTP URLs
+            if new_to and not new_to.startswith(("http://", "https://")):
                 match = COLON_LINK_PATTERN.match(new_to)
                 if match.hasMatch():
                     new_to = ensure_root_colon_link(new_to)
@@ -1666,13 +1619,13 @@ class MarkdownEditor(QTextEdit):
             self.setTextCursor(tc)
             self.insert_link(new_to, link_label)
     
-    def _copy_link_to_location(self, link_text: str | None = None, anchor_slug: Optional[str] = None) -> Optional[str]:
+    def _copy_link_to_location(self, link_text: str | None = None, anchor_text: Optional[str] = None) -> Optional[str]:
         """Copy a link location as colon-notation to clipboard.
 
         Args:
             link_text: The link text (e.g., 'PageName' from +PageName, or 'PageA:PageB:PageC' from colon link).
                       If None, copies the current page's location.
-            anchor_slug: Optional heading slug to append when copying current page.
+            anchor_text: Optional heading text to append as anchor when copying current page.
         """
         if link_text:
             # If it's a colon notation link, use it as-is
@@ -1698,8 +1651,8 @@ class MarkdownEditor(QTextEdit):
 
         if colon_path:
             colon_path = ensure_root_colon_link(colon_path)
-            if anchor_slug and "#" not in colon_path:
-                colon_path = f"{colon_path}#{anchor_slug}"
+            if anchor_text and "#" not in colon_path:
+                colon_path = f"{colon_path}#{anchor_text}"
             clipboard = QGuiApplication.clipboard()
             clipboard.setText(colon_path)
             return colon_path
@@ -1707,8 +1660,8 @@ class MarkdownEditor(QTextEdit):
 
     def copy_current_page_link(self) -> Optional[str]:
         """Copy current page (or heading) link and return the copied text."""
-        slug = self.current_heading_slug()
-        return self._copy_link_to_location(link_text=None, anchor_slug=slug)
+        heading_text = self.current_heading_text()
+        return self._copy_link_to_location(link_text=None, anchor_text=heading_text)
 
     def _emit_cursor(self) -> None:
         cursor = self.textCursor()
@@ -1805,10 +1758,8 @@ class MarkdownEditor(QTextEdit):
 
         converted = TASK_LINE_PATTERN.sub(repl, text)
         converted = HEADING_MARK_PATTERN.sub(self._encode_heading, converted)
-        # Transform HTTP links: [url|label] → \x01url\x01label
-        converted = HTTP_LINK_STORAGE_PATTERN.sub(self._encode_http_link, converted)
-        # Transform markdown links: [Label](Link) → \x00Link\x00Label
-        converted = MARKDOWN_LINK_STORAGE_PATTERN.sub(self._encode_link, converted)
+        # Transform wiki-style links: [link|label] → \x00link\x00label\x00
+        converted = WIKI_LINK_STORAGE_PATTERN.sub(self._encode_wiki_link, converted)
         # Transform bullets: * → •
         converted = BULLET_STORAGE_PATTERN.sub(r"\1• ", converted)
         return converted
@@ -1818,10 +1769,8 @@ class MarkdownEditor(QTextEdit):
             state = "x" if match.group(2) == "☑" else " "
             return f"{match.group(1)}({state}){match.group(3)}"
 
-        # Restore HTTP links first: \x01url\x01label → [url|label]
-        restored = HTTP_LINK_DISPLAY_PATTERN.sub(self._decode_http_link, text)
-        # Restore markdown links: \x00Link\x00Label → [Label](Link)
-        restored = MARKDOWN_LINK_DISPLAY_PATTERN.sub(self._decode_link, restored)
+        # Restore wiki-style links: \x00link\x00label\x00 → [link|label]
+        restored = WIKI_LINK_DISPLAY_PATTERN.sub(self._decode_wiki_link, text)
         restored = HEADING_DISPLAY_PATTERN.sub(self._decode_heading, restored)
         restored = DISPLAY_TASK_PATTERN.sub(repl, restored)
         # Restore bullets: • → *
@@ -1844,29 +1793,17 @@ class MarkdownEditor(QTextEdit):
         hashes = "#" * level
         return f"{indent}{hashes}{spacer}{clean_body}"
 
-    def _encode_link(self, match: re.Match[str]) -> str:
-        """Convert [Label](Link) to hidden format: \x00Link\x00Label\x00"""
-        text = match.group("text")
+    def _encode_wiki_link(self, match: re.Match[str]) -> str:
+        """Convert [link|label] to hidden format: \x00link\x00label\x00"""
         link = match.group("link")
-        return f"\x00{link}\x00{text}\x00"
+        label = match.group("label")
+        return f"\x00{link}\x00{label}\x00"
 
-    def _decode_link(self, match: re.Match[str]) -> str:
-        """Convert hidden format \x00Link\x00Label\x00 back to [Label](Link)"""
+    def _decode_wiki_link(self, match: re.Match[str]) -> str:
+        """Convert hidden format \x00link\x00label\x00 back to [link|label]"""
         link = match.group("link")
-        text = match.group("text")
-        return f"[{text}]({link})"
-
-    def _encode_http_link(self, match: re.Match[str]) -> str:
-        """Convert [url|label] to hidden format: \x01url\x01label\x01"""
-        url = match.group("url")
         label = match.group("label")
-        return f"\x01{url}\x01{label}\x01"
-
-    def _decode_http_link(self, match: re.Match[str]) -> str:
-        """Convert hidden format \x01url\x01label\x01 back to [url|label]"""
-        url = match.group("url")
-        label = match.group("label")
-        return f"[{url}|{label}]"
+        return f"[{link}|{label}]"
 
     def refresh_heading_outline(self) -> None:
         """Force computation of heading outline immediately."""
@@ -1924,6 +1861,16 @@ class MarkdownEditor(QTextEdit):
                 return slug or None
         return None
 
+    def current_heading_text(self) -> Optional[str]:
+        """Return original text of heading on current line, if any."""
+        if not self._heading_outline:
+            return None
+        line_no = self.textCursor().blockNumber() + 1
+        for entry in self._heading_outline:
+            if int(entry.get("line", 0)) == line_no:
+                return entry.get("title", "") or None
+        return None
+
     def _refresh_display(self) -> None:
         """Force full document re-render to apply display transformations.
         
@@ -1931,7 +1878,10 @@ class MarkdownEditor(QTextEdit):
         Used after inserting/editing links or pasting content that may contain links.
         """
         self._display_guard = True
-        storage_text = self.toPlainText()
+        current_text = self.toPlainText()
+        # First convert FROM display back to storage (in case text is already partially in display format)
+        storage_text = self._from_display(current_text)
+        # Then convert to display format
         display_text = self._to_display(storage_text)
         old_cursor_pos = self.textCursor().position()
         self.document().setPlainText(display_text)
@@ -1971,11 +1921,8 @@ class MarkdownEditor(QTextEdit):
         # 2) Heading marks: #'s → sentinel on this line only
         line = HEADING_MARK_PATTERN.sub(self._encode_heading, line)
 
-        # 3) HTTP links: [url|label] → \x01url\x01label
-        line = HTTP_LINK_STORAGE_PATTERN.sub(self._encode_http_link, line)
-
-        # 4) Markdown links: [Label](Link) → \x00Link\x00Label
-        line = MARKDOWN_LINK_STORAGE_PATTERN.sub(self._encode_link, line)
+        # 3) Wiki-style links: [link|label] → \x00link\x00label\x00
+        line = WIKI_LINK_STORAGE_PATTERN.sub(self._encode_wiki_link, line)
         
         # 4) Bullet conversion: Convert "* " at start of line (after whitespace) to bullet
         # Only convert when user types "* " followed by space
