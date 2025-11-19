@@ -35,10 +35,10 @@ def ensure_root_colon_link(link: str) -> str:
 
 
 def normalize_link_target(link: str) -> str:
-    """Normalize link target by lowercasing and replacing spaces with underscores.
+    """Normalize link target by replacing spaces with underscores.
 
     Each colon-separated component is normalized independently. Anchors (after #)
-    are preserved as-is.
+    are preserved as-is. Case is preserved.
     """
     if not link:
         return ""
@@ -56,7 +56,7 @@ def normalize_link_target(link: str) -> str:
         if not stripped:
             continue
         underscored = "_".join(stripped.split())
-        parts.append(underscored.lower())
+        parts.append(underscored)
     normalized = ":".join(parts)
     if has_root and normalized:
         normalized = f":{normalized}"

@@ -1535,7 +1535,18 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("")
     
     def _open_camel_link(self, name: str) -> None:
-        """Open a link - handles both CamelCase (relative) and colon notation (absolute)."""
+        """Open a link - handles both CamelCase (relative), colon notation (absolute), and HTTP URLs."""
+        # Handle HTTP/HTTPS links
+        if name.startswith("http://") or name.startswith("https://"):
+            try:
+                from PySide6.QtGui import QDesktopServices
+                from PySide6.QtCore import QUrl
+                QDesktopServices.openUrl(QUrl(name))
+                return
+            except Exception as e:
+                self._alert(f"Failed to open URL: {e}")
+                return
+        
         if not self.current_path:
             self._alert("Open a page before following links.")
             return

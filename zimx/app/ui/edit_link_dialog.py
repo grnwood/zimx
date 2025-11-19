@@ -33,9 +33,13 @@ class EditLinkDialog(QDialog):
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
-        normalized_link = normalize_link_target(link_to)
+        # Check if it's an HTTP URL - if so, don't normalize it
+        if link_to.startswith(("http://", "https://")):
+            normalized_link = link_to
+        else:
+            normalized_link = normalize_link_target(link_to)
         self.search_edit = QLineEdit(normalized_link)
-        self.search_edit.setPlaceholderText("Type to filter pages…")
+        self.search_edit.setPlaceholderText("Type to filter pages or paste HTTP URL…")
         self.search_edit.textChanged.connect(self._on_search_changed)
         form.addRow("Link to:", self.search_edit)
 
@@ -78,6 +82,14 @@ class EditLinkDialog(QDialog):
     
     def _on_search_changed(self):
         """Called when user types in the search field."""
+        text = self.search_edit.text().strip()
+        # If typing an HTTP URL, skip page search
+        if text.startswith(("http://", "https://")):
+            self.list_widget.clear()
+            # Update link name if not manually edited
+            if not self._link_name_manually_edited:
+                self.text_edit.setText(text)
+            return
         self._refresh()
         # Update link name if not manually edited
         if not self._link_name_manually_edited:
@@ -128,7 +140,15 @@ class EditLinkDialog(QDialog):
                 self.list_widget.setCurrentRow(0)
 
     def link_to(self) -> str:
-        return normalize_link_target(self.search_edit.text().strip())
+        text = self.search_edit.text().strip()
+        # Clean any line breaks or paragraph separators
+        text = text.replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ').strip()
+        # Don't normalize HTTP URLs
+        if text.startswith(("http://", "https://")):
+            return text
+        return normalize_link_target(text)
 
     def link_text(self) -> str:
-        return self.text_edit.text().strip()
+        text = self.text_edit.text().strip()
+        # Clean any line breaks or paragraph separators
+        return text.replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ').strip()
