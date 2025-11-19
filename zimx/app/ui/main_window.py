@@ -2011,7 +2011,7 @@ class MainWindow(QMainWindow):
         if should_restore_vi:
             print(f"[DEBUG] Restoring vi mode via QTimer")
             self._restore_vi_mode_after_nav = False  # Clear the flag
-            QTimer.singleShot(0, lambda: self.editor.set_vi_mode(True))
+            # QTimer.singleShot(0, lambda: self.editor.set_vi_mode(True))  # Commented out for testing
         QTimer.singleShot(0, self.editor.setFocus)
 
     def _navigate_history_forward(self) -> None:
@@ -2033,7 +2033,7 @@ class MainWindow(QMainWindow):
         should_restore_vi = vi_mode_was_active or getattr(self, '_restore_vi_mode_after_nav', False)
         if should_restore_vi:
             self._restore_vi_mode_after_nav = False  # Clear the flag
-            QTimer.singleShot(0, lambda: self.editor.set_vi_mode(True))
+            # QTimer.singleShot(0, lambda: self.editor.set_vi_mode(True))  # Commented out for testing
         QTimer.singleShot(0, self.editor.setFocus)
 
     def _should_focus_hr_tail(self, content: str) -> bool:
@@ -2300,17 +2300,26 @@ class MainWindow(QMainWindow):
                 # Handle Alt+H and Alt+L for history navigation while preserving vi mode
                 key = event.key()
                 alt = bool(event.modifiers() & Qt.AltModifier)
-                shift = bool(event.modifiers() & Qt.ShiftModifier)
+                shift = bool(event.modifiers() & Qt.ShiftModifier) 
+                
+
+                
                 if alt and not shift:
                     if key == Qt.Key_H:
-                        print(f"[DEBUG] EventFilter caught Alt+H in vi mode")
                         self._restore_vi_mode_after_nav = True
                         self._navigate_history_back()
                         return True
                     elif key == Qt.Key_L:
-                        print(f"[DEBUG] EventFilter caught Alt+L in vi mode")
                         self._restore_vi_mode_after_nav = True
                         self._navigate_history_forward()
+                        return True
+                    elif key == Qt.Key_K:
+                        self._restore_vi_mode_after_nav = True
+                        self._navigate_hierarchy_up()
+                        return True
+                    elif key == Qt.Key_J:
+                        self._restore_vi_mode_after_nav = True
+                        self._navigate_hierarchy_down()
                         return True
                 
                 target = self._vi_mode_target_widget()
@@ -2393,9 +2402,12 @@ class MainWindow(QMainWindow):
         shift = bool(event.modifiers() & Qt.ShiftModifier)
         alt = bool(event.modifiers() & Qt.AltModifier)
 
+
+
         # Allow Alt (for Alt+h / Alt+l mappings) plus Shift; block everything else
         disallowed = event.modifiers() & ~(Qt.ShiftModifier | Qt.KeypadModifier | Qt.AltModifier)
         if disallowed:
+            print(f"[DEBUG] _translate_vi_key_event: Blocking key {key} due to disallowed modifiers: {disallowed}")
             return None
 
         target_key = None
@@ -2404,8 +2416,8 @@ class MainWindow(QMainWindow):
         # Basic motion (j/k/h/l) + shifted variants
         if key == Qt.Key_J:
             if alt and not shift:
-                # Alt+J -> PageDown (page navigation uses Alt modifier)
-                target_key = Qt.Key_PageDown
+                # Alt+J is handled directly in eventFilter for history navigation
+                return None
             elif shift:
                 # Shift+J -> Shift+Down (line selection)
                 target_key = Qt.Key_Down
@@ -2414,8 +2426,8 @@ class MainWindow(QMainWindow):
                 target_key = Qt.Key_Down
         elif key == Qt.Key_K:
             if alt and not shift:
-                # Alt+K -> PageUp (page navigation uses Alt modifier)
-                target_key = Qt.Key_PageUp
+                # Alt+K is handled directly in eventFilter for history navigation
+                return None
             elif shift:
                 # Shift+K -> Shift+Up (line selection)
                 target_key = Qt.Key_Up
