@@ -1178,12 +1178,24 @@ class MainWindow(QMainWindow):
     def _jump_to_page(self) -> None:
         if not config.has_active_vault():
             return
+        
+        # Suspend Vi mode while dialog is open
+        vi_was_active = self.editor._vi_mode_active
+        if vi_was_active:
+            self.editor.set_vi_mode(False)
+        
         dlg = JumpToPageDialog(self)
-        if dlg.exec() == QDialog.Accepted:
+        result = dlg.exec()
+        
+        if result == QDialog.Accepted:
             target = dlg.selected_path()
             if target:
                 self._select_tree_path(target)
                 self._open_file(target)
+        
+        # Restore Vi mode if it was active
+        if vi_was_active:
+            self.editor.set_vi_mode(True)
 
     def _insert_link(self) -> None:
         """Open insert link dialog and insert selected link at cursor."""
@@ -1192,6 +1204,11 @@ class MainWindow(QMainWindow):
         # Save current page before inserting link to ensure it's indexed
         if self.current_path:
             self._save_current_file(auto=True)
+        
+        # Suspend Vi mode while dialog is open
+        vi_was_active = self.editor._vi_mode_active
+        if vi_was_active:
+            self.editor.set_vi_mode(False)
         
         # Get selected text if any
         selected_text = ""
@@ -1202,7 +1219,9 @@ class MainWindow(QMainWindow):
             selected_text = selected_text.replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ').strip()
         
         dlg = InsertLinkDialog(self, selected_text=selected_text)
-        if dlg.exec() == QDialog.Accepted:
+        result = dlg.exec()
+        
+        if result == QDialog.Accepted:
             colon_path = dlg.selected_colon_path()
             link_name = dlg.selected_link_name()
             if colon_path:
@@ -1214,6 +1233,10 @@ class MainWindow(QMainWindow):
                         self.editor.setTextCursor(cursor)
                 self.editor.insert_link(colon_path, link_name)
                 self.editor.setFocus()
+        
+        # Restore Vi mode if it was active
+        if vi_was_active:
+            self.editor.set_vi_mode(True)
 
     def _copy_current_page_link(self) -> None:
         """Copy the current page's link to clipboard (Ctrl+Shift+L)."""
