@@ -698,26 +698,66 @@ class MarkdownEditor(QTextEdit):
         cursor = self.textCursor()
         pos_before = cursor.position()
         
-        # Always use [link|label] format - easier to add label later
-        # If no label provided, use empty label: [link|]
-        label = link_name if link_name else ""
+        # Always use [link|label] format
+        # If no label provided OR label matches the link (ignoring leading colons), use empty label: [link|]
+        if link_name and link_name.strip():
+            # Normalize both for comparison (strip leading colons)
+            normalized_label = link_name.strip().lstrip(":")
+            normalized_path = colon_path.strip().lstrip(":")
+            if normalized_label != normalized_path:
+                label = link_name.strip()
+            else:
+                label = ""
+        else:
+            label = ""
         link_text = f"[{colon_path}|{label}]"
-            
-        # Calculate expected length in display format to position cursor correctly
-        # In display format: \x00link\x00label\x00 (hidden format)
-        # The visible part is just the label
-        # We want cursor after the visible label part (or at the label position if empty)
-        display_length = 1 + len(colon_path) + 1 + len(label) + 1  # sentinel + link + sentinel + label + closing sentinel
-            
+        
+        # Insert the storage format text
         cursor.insertText(link_text)
-        # Calculate target position (where we are now, which is after the inserted text)
-        target_pos = pos_before + display_length
-        self.setTextCursor(cursor)
+        pos_after_insert = cursor.position()
+        
         # Full refresh ensures wiki links convert to hidden-display format immediately.
         self._refresh_display()
-        # Position cursor after the link in display format (or at empty label position)
-        new_cursor = self.textCursor()
-        new_cursor.setPosition(min(target_pos, self.document().characterCount() - 1))
+        
+        # After refresh, find the link in display format and position cursor after it
+        # The cursor should be after the link's closing sentinel
+        block = self.document().findBlock(pos_before)
+        if block.isValid():
+            text = block.text()
+            block_pos = block.position()
+            rel_pos = pos_before - block_pos
+            
+            # Find the display link that starts at or near our insertion point
+            idx = 0
+            found = False
+            while idx < len(text):
+                if text[idx] == '\x00':
+                    link_start = idx + 1
+                    link_end = text.find('\x00', link_start)
+                    if link_end > link_start:
+                        label_start = link_end + 1
+                        label_end = text.find('\x00', label_start)
+                        if label_end >= label_start:
+                            # Check if this link is at or near our insertion point
+                            if idx <= rel_pos <= label_end + 1:
+                                # Position cursor after the closing sentinel
+                                new_cursor = QTextCursor(self.document())
+                                new_cursor.setPosition(block_pos + label_end + 1)
+                                self.setTextCursor(new_cursor)
+                                found = True
+                                break
+                            idx = label_end + 1
+                            continue
+                idx += 1
+            
+            if found:
+                return
+        
+        # Fallback: position at a safe location
+        # Use the original position after insert, but cap it to document length
+        safe_pos = min(pos_after_insert, self.document().characterCount() - 1)
+        new_cursor = QTextCursor(self.document())
+        new_cursor.setPosition(max(0, safe_pos))
         self.setTextCursor(new_cursor)
 
     def toggle_task_state(self) -> None:
@@ -760,15 +800,29 @@ class MarkdownEditor(QTextEdit):
                     self.imageSaved.emit(saved.name)
                     return
         
-        # Check if pasting a URL - force plain text to avoid browser's HTML with title
+        # Check if pasting a link - wrap in wiki format for clean display
         if source.hasText():
             text = source.text().strip()
-            # If it's a single-line HTTP URL, insert in wiki format [url|] to ensure clean display
-            if '\n' not in text and text.startswith(("http://", "https://")):
-                cursor = self.textCursor()
-                cursor.insertText(f"[{text}|]")
-                self._refresh_display()
-                return
+            if '\n' not in text:
+                # Check for HTTP URL
+                if text.startswith(("http://", "https://")):
+                    cursor = self.textCursor()
+                    cursor.insertText(f"[{text}|]")
+                    self._refresh_display()
+                    return
+                # Check for colon notation link (with or without anchor)
+                # Pattern: starts with : or has multiple colons, may have # anchor
+                elif text.startswith(":") or (text.count(":") >= 2):
+                    # Normalize to ensure leading colon
+                    normalized = ensure_root_colon_link(text.split('#')[0])  # Normalize the path part only
+                    # Reconstruct with anchor if present
+                    if '#' in text:
+                        anchor = text.split('#', 1)[1]
+                        normalized = f"{normalized}#{anchor}"
+                    cursor = self.textCursor()
+                    cursor.insertText(f"[{normalized}|]")
+                    self._refresh_display()
+                    return
         
         # Remember position before paste
         pos_before = self.textCursor().position()
@@ -1117,8 +1171,14 @@ class MarkdownEditor(QTextEdit):
             menu = self.createStandardContextMenu()
             menu.addSeparator()
             copy_action = menu.addAction("Copy Link to Location")
-            # Get heading text if cursor is on a heading line
-            heading_text = self.current_heading_text()
+            # Get heading text if right-click is on a heading line
+            click_cursor = self.cursorForPosition(event.pos())
+            line_no = click_cursor.blockNumber() + 1
+            heading_text = None
+            for entry in self._heading_outline:
+                if int(entry.get("line", 0)) == line_no:
+                    heading_text = entry.get("title", "") or None
+                    break
             copy_action.triggered.connect(lambda: self._copy_link_to_location(link_text=None, anchor_text=heading_text))
             
             # Add Edit Page Source action (delegates to main window)
@@ -1339,25 +1399,7 @@ class MarkdownEditor(QTextEdit):
         rel = cursor.position() - block.position()
         text = block.text()
         
-        # Check HTTP display-format links first: \x01url\x01label\x01
-        idx = 0
-        while idx < len(text):
-            if text[idx] == '\x01':
-                url_start = idx + 1
-                url_end = text.find('\x01', url_start)
-                if url_end > url_start:
-                    label_start = url_end + 1
-                    label_end = text.find('\x01', label_start)
-                    if label_end > label_start and label_start <= rel < label_end:
-                        return (text[url_start:url_end], label_start, label_end)
-                    if label_end > label_start:
-                        idx = label_end + 1
-                    else:
-                        idx = url_end + 1
-                    continue
-            idx += 1
-        
-        # Check display-format markdown links: \x00Link\x00Label\x00
+        # Check display-format links: \x00link\x00label\x00 (unified for HTTP and page links)
         idx = 0
         while idx < len(text):
             if text[idx] == '\x00':
@@ -1366,13 +1408,20 @@ class MarkdownEditor(QTextEdit):
                 if link_end > link_start:
                     label_start = link_end + 1
                     label_end = text.find('\x00', label_start)
-                    if label_end > label_start and label_start <= rel < label_end:
-                        return (text[link_start:link_end], label_start, label_end)
-                    if label_end > label_start:
+                    if label_end >= label_start:  # >= to handle empty labels
+                        # Determine visible region
+                        if label_end == label_start:  # Empty label - link is visible
+                            visible_start = link_start
+                            visible_end = link_end
+                        else:  # Non-empty label - label is visible
+                            visible_start = label_start
+                            visible_end = label_end
+                        
+                        if visible_start <= rel < visible_end:
+                            return (text[link_start:link_end], visible_start, visible_end)
+                        
                         idx = label_end + 1
-                    else:
-                        idx = link_end + 1
-                    continue
+                        continue
             idx += 1
         
         # Check storage-format wiki-style links: [link|label]
@@ -1560,6 +1609,12 @@ class MarkdownEditor(QTextEdit):
     def _edit_link_at_cursor(self, cursor: QTextCursor) -> None:
         """Open edit link dialog and replace link under cursor (supports markdown, plain colon, or HTTP link)."""
         from .edit_link_dialog import EditLinkDialog
+        
+        # Suspend Vi mode while dialog is open
+        vi_was_active = self._vi_mode_active
+        if vi_was_active:
+            self.set_vi_mode(False)
+        
         block = cursor.block()
         md = self._markdown_link_at_cursor(cursor)
         if md:
@@ -1618,6 +1673,10 @@ class MarkdownEditor(QTextEdit):
             tc.removeSelectedText()
             self.setTextCursor(tc)
             self.insert_link(new_to, link_label)
+        
+        # Restore Vi mode if it was active
+        if vi_was_active:
+            self.set_vi_mode(True)
     
     def _copy_link_to_location(self, link_text: str | None = None, anchor_text: Optional[str] = None) -> Optional[str]:
         """Copy a link location as colon-notation to clipboard.
@@ -1652,7 +1711,9 @@ class MarkdownEditor(QTextEdit):
         if colon_path:
             colon_path = ensure_root_colon_link(colon_path)
             if anchor_text and "#" not in colon_path:
-                colon_path = f"{colon_path}#{anchor_text}"
+                # Slugify the anchor text (convert spaces to dashes, lowercase)
+                slugified_anchor = heading_slug(anchor_text)
+                colon_path = f"{colon_path}#{slugified_anchor}"
             clipboard = QGuiApplication.clipboard()
             clipboard.setText(colon_path)
             return colon_path

@@ -145,6 +145,11 @@ class InsertLinkDialog(QDialog):
                 self.link_name.setText(text)
                 self.link_name.blockSignals(False)
             return
+        # Auto-populate link name with typed text if not manually edited
+        if not self._link_name_manually_edited and text:
+            self.link_name.blockSignals(True)
+            self.link_name.setText(text)
+            self.link_name.blockSignals(False)
         self._refresh()
 
     def _on_link_name_changed(self):
