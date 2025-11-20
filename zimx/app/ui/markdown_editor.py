@@ -19,6 +19,7 @@ from PySide6.QtGui import (
     QPainter,
     QPen,
     QKeyEvent,
+    QTextDocument,
 )
 from PySide6.QtWidgets import QTextEdit, QMenu, QInputDialog, QDialog, QApplication
 from .path_utils import path_to_colon, colon_to_path, ensure_root_colon_link
@@ -60,6 +61,9 @@ WIKI_LINK_STORAGE_PATTERN = re.compile(
 # Display pattern for rendered links (sentinel + link + sentinel + label + sentinel)
 # Uses \x00 sentinel for all links (both HTTP and page links)
 WIKI_LINK_DISPLAY_PATTERN = re.compile(r"\x00(?P<link>[^\x00\n]+)\x00(?P<label>[^\x00\n]*)\x00")
+
+TABLE_ROW_PATTERN = re.compile(r"^\s*\|.*\|\s*$")
+TABLE_SEP_PATTERN = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$")
 
 HEADING_MAX_LEVEL = 5
 HEADING_SENTINEL_BASE = 0xE000
@@ -111,7 +115,8 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.hidden_format = QTextCharFormat()
         transparent = QColor(0, 0, 0, 0)
         self.hidden_format.setForeground(transparent)
-        self.hidden_format.setFontPointSize(0.1)
+        # Use a small valid font size; 0 can trigger Qt warnings
+        self.hidden_format.setFontPointSize(1.0)
 
         self.heading_styles = []
         for size in (26, 22, 18, 16, 14):
@@ -155,6 +160,9 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.hr_format = QTextCharFormat()
         self.hr_format.setForeground(QColor("#555555"))
         self.hr_format.setBackground(QColor("#333333"))
+
+        self.table_format = QTextCharFormat()
+        self.table_format.setFontFamily("Fira Code")
         
         # Strikethrough format
         self.strikethrough_format = QTextCharFormat()
@@ -205,17 +213,32 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         stripped = text.lstrip()
         indent = len(text) - len(stripped)
         level = heading_level_from_char(stripped[0]) if stripped else 0
+        heading_applied = False
         if level:
             fmt = self.heading_styles[min(level, len(self.heading_styles)) - 1]
             self.setFormat(indent + 1, max(0, len(stripped) - 1), fmt)
             self.setFormat(indent, 1, self.hidden_format)
+            heading_applied = True
         elif stripped.startswith("#"):
             hashes = len(stripped) - len(stripped.lstrip("#"))
             if 1 <= hashes <= HEADING_MAX_LEVEL and stripped[hashes:hashes + 1] == " ":
                 fmt = self.heading_styles[min(hashes, len(self.heading_styles)) - 1]
                 self.setFormat(indent + hashes + 1, len(stripped) - hashes - 1, fmt)
+                heading_applied = True
 
-        if text.strip().startswith(("- ", "* ", "+ ")):
+        # If we styled a heading, stop here so later rules (links, tags, etc.) don't override
+        # the heading font size/color and leave trailing characters unstyled.
+        if heading_applied:
+            if self._timing_enabled:
+                self._timing_blocks += 1
+                self._timing_total += time.perf_counter() - t0
+            return
+
+        # Markdown tables: use monospace so pipes align
+        if TABLE_ROW_PATTERN.match(text) or TABLE_SEP_PATTERN.match(text):
+            self.setFormat(0, len(text), self.table_format)
+
+        if text.strip().startswith(("- ", "* ", "+ ", "• ")):
             self.setFormat(0, len(text), self.list_format)
         
         # Blockquotes - handle > and >> (nested)
@@ -240,7 +263,8 @@ class MarkdownHighlighter(QSyntaxHighlighter):
             if remaining_length > 0:
                 self.setFormat(quote_start + idx, remaining_length, self.quote_format)
         
-        if text.strip() == "---":
+        stripped_hr = text.strip()
+        if stripped_hr == "---" or stripped_hr == "***" or stripped_hr == "___":
             self.setFormat(0, len(text), self.hr_format)
         
         # Inline code - hide backticks and style content
@@ -791,6 +815,7 @@ class MarkdownEditor(QTextEdit):
         self._restore_cursor_position(initial_position)
 
     def insertFromMimeData(self, source: QMimeData) -> None:  # type: ignore[override]
+        # 1) Images → save and embed
         if source.hasImage() and self._vault_root and self._current_path:
             image = source.imageData()
             if isinstance(image, QImage):
@@ -799,42 +824,96 @@ class MarkdownEditor(QTextEdit):
                     self._insert_image_from_path(saved.name, alt=saved.stem)
                     self.imageSaved.emit(saved.name)
                     return
-        
-        # Check if pasting a link - wrap in wiki format for clean display
+
+        # 2) Rich HTML → markdown (avoid pasting styled fragments)
+        if source.hasHtml():
+            html = source.html()
+            plain = source.text() if source.hasText() else ""
+            markdown = self._convert_html_to_markdown(html, plain)
+            # If conversion yields nothing, fall back to plain text so we never insert rich text
+            md_text = markdown or plain
+            if md_text:
+                self.textCursor().insertText(md_text)
+                # Normalize to display format if this looks like markdown
+                if self._has_markdown_syntax(md_text):
+                    self._refresh_display()
+                return
+
+        # 3) Plain text link helpers (http/colon)
         if source.hasText():
-            text = source.text().strip()
+            raw_text = source.text()
+            text = raw_text.strip()
             if '\n' not in text:
-                # Check for HTTP URL
                 if text.startswith(("http://", "https://")):
-                    cursor = self.textCursor()
-                    cursor.insertText(f"[{text}|]")
+                    self.textCursor().insertText(f"[{text}|]")
                     self._refresh_display()
                     return
-                # Check for colon notation link (with or without anchor)
-                # Pattern: starts with : or has multiple colons, may have # anchor
-                elif text.startswith(":") or (text.count(":") >= 2):
-                    # Normalize to ensure leading colon
-                    normalized = ensure_root_colon_link(text.split('#')[0])  # Normalize the path part only
-                    # Reconstruct with anchor if present
+                if text.startswith(":") or (text.count(":") >= 2):
+                    normalized = ensure_root_colon_link(text.split('#')[0])
                     if '#' in text:
                         anchor = text.split('#', 1)[1]
                         normalized = f"{normalized}#{anchor}"
-                    cursor = self.textCursor()
-                    cursor.insertText(f"[{normalized}|]")
+                    self.textCursor().insertText(f"[{normalized}|]")
                     self._refresh_display()
                     return
-        
-        # Remember position before paste
-        pos_before = self.textCursor().position()
+
+        # 4) Default paste (plain text) then normalize if it looks like markdown
         super().insertFromMimeData(source)
-        
-        # After pasting text, check if it contains wiki links and re-render if needed
         if source.hasText():
-            text = source.text()
-            # Quick check: does pasted text contain wiki link pattern?
-            if '[' in text and '|' in text:
-                # Force full document re-render to apply display transformation
+            pasted = source.text()
+            if '[' in pasted and '|' in pasted:
                 self._refresh_display()
+            elif self._has_markdown_syntax(pasted):
+                self._refresh_display()
+
+    def _convert_html_to_markdown(self, html: str, plain_fallback: str = "") -> str:
+        """Convert clipboard HTML to markdown so formatting persists after saving.
+
+        QTextDocument gives us a solid HTML→Markdown converter without extra dependencies.
+        We strip a single trailing newline it appends to avoid accidental blank lines.
+        """
+        if not html:
+            return ""
+        doc = QTextDocument()
+        doc.setHtml(html)
+        markdown = doc.toMarkdown()
+        if markdown.endswith("\n"):
+            markdown = markdown[:-1]
+        # If conversion wrapped everything in a fenced block but the plain text already looks like markdown,
+        # prefer the plain text to avoid pasting as code.
+        if plain_fallback:
+            stripped_md = markdown.strip()
+            if stripped_md.startswith("```") and self._has_markdown_syntax(plain_fallback):
+                return plain_fallback
+        # If the markdown output has no markdown-y syntax and matches the plain text, treat it as plain paste.
+        if plain_fallback and markdown.strip() == plain_fallback.strip() and not self._has_markdown_syntax(markdown):
+            return ""
+        # If the converter didn't introduce any markdown markers, skip conversion.
+        if not self._has_markdown_syntax(markdown):
+            return ""
+        return markdown
+
+    def _has_markdown_syntax(self, text: str) -> bool:
+        """Heuristic to decide if text is markdown (headings, lists, code, etc.)."""
+        if not text:
+            return False
+        patterns = [
+            r"^\s{0,3}#{1,6}\s+\S",           # headings
+            r"^\s{0,3}[-*+]\s+\S",            # bullets
+            r"^\s{0,3}\d+\.\s+\S",            # ordered list
+            r"^\s{0,3}>\s?\S",                # blockquote
+            r"```",                           # fenced code
+            r"~~",                            # strikethrough markers
+            r"`[^`]+`",                       # inline code
+            r"\*\*[^*]+\*\*",                 # bold
+            r"\*[^\s][^*]*\*",                # italic
+            r"\[([^\]]+)\]\([^)]+\)",         # link
+            r"^\s{0,3}[-*_]{3,}\s*$",         # horizontal rule
+        ]
+        for pat in patterns:
+            if re.search(pat, text, re.MULTILINE):
+                return True
+        return False
 
     def _save_image(self, image: QImage) -> Optional[Path]:
         """Save a pasted image next to the current page and return its absolute Path.
@@ -999,6 +1078,13 @@ class MarkdownEditor(QTextEdit):
         
         # Vi-mode: Shift+H selects left, Shift+L selects right (like Shift+Arrow)
         if self._vi_mode_active:
+            # Shift+; (:) should select to end of line, not type a link marker
+            if (event.key() in (Qt.Key_Semicolon, Qt.Key_Colon) or event.text() == ":"):
+                c = self.textCursor()
+                c.movePosition(QTextCursor.EndOfLine, QTextCursor.KeepAnchor)
+                self.setTextCursor(c)
+                event.accept()
+                return
             if (event.modifiers() & Qt.ShiftModifier) and not (event.modifiers() & Qt.ControlModifier):
                 if event.key() == Qt.Key_H:
                     c = self.textCursor()

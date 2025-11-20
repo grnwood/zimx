@@ -156,6 +156,8 @@ class MainWindow(QMainWindow):
         self.history_index: int = -1
         # Guard to suppress auto-open on tree selection during programmatic navigation
         self._suspend_selection_open: bool = False
+        # Remember cursor positions for history navigation
+        self._history_cursor_positions: dict[str, int] = {}
         
         # Track virtual (unsaved) pages
         self.virtual_pages: set[str] = set()
@@ -733,8 +735,9 @@ class MainWindow(QMainWindow):
     def _open_history_page(self, page_path: str) -> None:
         """Open a page from history and update tree selection."""
         # Path is already in colon format, just open it directly (same as bookmarks)
+        self._remember_history_cursor()
         self._select_tree_path(page_path)
-        self._open_file(page_path, add_to_history=False)  # Don't add to history again
+        self._open_file(page_path, add_to_history=False, restore_history_cursor=True)  # Don't add to history again
 
     def _auto_load_initial_file(self) -> None:
         """Auto-load the last opened file or vault home page on startup."""
@@ -885,7 +888,7 @@ class MainWindow(QMainWindow):
             self._debug(f"Tree selection crash while opening {open_target!r}: {exc!r}")
             raise
 
-    def _open_file(self, path: str, retry: bool = False, add_to_history: bool = True, force: bool = False, cursor_at_end: bool = False) -> None:
+    def _open_file(self, path: str, retry: bool = False, add_to_history: bool = True, force: bool = False, cursor_at_end: bool = False, restore_history_cursor: bool = False) -> None:
         if not path or (path == self.current_path and not force):
             return
         
@@ -926,12 +929,21 @@ class MainWindow(QMainWindow):
         if updated:
             self.right_panel.refresh_tasks()
         move_cursor_to_end = cursor_at_end or self._should_focus_hr_tail(content)
+        restored_history_cursor = False
+        if restore_history_cursor:
+            saved_pos = self._history_cursor_positions.get(path)
+            if saved_pos is not None:
+                cursor = self.editor.textCursor()
+                cursor.setPosition(min(saved_pos, len(self.editor.toPlainText())))
+                self.editor.setTextCursor(cursor)
+                restored_history_cursor = True
+                move_cursor_to_end = False
         if move_cursor_to_end:
             cursor = self.editor.textCursor()
             display_length = len(self.editor.toPlainText())
             cursor.setPosition(display_length)
             self.editor.setTextCursor(cursor)
-        else:
+        elif not restored_history_cursor:
             self.editor.moveCursor(QTextCursor.Start)
         # Always show editing status; vi-mode banner is separate
         display_path = path_to_colon(path) or path
@@ -1179,11 +1191,7 @@ class MainWindow(QMainWindow):
         if not config.has_active_vault():
             return
         
-        # Suspend Vi mode while dialog is open
-        vi_was_active = self.editor._vi_mode_active
-        if vi_was_active:
-            self.editor.set_vi_mode(False)
-        
+        vi_was_active = self._suspend_vi_mode_for_dialog()
         dlg = JumpToPageDialog(self)
         result = dlg.exec()
         
@@ -1193,9 +1201,7 @@ class MainWindow(QMainWindow):
                 self._select_tree_path(target)
                 self._open_file(target)
         
-        # Restore Vi mode if it was active
-        if vi_was_active:
-            self.editor.set_vi_mode(True)
+        self._restore_vi_mode_after_dialog(vi_was_active)
 
     def _insert_link(self) -> None:
         """Open insert link dialog and insert selected link at cursor."""
@@ -1205,10 +1211,7 @@ class MainWindow(QMainWindow):
         if self.current_path:
             self._save_current_file(auto=True)
         
-        # Suspend Vi mode while dialog is open
-        vi_was_active = self.editor._vi_mode_active
-        if vi_was_active:
-            self.editor.set_vi_mode(False)
+        vi_was_active = self._suspend_vi_mode_for_dialog()
         
         # Get selected text if any
         selected_text = ""
@@ -1234,9 +1237,7 @@ class MainWindow(QMainWindow):
                 self.editor.insert_link(colon_path, link_name)
                 self.editor.setFocus()
         
-        # Restore Vi mode if it was active
-        if vi_was_active:
-            self.editor.set_vi_mode(True)
+        self._restore_vi_mode_after_dialog(vi_was_active)
 
     def _copy_current_page_link(self) -> None:
         """Copy the current page's link to clipboard (Ctrl+Shift+L)."""
@@ -1258,6 +1259,7 @@ class MainWindow(QMainWindow):
             self._alert("Select a vault before creating pages.")
             return
         
+        vi_was_active = self._suspend_vi_mode_for_dialog()
         dlg = NewPageDialog(self)
         if dlg.exec() == QDialog.Accepted:
             page_name = dlg.get_page_name()
@@ -1303,6 +1305,7 @@ class MainWindow(QMainWindow):
             self._pending_selection = file_path
             self._populate_vault_tree()
             self._open_file(file_path, cursor_at_end=True)
+        self._restore_vi_mode_after_dialog(vi_was_active)
 
     def _get_current_parent_path(self) -> str:
         """Get the parent path for creating new pages based on current selection."""
@@ -1317,6 +1320,7 @@ class MainWindow(QMainWindow):
 
     def _open_preferences(self) -> None:
         """Open the preferences dialog."""
+        vi_was_active = self._suspend_vi_mode_for_dialog()
         dlg = PreferencesDialog(self)
         dlg.rebuildIndexRequested.connect(lambda: self._reindex_vault(show_progress=True))
         if dlg.exec() == QDialog.Accepted:
@@ -1325,6 +1329,7 @@ class MainWindow(QMainWindow):
             # Re-apply vi-mode state to refresh cursor
             if self._vi_mode_active:
                 self.editor.set_vi_mode(True)
+        self._restore_vi_mode_after_dialog(vi_was_active)
 
     def _open_task_from_panel(self, path: str, line: int) -> None:
         self._select_tree_path(path)
@@ -2029,6 +2034,7 @@ class MainWindow(QMainWindow):
         # Remember vi mode state before navigation - check MAIN WINDOW's state, not editor's
         print(f"[DEBUG] self._vi_mode_active = {getattr(self, '_vi_mode_active', 'ATTRIBUTE_MISSING')}")
         vi_mode_was_active = self._vi_mode_active
+        self._remember_history_cursor()
         self.history_index -= 1
         target_path = self.page_history[self.history_index]
         self._suspend_selection_open = True
@@ -2036,7 +2042,7 @@ class MainWindow(QMainWindow):
             self._select_tree_path(target_path)
         finally:
             self._suspend_selection_open = False
-        self._open_file(target_path, add_to_history=False)
+        self._open_file(target_path, add_to_history=False, restore_history_cursor=True)
         # Restore vi mode flag if set (no delayed timers needed anymore)
         self._restore_vi_mode_after_nav = False
         QTimer.singleShot(0, self.editor.setFocus)
@@ -2047,6 +2053,7 @@ class MainWindow(QMainWindow):
             return
         # Remember vi mode state before navigation - check MAIN WINDOW's state, not editor's
         vi_mode_was_active = self._vi_mode_active
+        self._remember_history_cursor()
         self.history_index += 1
         target_path = self.page_history[self.history_index]
         self._suspend_selection_open = True
@@ -2054,7 +2061,7 @@ class MainWindow(QMainWindow):
             self._select_tree_path(target_path)
         finally:
             self._suspend_selection_open = False
-        self._open_file(target_path, add_to_history=False)
+        self._open_file(target_path, add_to_history=False, restore_history_cursor=True)
         # Clear vi mode restore flag; no timer needed now that vi-mode stays stable
         self._restore_vi_mode_after_nav = False
         QTimer.singleShot(0, self.editor.setFocus)
@@ -2066,6 +2073,16 @@ class MainWindow(QMainWindow):
     def _history_can_go_forward(self) -> bool:
         """Return True if history has a forward entry."""
         return bool(self.page_history) and self.history_index < len(self.page_history) - 1
+
+    def _remember_history_cursor(self) -> None:
+        """Remember the current cursor position for history restore."""
+        if not self.current_path:
+            return
+        try:
+            pos = self.editor.textCursor().position()
+        except Exception:
+            return
+        self._history_cursor_positions[self.current_path] = pos
 
     def _should_focus_hr_tail(self, content: str) -> bool:
         """Return True if cursor should jump to trailing newline after a horizontal rule."""
@@ -2141,8 +2158,9 @@ class MainWindow(QMainWindow):
         parent_colon = ":".join(parts[:-1])
         parent_path = colon_to_path(parent_colon, self.vault_root_name)
         if parent_path:
+            self._remember_history_cursor()
             self._select_tree_path(parent_path)
-            self._open_file(parent_path)
+            self._open_file(parent_path, restore_history_cursor=True)
             if len(parts) == 2:
                 # Just moved to root vault
                 self.statusBar().showMessage(f"At root: {parent_colon}")
@@ -2170,8 +2188,9 @@ class MainWindow(QMainWindow):
         child_file = first_child / f"{first_child.name}{PAGE_SUFFIX}"
         if child_file.exists():
             child_path = f"/{child_file.relative_to(Path(self.vault_root)).as_posix()}"
+            self._remember_history_cursor()
             self._select_tree_path(child_path)
-            self._open_file(child_path)
+            self._open_file(child_path, restore_history_cursor=True)
 
     def _navigate_tree(self, delta: int, leaves_only: bool) -> None:
         indexes = self._gather_indexes(leaves_only)
@@ -2294,6 +2313,24 @@ class MainWindow(QMainWindow):
         title = " | ".join(parts + [suffix]) if parts else suffix
         self.setWindowTitle(title)
 
+    def _suspend_vi_mode_for_dialog(self) -> bool:
+        """Temporarily disable vi-mode while a modal dialog is open.
+
+        Returns:
+            True if vi-mode was active and was turned off, False otherwise.
+        """
+        was_active = self._vi_mode_active
+        if was_active:
+            self._vi_mode_active = False
+            self.editor.set_vi_mode(False)
+        return was_active
+
+    def _restore_vi_mode_after_dialog(self, was_active: bool) -> None:
+        """Re-enable vi-mode if it was active before a dialog was shown."""
+        if was_active:
+            self._vi_mode_active = True
+            self.editor.set_vi_mode(True)
+
     def _toggle_vi_mode(self) -> None:
         """Toggle vi-mode navigation on/off with visual status bar indicator."""
         self._vi_mode_active = not self._vi_mode_active
@@ -2328,6 +2365,10 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, self._neutralize_capslock)
                 return True  # Block the event completely
             if self._vi_mode_active:
+                # Always let Control-modified shortcuts through (bold/italic/strike/etc.)
+                if event.modifiers() & Qt.ControlModifier:
+                    return super().eventFilter(obj, event)
+
                 # Handle Alt+H and Alt+L for history navigation while preserving vi mode
                 key = event.key()
                 alt = bool(event.modifiers() & Qt.AltModifier)
