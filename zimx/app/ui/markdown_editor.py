@@ -1379,8 +1379,6 @@ class MarkdownEditor(QTextEdit):
             if resolved and resolved.exists():
                 QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved)))
             return
-        if self._toggle_task_at_cursor(event.pos()):
-            return
         # Double-click on links also activates them
         cursor = self.cursorForPosition(event.pos())
         link = self._link_under_cursor(cursor)
