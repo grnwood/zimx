@@ -195,6 +195,30 @@ def save_show_journal(show: bool) -> None:
     conn.commit()
 
 
+def load_show_future_tasks() -> bool:
+    """Load preference for showing tasks that start in the future."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("show_future_tasks",))
+    row = cur.fetchone()
+    if not row:
+        return False
+    return str(row[0]).lower() == "true"
+
+
+def save_show_future_tasks(show: bool) -> None:
+    """Persist preference for showing future tasks."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute(
+        "REPLACE INTO kv(key, value) VALUES(?, ?)",
+        ("show_future_tasks", "true" if show else "false"),
+    )
+    conn.commit()
+
+
 def load_last_file() -> Optional[str]:
     """Load the last opened file path. Returns None if no file was previously opened."""
     conn = _get_conn()

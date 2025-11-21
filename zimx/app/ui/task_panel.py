@@ -54,8 +54,8 @@ class TaskPanel(QWidget):
         self.show_completed.setChecked(False)
         self.show_completed.toggled.connect(self._refresh_tasks)
         self.show_future = QCheckBox("Show future?")
-        #self.show_future.setChecked(config.load_show_future_tasks())
-        #self.show_future.toggled.connect(self._on_show_future_toggled)
+        self.show_future.setChecked(False)
+        self.show_future.toggled.connect(self._on_show_future_toggled)
 
         self.task_tree = QTreeWidget()
         self.task_tree.setColumnCount(4)
@@ -250,10 +250,12 @@ class TaskPanel(QWidget):
     def set_vault_root(self, vault_root: str) -> None:
         """Set vault root for calendar date formatting."""
         self.vault_root = vault_root
+        self._apply_show_future_preference()
         self._update_calendar_dates()
 
     def _on_show_future_toggled(self, checked: bool) -> None:
-        config.save_show_future_tasks(checked)
+        if config.has_active_vault():
+            config.save_show_future_tasks(checked)
         self._refresh_tasks()
 
     def _is_future_task(self, task: dict) -> bool:
@@ -266,6 +268,16 @@ class TaskPanel(QWidget):
         except ValueError:
             return False
         return start_dt > date.today()
+
+    def _apply_show_future_preference(self) -> None:
+        """Sync the checkbox with saved preference and refresh the list."""
+        if not config.has_active_vault():
+            return
+        saved = config.load_show_future_tasks()
+        self.show_future.blockSignals(True)
+        self.show_future.setChecked(saved)
+        self.show_future.blockSignals(False)
+        self._refresh_tasks()
 
     def _update_calendar_dates(self) -> None:
         """Scan journal folder and bold dates that have saved entries."""
