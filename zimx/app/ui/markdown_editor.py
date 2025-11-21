@@ -534,6 +534,7 @@ class MarkdownEditor(QTextEdit):
     cursorMoved = Signal(int)
     linkActivated = Signal(str)
     linkHovered = Signal(str)  # Emits link path when hovering/cursor over a link
+    linkCopied = Signal(str)  # Emits link text when a link is copied via context menu
     headingsChanged = Signal(list)
     viewportResized = Signal()
     editPageSourceRequested = Signal(str)  # Emits file path when user wants to edit page source
@@ -1800,6 +1801,7 @@ class MarkdownEditor(QTextEdit):
                 colon_path = f"{colon_path}#{slugified_anchor}"
             clipboard = QGuiApplication.clipboard()
             clipboard.setText(colon_path)
+            self.linkCopied.emit(colon_path)
             return colon_path
         return None
 

@@ -17,18 +17,82 @@ def init_settings() -> None:
     GLOBAL_CONFIG.parent.mkdir(parents=True, exist_ok=True)
 
 
-def load_last_vault() -> Optional[str]:
+def _read_global_config() -> dict:
+    """Return the parsed global config, or an empty dict on error/missing."""
     if not GLOBAL_CONFIG.exists():
-        return None
+        return {}
     try:
-        payload = json.loads(GLOBAL_CONFIG.read_text(encoding="utf-8"))
+        return json.loads(GLOBAL_CONFIG.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return None
-    return payload.get("last_vault")
+        return {}
+
+
+def load_last_vault() -> Optional[str]:
+    payload = _read_global_config()
+    last = payload.get("last_vault")
+    return last if isinstance(last, str) else None
 
 
 def save_last_vault(path: str) -> None:
     _update_global_config({"last_vault": path})
+
+
+def load_known_vaults() -> list[dict[str, str]]:
+    """Load previously used vaults with display names."""
+    payload = _read_global_config()
+    vaults = payload.get("vaults", [])
+    result: list[dict[str, str]] = []
+    if isinstance(vaults, list):
+        for entry in vaults:
+            if not isinstance(entry, dict):
+                continue
+            path = entry.get("path")
+            if not path:
+                continue
+            name = entry.get("name") or Path(path).name
+            result.append({"name": str(name), "path": str(path)})
+    return result
+
+
+def remember_vault(path: str, name: Optional[str] = None) -> None:
+    """Add or move a vault to the top of the known vault list."""
+    normalized_path = str(Path(path))
+    display_name = name or Path(normalized_path).name
+    vaults = [v for v in load_known_vaults() if v.get("path") != normalized_path]
+    vaults.insert(0, {"name": display_name, "path": normalized_path})
+    _update_global_config({"vaults": vaults})
+
+
+def delete_known_vault(path: str) -> None:
+    """Remove a vault from the known list and clear default if it matched."""
+    normalized_path = str(Path(path))
+    payload = _read_global_config()
+    vaults = payload.get("vaults", [])
+    filtered: list[dict[str, str]] = []
+    if isinstance(vaults, list):
+        for entry in vaults:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("path")) == normalized_path:
+                continue
+            path_val = entry.get("path")
+            name_val = entry.get("name") or (Path(path_val).name if path_val else None)
+            if path_val:
+                filtered.append({"name": str(name_val), "path": str(path_val)})
+    updates: dict = {"vaults": filtered}
+    if payload.get("default_vault") == normalized_path:
+        updates["default_vault"] = None
+    _update_global_config(updates)
+
+
+def load_default_vault() -> Optional[str]:
+    payload = _read_global_config()
+    default_path = payload.get("default_vault")
+    return default_path if isinstance(default_path, str) else None
+
+
+def save_default_vault(path: Optional[str]) -> None:
+    _update_global_config({"default_vault": path})
 
 
 def load_vi_block_cursor_enabled() -> bool:

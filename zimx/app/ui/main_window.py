@@ -51,6 +51,7 @@ from .preferences_dialog import PreferencesDialog
 from .insert_link_dialog import InsertLinkDialog
 from .new_page_dialog import NewPageDialog
 from .path_utils import colon_to_path, path_to_colon, ensure_root_colon_link
+from .open_vault_dialog import OpenVaultDialog
 
 
 PATH_ROLE = int(Qt.ItemDataRole.UserRole)
@@ -211,6 +212,7 @@ class MainWindow(QMainWindow):
         self.editor.focusLost.connect(lambda: self._save_current_file(auto=True))
         self.editor.linkActivated.connect(self._open_camel_link)
         self.editor.linkHovered.connect(self._on_link_hovered)
+        self.editor.linkCopied.connect(self._on_link_copied)
         self.editor.editPageSourceRequested.connect(self._view_page_source)
         self.editor.openFileLocationRequested.connect(self._open_tree_file_location)
         self.font_size = 14
@@ -316,7 +318,7 @@ class MainWindow(QMainWindow):
         vault_menu = self.menuBar().addMenu("Vault")
         open_vault_action = QAction("Open Vault", self)
         open_vault_action.setToolTip("Open an existing vault")
-        open_vault_action.triggered.connect(self._select_vault)
+        open_vault_action.triggered.connect(lambda checked=False: self._select_vault())
         vault_menu.addAction(open_vault_action)
         new_vault_action = QAction("New Vault", self)
         new_vault_action.setToolTip("Create a new vault")
@@ -354,11 +356,7 @@ class MainWindow(QMainWindow):
         # Add to right side of the status bar
         self.statusBar().addPermanentWidget(self._vi_status_label, 0)
 
-        last_vault = config.load_last_vault()
-        if last_vault:
-            self._set_vault(last_vault)
-            # Auto-load last file or vault home after vault is set
-            QTimer.singleShot(100, self._auto_load_initial_file)
+        # Startup vault selection is orchestrated by main.py via .startup()
 
     # --- UI wiring -----------------------------------------------------
     def _build_toolbar(self) -> None:
@@ -454,6 +452,8 @@ class MainWindow(QMainWindow):
         link_shortcut.activated.connect(self._insert_link)
         copy_link_shortcut = QShortcut(QKeySequence("Ctrl+Shift+L"), self)
         copy_link_shortcut.activated.connect(self._copy_current_page_link)
+        open_vault_shortcut = QShortcut(QKeySequence("Ctrl+O"), self)
+        open_vault_shortcut.activated.connect(lambda: self._select_vault())
         focus_toggle = QShortcut(QKeySequence("Ctrl+Space"), self)
         focus_toggle.activated.connect(self._toggle_focus_between_tree_and_editor)
         new_page_shortcut = QShortcut(QKeySequence("Ctrl+N"), self)
@@ -479,12 +479,27 @@ class MainWindow(QMainWindow):
         nav_pg_up.activated.connect(lambda: self._navigate_tree(-1, leaves_only=True))
         nav_pg_down.activated.connect(lambda: self._navigate_tree(1, leaves_only=True))
 
+    def startup(self, vault_hint: Optional[str] = None) -> bool:
+        """Handle initial vault selection before the window is shown."""
+        default_vault = vault_hint or config.load_default_vault()
+        if default_vault:
+            self._set_vault(default_vault)
+            QTimer.singleShot(100, self._auto_load_initial_file)
+            return True
+        return self._select_vault(startup=True)
+
     # --- Vault actions -------------------------------------------------
-    def _select_vault(self) -> None:
-        directory = QFileDialog.getExistingDirectory(self, "Select Vault")
-        if not directory:
-            return
-        self._set_vault(directory)
+    def _select_vault(self, checked: bool | None = None, startup: bool = False) -> bool:  # noqa: ARG002
+        seed_vault = self.vault_root or config.load_last_vault()
+        dialog = OpenVaultDialog(self, current_vault=seed_vault)
+        if dialog.exec() != QDialog.Accepted:
+            return False
+        selection = dialog.selected_vault()
+        if not selection:
+            return False
+        self._set_vault(selection["path"], vault_name=selection.get("name"))
+        QTimer.singleShot(100, self._auto_load_initial_file)
+        return True
 
     def _create_vault(self) -> None:
         target_path = QFileDialog.getExistingDirectory(self, "Select Folder for Vault", str(Path.home()))
@@ -510,7 +525,7 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             self._alert(f"Failed to create vault: {exc}")
             return
-        self._set_vault(str(target))
+        self._set_vault(str(target), vault_name=target.name)
 
     def _seed_vault(self, root: Path) -> None:
         root_page = root / f"{root.name}{PAGE_SUFFIX}"
@@ -531,7 +546,7 @@ class MainWindow(QMainWindow):
             if not page_file.exists():
                 page_file.write_text(body, encoding="utf-8")
 
-    def _set_vault(self, directory: str) -> None:
+    def _set_vault(self, directory: str, vault_name: Optional[str] = None) -> None:
         self.right_panel.clear_tasks()
         config.set_active_vault(None)
         try:
@@ -545,6 +560,8 @@ class MainWindow(QMainWindow):
         if self.vault_root:
             config.set_active_vault(self.vault_root)
             config.save_last_vault(self.vault_root)
+            display_name = vault_name or Path(self.vault_root).name
+            config.remember_vault(self.vault_root, display_name)
             self.font_size = config.load_font_size(self.font_size)
             self.editor.set_font_point_size(self.font_size)
             # Load show_journal setting
@@ -1252,6 +1269,11 @@ class MainWindow(QMainWindow):
             if colon_path:
                 rooted = ensure_root_colon_link(colon_path)
                 self.statusBar().showMessage(f"Copied link: {rooted}", 3000)
+
+    def _on_link_copied(self, link_text: str) -> None:
+        """Show status when links are copied via editor context menu."""
+        if link_text:
+            self.statusBar().showMessage(f"Copied link: {link_text}", 3000)
 
     def _show_new_page_dialog(self) -> None:
         """Show dialog to create a new page with template selection (Ctrl+N)."""

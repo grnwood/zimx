@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import os
 import sys
 import threading
 import time
+import os
+import socket
 
 import uvicorn
 from PySide6.QtCore import QtMsgType, qInstallMessageHandler
@@ -79,8 +80,23 @@ def _qt_message_handler(mode: QtMsgType, context, message: str) -> None:
         sys.exit(1)
 
 
+def _find_open_port(preferred: int) -> int:
+    """Try preferred port, otherwise fall back to an ephemeral port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("127.0.0.1", preferred))
+            return s.getsockname()[1]
+        except OSError:
+            pass
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 def _start_api_server() -> tuple[int, uvicorn.Server]:
-    port = int(os.getenv("ZIMX_PORT", "8765"))
+    preferred = int(os.getenv("ZIMX_PORT", "8765"))
+    port = _find_open_port(preferred)
     # Disable uvicorn's logging config when bundled with PyInstaller
     # to avoid "Unable to configure formatter 'default'" errors
     log_config = None if getattr(sys, "frozen", False) else None
@@ -98,6 +114,13 @@ def _start_api_server() -> tuple[int, uvicorn.Server]:
     time.sleep(0.2)
     return port, server
 
+def _parse_vault_arg(argv: list[str]) -> str | None:
+    """Return a vault path passed via --vault flag, if present."""
+    for idx, arg in enumerate(argv):
+        if arg == "--vault" and idx + 1 < len(argv):
+            return argv[idx + 1]
+    return None
+
 
 def main() -> None:
     config.init_settings()
@@ -109,8 +132,15 @@ def main() -> None:
     _set_app_icon(qt_app)
     window = MainWindow(api_base=f"http://127.0.0.1:{port}")
     window.resize(1200, 800)
-    window.show()
-    sys.exit(qt_app.exec())
+    windows = getattr(qt_app, "_zimx_windows", [])
+    windows.append(window)
+    qt_app._zimx_windows = windows
+    vault_hint = _parse_vault_arg(sys.argv[1:])
+    if window.startup(vault_hint=vault_hint):
+        window.show()
+        sys.exit(qt_app.exec())
+    # User cancelled startup selection; graceful shutdown
+    qt_app.quit()
 
 
 if __name__ == "__main__":  # pragma: no cover - manual entry point
