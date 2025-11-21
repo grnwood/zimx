@@ -116,7 +116,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         transparent = QColor(0, 0, 0, 0)
         self.hidden_format.setForeground(transparent)
         # Tiny size so hidden sentinels don't create visible gaps
-        self.hidden_format.setFontPointSize(0.1)
+        self.hidden_format.setFontPointSize(0.01)
 
         self.heading_styles = []
         for size in (26, 22, 18, 16, 14):
