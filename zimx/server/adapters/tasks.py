@@ -7,7 +7,12 @@ from typing import Iterable, List, Optional
 
 META_PATTERN = re.compile(r"\{([^}]*)\}\s*$")
 TAG_PATTERN = re.compile(r"(?:^|\s)(#\w+|@\w+)")
-TASK_PATTERN = re.compile(r"^\s*-\s*\[( |x|X)\]\s+(.*)$")
+# Tasks: support "- [ ]", "- [x]", "( )", "(x)", and Unicode checkboxes "☐/☑"
+TASK_PATTERN = re.compile(
+    r"^(?P<indent>\s*)"
+    r"(?:(?:-\s*\[(?P<state1>[ xX])\])|(?:\((?P<state2>[xX ])?\))|(?P<box>[☐☑]))"
+    r"\s+(?P<body>.*)$"
+)
 
 
 @dataclass
@@ -39,7 +44,8 @@ def extract_tasks(markdown: str, path: str) -> List[Task]:
         match = TASK_PATTERN.match(line)
         if not match:
             continue
-        done_flag, remainder = match.groups()
+        state = match.group("state1") or match.group("state2") or ("x" if match.group("box") == "☑" else " ")
+        remainder = match.group("body") or ""
         meta_match = META_PATTERN.search(remainder)
         meta = {}
         if meta_match:
@@ -53,13 +59,16 @@ def extract_tasks(markdown: str, path: str) -> List[Task]:
                 _ = date.fromisoformat(due_value)
             except ValueError:
                 due_value = None
-        priority = meta.get("priority")
+        pri_matches = re.findall(r"!{1,3}", remainder)
+        priority = min(max((len(m) for m in pri_matches), default=0), 3)
+        remainder = re.sub(r"!{1,3}", " ", remainder)
+        remainder = re.sub(r"\s{2,}", " ", remainder).strip()
         task = Task(
             id=f"{path}:{idx}",
             path=path,
             line=idx,
             text=remainder,
-            done=done_flag.lower() == "x",
+            done=state.lower() == "x",
             due=due_value,
             priority=priority,
             tags=sorted(tags),

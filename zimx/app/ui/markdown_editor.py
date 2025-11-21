@@ -539,6 +539,7 @@ class MarkdownEditor(QTextEdit):
     viewportResized = Signal()
     editPageSourceRequested = Signal(str)  # Emits file path when user wants to edit page source
     openFileLocationRequested = Signal(str)  # Emits file path when user wants to open file location
+    insertDateRequested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1123,29 +1124,41 @@ class MarkdownEditor(QTextEdit):
         # This is used throughout the keyPressEvent for cross-platform compatibility
         meaningful_modifiers = event.modifiers() & ~Qt.KeypadModifier
         
-        # Bullet mode key handling
+        # Bullet/task mode key handling
         cursor = self.textCursor()
         block = cursor.block()
         text = block.text()
         is_bullet, indent, content = self._is_bullet_line(text)
+        is_task, task_indent, task_state, task_content = self._is_task_line(text)
         # Ctrl+E: edit link under cursor
         if event.key() == Qt.Key_E and event.modifiers() == Qt.ControlModifier:
             self._edit_link_at_cursor(cursor)
             event.accept()
             return
-        # Tab: indent bullet
-        if is_bullet and event.key() == Qt.Key_Tab and not meaningful_modifiers:
-            if self._handle_bullet_indent():
+        # Tab: indent bullet/task
+        if event.key() == Qt.Key_Tab and not meaningful_modifiers:
+            if is_bullet and self._handle_bullet_indent():
                 event.accept()
                 return
-        # Shift-Tab: dedent bullet
-        if is_bullet and event.key() == Qt.Key_Backtab:
-            if self._handle_bullet_dedent():
+            if is_task and self._handle_task_indent(task_indent):
+                event.accept()
+                return
+        # Shift-Tab: dedent bullet/task
+        if event.key() == Qt.Key_Backtab:
+            if is_bullet and self._handle_bullet_dedent():
+                event.accept()
+                return
+            if is_task and self._handle_task_dedent(task_indent):
                 event.accept()
                 return
         # Enter: continue bullet or terminate if empty
         if is_bullet and event.key() in (Qt.Key_Return, Qt.Key_Enter) and not meaningful_modifiers:
             if self._handle_bullet_enter():
+                event.accept()
+                return
+        # Enter: continue task checkbox lines
+        if is_task and event.key() in (Qt.Key_Return, Qt.Key_Enter) and not meaningful_modifiers:
+            if self._handle_task_enter(task_indent, task_content):
                 event.accept()
                 return
         # Esc: terminate bullet mode (remove bullet and all leading whitespace, move cursor to column 0)
@@ -1190,6 +1203,20 @@ class MarkdownEditor(QTextEdit):
                 if link:
                     self.linkActivated.emit(link)
                     return
+        # Handle quick checkbox typing: "()" -> "( ) ", "(+)" -> "(x) "
+        if event.text() == ")" and not meaningful_modifiers:
+            super().keyPressEvent(event)
+            if self._maybe_expand_checkbox():
+                event.accept()
+                return
+            return
+        if event.key() == Qt.Key_Space and not meaningful_modifiers:
+            if self._maybe_expand_checkbox():
+                super().keyPressEvent(event)
+                event.accept()
+                return
+            # fall through to default handling
+
         # ...existing code...
         super().keyPressEvent(event)
 
@@ -1249,6 +1276,8 @@ class MarkdownEditor(QTextEdit):
             copy_action = menu.addAction("Copy Link to Location")
             link_for_copy = md_link[3] if md_link else plain_link
             copy_action.triggered.connect(lambda: self._copy_link_to_location(link_for_copy))
+            insert_date_action = menu.addAction("Insert Date…")
+            insert_date_action.triggered.connect(self.insertDateRequested)
             
             menu.exec(event.globalPos())
             return
@@ -1267,6 +1296,8 @@ class MarkdownEditor(QTextEdit):
                     heading_text = entry.get("title", "") or None
                     break
             copy_action.triggered.connect(lambda: self._copy_link_to_location(link_text=None, anchor_text=heading_text))
+            insert_date_action = menu.addAction("Insert Date…")
+            insert_date_action.triggered.connect(self.insertDateRequested)
             
             # Add Edit Page Source action (delegates to main window)
             edit_src_action = menu.addAction("Edit Page Source")
@@ -2167,6 +2198,100 @@ class MarkdownEditor(QTextEdit):
         cursor.beginEditBlock()
         cursor.insertText("\n" + indent + "• ")
         cursor.endEditBlock()
+        return True
+
+    def _is_task_line(self, text: str) -> tuple[bool, str, str, str]:
+        import re as _re
+        m = _re.match(r"^(\s*)\((?P<state>[ xX]?)\)\s*(.*)$", text)
+        if m:
+            indent = m.group(1) or ""
+            state = m.group("state") or " "
+            content = m.group(3) or ""
+            return True, indent, state, content
+        m = _re.match(r"^(\s*)([☐☑])\s*(.*)$", text)
+        if m:
+            indent = m.group(1) or ""
+            state = "x" if m.group(2) == "☑" else " "
+            content = m.group(3) or ""
+            return True, indent, state, content
+        return False, "", "", ""
+
+    def _handle_task_enter(self, indent: str, content: str) -> bool:
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+        if not content.strip():
+            cursor.select(QTextCursor.LineUnderCursor)
+            cursor.removeSelectedText()
+            cursor.insertText(indent)
+            cursor.setPosition(cursor.block().position() + len(indent))
+            cursor.endEditBlock()
+            self.setTextCursor(cursor)
+            return True
+        cursor.movePosition(QTextCursor.EndOfBlock)
+        cursor.insertBlock()
+        marker = "☐ "
+        cursor.insertText(indent + marker)
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+        return True
+
+    def _maybe_expand_checkbox(self) -> bool:
+        import re as _re
+        cursor = self.textCursor()
+        block = cursor.block()
+        text = block.text()
+        pos = cursor.positionInBlock()
+        prefix = text[:pos]
+        state_char = " "
+        m = _re.match(r"^(\s*)\(\)\s*$", prefix) or _re.match(r"^(\s*)\(\)\s+\s*$", prefix)
+        if not m:
+            m = _re.match(r"^(\s*)\(\+\)\s*$", prefix) or _re.match(r"^(\s*)\(\+\)\s+\s*$", prefix)
+            if m:
+                state_char = "x"
+        if not m:
+            return False
+        indent = m.group(1) or ""
+        remainder = text[pos:]
+        marker = "☐ " if state_char == " " else "☑ "
+        new_prefix = f"{indent}{marker}"
+        new_text = new_prefix + remainder.lstrip()
+        cursor.beginEditBlock()
+        cursor.select(QTextCursor.LineUnderCursor)
+        cursor.removeSelectedText()
+        cursor.insertText(new_text)
+        cursor.setPosition(block.position() + len(new_prefix))
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+        return True
+
+    def _handle_task_indent(self, indent: str) -> bool:
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+        cursor.select(QTextCursor.LineUnderCursor)
+        line_text = cursor.selectedText()
+        cursor.removeSelectedText()
+        new_indent = indent + "  "
+        marker_len = 2  # '☐ '
+        cursor.insertText(new_indent + line_text[len(indent):])
+        cursor.setPosition(cursor.block().position() + len(new_indent) + marker_len)
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+        return True
+
+    def _handle_task_dedent(self, indent: str) -> bool:
+        if len(indent) < 2:
+            return False
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+        cursor.select(QTextCursor.LineUnderCursor)
+        line_text = cursor.selectedText()
+        dedent = indent[:-2]
+        cursor.removeSelectedText()
+        marker_len = 2
+        cursor.insertText(dedent + line_text[len(indent):])
+        cursor.setPosition(cursor.block().position() + len(dedent) + marker_len)
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
         return True
     
     def _handle_bullet_indent(self) -> bool:

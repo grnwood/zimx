@@ -51,6 +51,7 @@ from .preferences_dialog import PreferencesDialog
 from .insert_link_dialog import InsertLinkDialog
 from .new_page_dialog import NewPageDialog
 from .path_utils import colon_to_path, path_to_colon, ensure_root_colon_link
+from .date_insert_dialog import DateInsertDialog
 from .open_vault_dialog import OpenVaultDialog
 
 
@@ -213,6 +214,7 @@ class MainWindow(QMainWindow):
         self.editor.linkActivated.connect(self._open_camel_link)
         self.editor.linkHovered.connect(self._on_link_hovered)
         self.editor.linkCopied.connect(self._on_link_copied)
+        self.editor.insertDateRequested.connect(self._insert_date)
         self.editor.editPageSourceRequested.connect(self._view_page_source)
         self.editor.openFileLocationRequested.connect(self._open_tree_file_location)
         self.font_size = 14
@@ -452,6 +454,8 @@ class MainWindow(QMainWindow):
         link_shortcut.activated.connect(self._insert_link)
         copy_link_shortcut = QShortcut(QKeySequence("Ctrl+Shift+L"), self)
         copy_link_shortcut.activated.connect(self._copy_current_page_link)
+        date_shortcut = QShortcut(QKeySequence("Ctrl+D"), self)
+        date_shortcut.activated.connect(self._insert_date)
         open_vault_shortcut = QShortcut(QKeySequence("Ctrl+O"), self)
         open_vault_shortcut.activated.connect(lambda: self._select_vault())
         focus_toggle = QShortcut(QKeySequence("Ctrl+Space"), self)
@@ -1251,9 +1255,28 @@ class MainWindow(QMainWindow):
                     if cursor.hasSelection():
                         cursor.removeSelectedText()
                         self.editor.setTextCursor(cursor)
-                self.editor.insert_link(colon_path, link_name)
-                self.editor.setFocus()
-        
+        self.editor.insert_link(colon_path, link_name)
+        self.editor.setFocus()
+    
+        self._restore_vi_mode_after_dialog(vi_was_active)
+
+    def _insert_date(self) -> None:
+        """Show calendar/date dialog and insert selected date."""
+        if not self.vault_root:
+            self._alert("Select a vault before inserting dates.")
+            return
+        vi_was_active = self._suspend_vi_mode_for_dialog()
+        cursor_rect = self.editor.cursorRect()
+        anchor = self.editor.viewport().mapToGlobal(cursor_rect.bottomRight() + QPoint(0, 4))
+        dlg = DateInsertDialog(self, anchor_pos=anchor)
+        result = dlg.exec()
+        if result == QDialog.Accepted:
+            text = dlg.selected_date_text()
+            if text:
+                cursor = self.editor.textCursor()
+                cursor.insertText(text)
+                self.editor.setTextCursor(cursor)
+                self.statusBar().showMessage(f"Inserted date: {text}", 3000)
         self._restore_vi_mode_after_dialog(vi_was_active)
 
     def _copy_current_page_link(self) -> None:
@@ -2234,6 +2257,7 @@ class MainWindow(QMainWindow):
         """Reindex all pages in the vault."""
         if not self.vault_root or not config.has_active_vault():
             return
+        import hashlib
         
         if show_progress:
             self.statusBar().showMessage("Rebuilding index...", 0)
@@ -2247,69 +2271,14 @@ class MainWindow(QMainWindow):
             
             try:
                 content = txt_file.read_text(encoding="utf-8")
-                
-                # Extract title (first line starting with #)
-                title = txt_file.stem
-                for line in content.splitlines():
-                    if line.startswith('# '):
-                        title = line[2:].strip()
-                        break
-                
-                # Extract tags (words starting with @)
-                tags = []
-                for word in content.split():
-                    if word.startswith('@') and len(word) > 1:
-                        tag = word[1:].rstrip('.,;:!?')
-                        if tag and tag not in tags:
-                            tags.append(tag)
-                
-                # Extract links - use indexer for this
-                links = []
-                
-                # Extract tasks
-                tasks = []
-                for line_num, line in enumerate(content.splitlines(), 1):
-                    stripped = line.strip()
-                    if stripped.startswith('( )'):
-                        task_text = stripped[4:].strip()
-                        
-                        # Extract task tags
-                        task_tags = []
-                        task_words = task_text.split()
-                        for word in task_words:
-                            if word.startswith('@') and len(word) > 1:
-                                tag = word[1:].rstrip('.,;:!?')
-                                if tag:
-                                    task_tags.append(tag)
-                        
-                        # Extract due date (date after <)
-                        due_date = None
-                        for word in task_words:
-                            if word.startswith('<') and len(word) > 1:
-                                due_date = word[1:].rstrip('.,;:!?')
-                                break
-                        
-                        task_id = f"{path_str}:{line_num}"
-                        task = {
-                            "id": task_id,
-                            "line": line_num,
-                            "text": task_text,
-                            "status": "open",
-                            "priority": None,
-                            "due": due_date,
-                            "start": None,
-                            "tags": task_tags,
-                        }
-                        tasks.append(task)
-                
-                # Update page index
-                config.update_page_index(
-                    path=path_str,
-                    title=title,
-                    tags=tags,
-                    links=links,
-                    tasks=tasks,
-                )
+                title = indexer.derive_title(path_str, content)
+                tags = sorted(set(indexer.TAG_PATTERN.findall(content)))
+                link_targets = {indexer.normalize_link(m) for m in indexer.LINK_PATTERN.findall(content) if m}
+                links = sorted(link_targets)
+                tasks = indexer.extract_tasks(path_str, content)
+                config.update_page_index(path=path_str, title=title, tags=tags, links=links, tasks=tasks)
+                digest = hashlib.md5((indexer.INDEX_SCHEMA_VERSION + content).encode("utf-8")).hexdigest()
+                config.set_page_hash(path_str, digest)
             except Exception:
                 continue
         

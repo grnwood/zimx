@@ -7,12 +7,20 @@ from typing import List, Set
 
 from zimx.app import config
 
+# Bump this when task parsing logic changes to force re-index even if file hash is unchanged.
+INDEX_SCHEMA_VERSION = "task-parse-v2"
+
 TAG_PATTERN = re.compile(r"@(\w+)")
 LINK_PATTERN = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
-TASK_PATTERN = re.compile(r"^(?P<indent>\s*)\((?P<state>[xX ])?\)\s+(?P<body>.+)$")
+# Tasks: support "- [ ]", "- [x]", "( )", "(x)", "(X)", and Unicode checkboxes "☐"/"☑"
+TASK_PATTERN = re.compile(
+    r"^(?P<indent>\s*)"
+    r"(?:(?:-\s*\[(?P<state1>[ xX])\])|(?:\((?P<state2>[xX ])?\))|(?P<box>[☐☑]))"
+    r"\s+(?P<body>.+)$"
+)
 DUE_PATTERN = re.compile(r"<([0-9]{4}-[0-9]{2}-[0-9]{2})")
 START_PATTERN = re.compile(r">([0-9]{4}-[0-9]{2}-[0-9]{2})")
-PRIORITY_PATTERN = re.compile(r"(!{1,5})")
+PRIORITY_PATTERN = re.compile(r"!{1,3}")
 
 
 def index_page(path: str, content: str) -> bool:
@@ -23,7 +31,7 @@ def index_page(path: str, content: str) -> bool:
     if not config.has_active_vault():
         return False
     # Fast short-circuit: if content hash unchanged, skip heavy parsing and DB writes
-    digest = hashlib.md5(content.encode("utf-8")).hexdigest()
+    digest = hashlib.md5((INDEX_SCHEMA_VERSION + content).encode("utf-8")).hexdigest()
     prev = config.get_page_hash(path)
     if prev == digest:
         return False
@@ -62,16 +70,17 @@ def extract_tasks(path: str, content: str) -> List[dict]:
         if not match:
             continue
         body = match.group("body")
-        state = match.group("state") or " "
+        state = match.group("state1") or match.group("state2") or ("x" if match.group("box") == "☑" else " ")
         tags = sorted(set(TAG_PATTERN.findall(body)))
         due = _first_match(DUE_PATTERN, body)
         start = _first_match(START_PATTERN, body)
-        priority_match = PRIORITY_PATTERN.search(body)
-        priority = len(priority_match.group(1)) if priority_match else 0
-        clean_text = TAG_PATTERN.sub("", body)
-        clean_text = DUE_PATTERN.sub("", clean_text)
-        clean_text = START_PATTERN.sub("", clean_text)
-        clean_text = clean_text.replace("!", "").strip()
+        pri_matches = PRIORITY_PATTERN.findall(body)
+        priority = min(max((len(m) for m in pri_matches), default=0), 3)
+        clean_text = TAG_PATTERN.sub(" ", body)
+        clean_text = DUE_PATTERN.sub(" ", clean_text)
+        clean_text = START_PATTERN.sub(" ", clean_text)
+        clean_text = PRIORITY_PATTERN.sub(" ", clean_text)
+        clean_text = re.sub(r"\s{2,}", " ", clean_text).strip()
         results.append(
             {
                 "id": f"{path}:{line_no}",

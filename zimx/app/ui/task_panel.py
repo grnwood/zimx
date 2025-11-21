@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Iterable
+from datetime import date, timedelta
+from typing import Iterable, Optional
 
 from PySide6.QtCore import QEvent, Qt, Signal, QDate
 from PySide6.QtGui import QColor
@@ -52,6 +53,9 @@ class TaskPanel(QWidget):
         self.show_completed = QCheckBox("Show completed")
         self.show_completed.setChecked(False)
         self.show_completed.toggled.connect(self._refresh_tasks)
+        self.show_future = QCheckBox("Show future?")
+        #self.show_future.setChecked(config.load_show_future_tasks())
+        #self.show_future.toggled.connect(self._on_show_future_toggled)
 
         self.task_tree = QTreeWidget()
         self.task_tree.setColumnCount(4)
@@ -72,6 +76,7 @@ class TaskPanel(QWidget):
         sidebar.addWidget(QLabel("Tags"))
         sidebar.addWidget(self.tag_list)
         sidebar.addWidget(self.show_completed)
+        sidebar.addWidget(self.show_future)
         sidebar_widget = QWidget()
         sidebar_widget.setLayout(sidebar)
 
@@ -151,7 +156,10 @@ class TaskPanel(QWidget):
         tasks = config.fetch_tasks(query, sorted(self.active_tags), include_done=include_done)
         self.task_tree.clear()
         for task in tasks:
-            priority = "!" * task.get("priority", 0)
+            if self._is_future_task(task) and not self.show_future.isChecked():
+                continue
+            priority_level = min(task.get("priority", 0) or 0, 3)
+            priority = "!" * priority_level
             due = task.get("due", "") or ""
             text = task["text"]
             display_path = self._present_path(task["path"])
@@ -159,6 +167,22 @@ class TaskPanel(QWidget):
             item.setData(0, Qt.UserRole, task)
             # Set tooltip on the task text column (column 1) to show full text
             item.setToolTip(1, text)
+            due_fg_bg = self._due_colors(task)
+            if due_fg_bg:
+                fg, bg = due_fg_bg
+                if bg:
+                    item.setBackground(2, bg)
+                if fg:
+                    item.setForeground(2, fg)
+            pri_brush = self._priority_brush(priority_level)
+            if pri_brush:
+                item.setBackground(0, pri_brush["bg"])
+                item.setForeground(0, pri_brush["fg"])
+            if task.get("status") == "done":
+                font = item.font(1)
+                font.setStrikeOut(True)
+                for col in range(item.columnCount()):
+                    item.setFont(col, font)
             self.task_tree.addTopLevelItem(item)
         self.task_tree.sortItems(self.sort_column, self.sort_order)
 
@@ -175,6 +199,37 @@ class TaskPanel(QWidget):
         self.active_tags = set(tags)
         self._refresh_tags()
         self._refresh_tasks()
+
+    def _due_colors(self, task: dict) -> Optional[tuple[QColor | None, QColor | None]]:
+        """Return (fg, bg) for due column with red/orange/yellow emphasis."""
+        due_str = (task.get("due") or "").strip()
+        if not due_str:
+            return None
+        try:
+            due_dt = date.fromisoformat(due_str)
+        except ValueError:
+            return None
+        today_dt = date.today()
+        if due_dt < today_dt:
+            return QColor("#FFFFFF"), QColor("#CC0000")  # Overdue: white on solid red
+        if due_dt == today_dt:
+            return QColor("#3A1D00"), QColor("#F57900")  # Today: dark on orange
+        if due_dt == today_dt + timedelta(days=1):
+            return QColor("#444444"), QColor("#FDD835")  # Tomorrow: dark on yellow
+        return None
+
+    def _priority_brush(self, level: int) -> Optional[dict]:
+        """Return background/foreground for priority level."""
+        if level <= 0:
+            return None
+        # Three levels only, matching red/orange/yellow backgrounds
+        colors = [
+            {"bg": QColor("#FFF9C4"), "fg": QColor("#444444")},  # !
+            {"bg": QColor("#F57900"), "fg": QColor("#3A1D00")},  # !!
+            {"bg": QColor("#CC0000"), "fg": QColor("#FFFFFF")},  # !!!
+        ]
+        idx = min(level - 1, len(colors) - 1)
+        return colors[idx]
 
     def _emit_task_activation(self, item: QTreeWidgetItem) -> None:
         task = item.data(0, Qt.UserRole)
@@ -196,7 +251,22 @@ class TaskPanel(QWidget):
         """Set vault root for calendar date formatting."""
         self.vault_root = vault_root
         self._update_calendar_dates()
-    
+
+    def _on_show_future_toggled(self, checked: bool) -> None:
+        config.save_show_future_tasks(checked)
+        self._refresh_tasks()
+
+    def _is_future_task(self, task: dict) -> bool:
+        """Return True if task has a start date in the future."""
+        start_str = (task.get("starts") or "").strip()
+        if not start_str:
+            return False
+        try:
+            start_dt = date.fromisoformat(start_str)
+        except ValueError:
+            return False
+        return start_dt > date.today()
+
     def _update_calendar_dates(self) -> None:
         """Scan journal folder and bold dates that have saved entries."""
         if not self.vault_root:
