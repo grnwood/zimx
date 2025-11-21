@@ -1158,6 +1158,13 @@ class MarkdownEditor(QTextEdit):
                 return
         # Enter: continue task checkbox lines
         if is_task and event.key() in (Qt.Key_Return, Qt.Key_Enter) and not meaningful_modifiers:
+            # If the caret sits inside a link on a task line, activate the link instead of inserting a new task
+            if self._is_cursor_at_link_activation_point(cursor):
+                link = self._link_under_cursor(cursor)
+                if link:
+                    self.linkActivated.emit(link)
+                    event.accept()
+                    return
             if self._handle_task_enter(task_indent, task_content):
                 event.accept()
                 return
