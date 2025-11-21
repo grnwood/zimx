@@ -115,8 +115,8 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.hidden_format = QTextCharFormat()
         transparent = QColor(0, 0, 0, 0)
         self.hidden_format.setForeground(transparent)
-        # Use a small valid font size; 0 can trigger Qt warnings
-        self.hidden_format.setFontPointSize(1.0)
+        # Tiny size so hidden sentinels don't create visible gaps
+        self.hidden_format.setFontPointSize(0.1)
 
         self.heading_styles = []
         for size in (26, 22, 18, 16, 14):
@@ -2130,8 +2130,8 @@ class MarkdownEditor(QTextEdit):
         stripped = text.lstrip()
         indent = text[:len(text) - len(stripped)]
         
-        # Check for bullet patterns: "• ", "* ", "- ", "+ "
-        if stripped.startswith(("• ", "* ", "- ", "+ ")):
+        # Check for bullet patterns: "• " or "* " only (exclude -/+ to avoid false bullets)
+        if stripped.startswith(("• ", "* ")):
             content = stripped[2:]
             return (True, indent, content)
         
