@@ -1,5 +1,6 @@
 import pytest
 from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QMimeData
 from zimx.app.ui.markdown_editor import MarkdownEditor
 
 @pytest.fixture(scope="module")
@@ -52,3 +53,25 @@ def test_camelcase_link(editor):
     editor._refresh_display()
     # Should render as a link (the label is the page name)
     assert "CamelCasePage" in editor.toPlainText() or "CamelCasePage" in editor.toHtml()
+
+
+def test_insert_link_dialog_like_http(editor):
+    # Simulate inserting a complex HTTP link through the editor helper
+    url = "https://teams.microsoft.com/l/message/19:5071d17824ad4b278afaa9b39ca3fea4@thread.v2/1763757927194?context=%7B%22contextType%22%3A%22chat%22%7D"
+    editor.setPlainText("")
+    editor.insert_link(url, None)
+    # Stored markdown should use wiki format with a single target and empty label
+    md = editor.to_markdown()
+    expected = "/teams.microsoft.com/l/message/19:5071d17824ad4b278afaa9b39ca3fea4@thread.v2/1763757927194?context=%7B%22contextType%22%3A%22chat%22%7D|"
+    assert expected in md
+
+
+def test_paste_complex_http_link_normalizes(editor):
+    url = "https://teams.microsoft.com/l/message/19:5071d17824ad4b278afaa9b39ca3fea4@thread.v2/1763757927194?context=%7B%22contextType%22%3A%22chat%22%7D"
+    mime = QMimeData()
+    mime.setText(url)
+    editor.setPlainText("")
+    editor.insertFromMimeData(mime)
+    editor._refresh_display()
+    expected = "/teams.microsoft.com/l/message/19:5071d17824ad4b278afaa9b39ca3fea4@thread.v2/1763757927194?context=%7B%22contextType%22%3A%22chat%22%7D|"
+    assert expected in editor.toPlainText()

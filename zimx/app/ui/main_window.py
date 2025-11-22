@@ -217,6 +217,7 @@ class MainWindow(QMainWindow):
         self.editor.insertDateRequested.connect(self._insert_date)
         self.editor.editPageSourceRequested.connect(self._view_page_source)
         self.editor.openFileLocationRequested.connect(self._open_tree_file_location)
+        self.editor.attachmentDropped.connect(self._on_attachment_dropped)
         self.font_size = 14
         self.editor.set_font_point_size(self.font_size)
         # Load vi-mode block cursor preference
@@ -476,12 +477,14 @@ class MainWindow(QMainWindow):
         nav_down = QShortcut(QKeySequence("Alt+Down"), self)
         nav_pg_up = QShortcut(QKeySequence("Alt+PgUp"), self)
         nav_pg_down = QShortcut(QKeySequence("Alt+PgDown"), self)
+        reload_page = QShortcut(QKeySequence("Ctrl+R"), self)
         nav_back.activated.connect(self._navigate_history_back)
         nav_forward.activated.connect(self._navigate_history_forward)
         nav_up.activated.connect(self._navigate_hierarchy_up)
         nav_down.activated.connect(self._navigate_hierarchy_down)
         nav_pg_up.activated.connect(lambda: self._navigate_tree(-1, leaves_only=True))
         nav_pg_down.activated.connect(lambda: self._navigate_tree(1, leaves_only=True))
+        reload_page.activated.connect(self._reload_current_page)
 
     def startup(self, vault_hint: Optional[str] = None) -> bool:
         """Handle initial vault selection before the window is shown."""
@@ -1208,6 +1211,11 @@ class MainWindow(QMainWindow):
         # Refresh attachments panel to show the new image
         self.right_panel.refresh_attachments()
 
+    def _on_attachment_dropped(self, filename: str) -> None:
+        """Force-save the current page after a dropped attachment inserts content."""
+        self._save_current_file(auto=True)
+        self.statusBar().showMessage(f"Saved after dropping {filename}", 3000)
+
     def _jump_to_page(self) -> None:
         if not config.has_active_vault():
             return
@@ -1245,6 +1253,7 @@ class MainWindow(QMainWindow):
         dlg = InsertLinkDialog(self, selected_text=selected_text)
         result = dlg.exec()
         
+        inserted = False
         if result == QDialog.Accepted:
             colon_path = dlg.selected_colon_path()
             link_name = dlg.selected_link_name()
@@ -1255,8 +1264,11 @@ class MainWindow(QMainWindow):
                     if cursor.hasSelection():
                         cursor.removeSelectedText()
                         self.editor.setTextCursor(cursor)
-        self.editor.insert_link(colon_path, link_name)
-        self.editor.setFocus()
+                label = link_name or colon_path
+                self.editor.insert_link(colon_path, label)
+                inserted = True
+        if inserted:
+            self.editor.setFocus()
     
         self._restore_vi_mode_after_dialog(vi_was_active)
 
@@ -1875,6 +1887,15 @@ class MainWindow(QMainWindow):
         folder_path = abs_path.parent
         
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder_path)))
+
+    def _reload_current_page(self) -> None:
+        """Reload the current page from disk without altering history."""
+        if not self.current_path:
+            self.statusBar().showMessage("No page to reload", 2000)
+            return
+        self._remember_history_cursor()
+        self._open_file(self.current_path, add_to_history=False, force=True, restore_history_cursor=True)
+        self.statusBar().showMessage("Reloaded current page", 2000)
 
     def _start_inline_creation(
         self,

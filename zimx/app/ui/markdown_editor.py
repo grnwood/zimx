@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Optional
+from html.parser import HTMLParser
 
 from PySide6.QtCore import QEvent, QMimeData, Qt, QRegularExpression, Signal, QUrl, QPoint, QTimer
 from PySide6.QtGui import (
@@ -540,6 +541,7 @@ class MarkdownEditor(QTextEdit):
     editPageSourceRequested = Signal(str)  # Emits file path when user wants to edit page source
     openFileLocationRequested = Signal(str)  # Emits file path when user wants to open file location
     insertDateRequested = Signal()
+    attachmentDropped = Signal(str)  # Emits filename when a file is dropped into the editor
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -708,35 +710,26 @@ class MarkdownEditor(QTextEdit):
     def insert_link(self, colon_path: str, link_name: str | None = None) -> None:
         """Insert a link at the current cursor position.
         
-        Uses unified wiki-style format [link|label] for all labeled links.
-        If link_name provided: [link|label] format (for both HTTP and page links)
-        If no label: plain link (:Page or https://url)
+        Always inserts in unified [link|label] format (label may be empty).
         """
         if not colon_path:
             return
         
-        # Check if this is an HTTP URL
         is_http_url = colon_path.startswith(("http://", "https://"))
-        
-        if not is_http_url:
-            colon_path = ensure_root_colon_link(colon_path)
+        target = self._normalize_external_link(colon_path) if is_http_url else ensure_root_colon_link(colon_path)
         
         cursor = self.textCursor()
         pos_before = cursor.position()
         
-        # Always use [link|label] format
-        # If no label provided OR label matches the link (ignoring leading colons), use empty label: [link|]
+        # Always use [link|label] format; default label is empty when it matches the link
+        label = ""
         if link_name and link_name.strip():
-            # Normalize both for comparison (strip leading colons)
-            normalized_label = link_name.strip().lstrip(":")
-            normalized_path = colon_path.strip().lstrip(":")
-            if normalized_label != normalized_path:
-                label = link_name.strip()
-            else:
-                label = ""
-        else:
-            label = ""
-        link_text = f"[{colon_path}|{label}]"
+            candidate = link_name.strip()
+            match_left = candidate.lstrip(":/")
+            target_left = target.lstrip(":/")
+            if match_left != target_left:
+                label = candidate
+        link_text = f"[{target}|{label}]"
         
         # Insert the storage format text
         cursor.insertText(link_text)
@@ -830,14 +823,12 @@ class MarkdownEditor(QTextEdit):
         # 2) Rich HTML → markdown (avoid pasting styled fragments)
         if source.hasHtml():
             html = source.html()
-            plain = source.text() if source.hasText() else ""
-            markdown = self._convert_html_to_markdown(html, plain)
-            # If conversion yields nothing, fall back to plain text so we never insert rich text
-            md_text = markdown or plain
-            if md_text:
-                self.textCursor().insertText(md_text)
-                # Normalize to display format if this looks like markdown
-                if self._has_markdown_syntax(md_text):
+            plain_from_html = self._html_to_plaintext_with_links(html)
+            if not plain_from_html and source.hasText():
+                plain_from_html = source.text()
+            if plain_from_html:
+                self.textCursor().insertText(plain_from_html)
+                if "[" in plain_from_html and "|" in plain_from_html:
                     self._refresh_display()
                 return
 
@@ -847,7 +838,8 @@ class MarkdownEditor(QTextEdit):
             text = raw_text.strip()
             if '\n' not in text:
                 if text.startswith(("http://", "https://")):
-                    self.textCursor().insertText(f"[{text}|]")
+                    normalized_link = self._normalize_external_link(text)
+                    self.textCursor().insertText(f"[{normalized_link}|]")
                     self._refresh_display()
                     return
                 if text.startswith(":") or (text.count(":") >= 2):
@@ -868,32 +860,87 @@ class MarkdownEditor(QTextEdit):
             elif self._has_markdown_syntax(pasted):
                 self._refresh_display()
 
-    def _convert_html_to_markdown(self, html: str, plain_fallback: str = "") -> str:
-        """Convert clipboard HTML to markdown so formatting persists after saving.
-
-        QTextDocument gives us a solid HTML→Markdown converter without extra dependencies.
-        We strip a single trailing newline it appends to avoid accidental blank lines.
-        """
+    def _html_to_plaintext_with_links(self, html: str) -> str:
+        """Strip HTML to plain text, converting anchors to [url|label] links."""
         if not html:
             return ""
-        doc = QTextDocument()
-        doc.setHtml(html)
-        markdown = doc.toMarkdown()
-        if markdown.endswith("\n"):
-            markdown = markdown[:-1]
-        # If conversion wrapped everything in a fenced block but the plain text already looks like markdown,
-        # prefer the plain text to avoid pasting as code.
-        if plain_fallback:
-            stripped_md = markdown.strip()
-            if stripped_md.startswith("```") and self._has_markdown_syntax(plain_fallback):
-                return plain_fallback
-        # If the markdown output has no markdown-y syntax and matches the plain text, treat it as plain paste.
-        if plain_fallback and markdown.strip() == plain_fallback.strip() and not self._has_markdown_syntax(markdown):
+
+        class _PlainLinkParser(HTMLParser):
+            block_tags = {
+                "p", "div", "section", "article", "header", "footer",
+                "blockquote", "pre", "li", "ul", "ol",
+                "table", "tr", "td", "th",
+                "h1", "h2", "h3", "h4", "h5", "h6",
+            }
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.parts: list[str] = []
+                self._link_href: Optional[str] = None
+                self._link_text: list[str] = []
+
+            def _last_char(self) -> str:
+                return self.parts[-1][-1] if self.parts else ""
+
+            def _ensure_newline(self) -> None:
+                if self._last_char() != "\n":
+                    self.parts.append("\n")
+
+            def handle_starttag(self, tag: str, attrs) -> None:
+                tag = tag.lower()
+                if tag == "a":
+                    self._link_href = dict(attrs).get("href", "")
+                    self._link_text = []
+                    return
+                if tag == "br":
+                    self._ensure_newline()
+                    return
+                if tag in self.block_tags:
+                    self._ensure_newline()
+                    if tag == "li":
+                        self.parts.append("- ")
+
+            def handle_endtag(self, tag: str) -> None:
+                tag = tag.lower()
+                if tag == "a":
+                    label = "".join(self._link_text).strip()
+                    href = self._link_href or ""
+                    if href:
+                        link_target = self._normalize_external_link(href)
+                        display = label or ""
+                        self.parts.append(f"[{link_target}|{display}]")
+                    else:
+                        self.parts.append(label)
+                    self._link_href = None
+                    self._link_text = []
+                    return
+                if tag in self.block_tags:
+                    self._ensure_newline()
+
+            def handle_data(self, data: str) -> None:
+                if self._link_href is not None:
+                    self._link_text.append(data)
+                else:
+                    self.parts.append(data)
+
+        parser = _PlainLinkParser()
+        try:
+            parser.feed(html)
+            parser.close()
+        except Exception:
             return ""
-        # If the converter didn't introduce any markdown markers, skip conversion.
-        if not self._has_markdown_syntax(markdown):
-            return ""
-        return markdown
+
+        text = "".join(parser.parts)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip("\n")
+
+    def _normalize_external_link(self, link: str) -> str:
+        """Convert external links to a consistent wiki-storage target."""
+        if link.startswith(("http://", "https://")):
+            _, remainder = link.split("://", 1)
+            # Normalize to leading slash so it behaves like other rooted links
+            return "/" + remainder
+        return link
 
     def _has_markdown_syntax(self, text: str) -> bool:
         """Heuristic to decide if text is markdown (headings, lists, code, etc.)."""
@@ -1379,6 +1426,10 @@ class MarkdownEditor(QTextEdit):
                 cursor.insertText(link_text)
             
             event.acceptProposedAction()
+            try:
+                self.attachmentDropped.emit(file_path.name)
+            except Exception:
+                pass
             return
         else:
             print(f"[Drop] File not found or not valid: {file_path}")
@@ -1783,13 +1834,22 @@ class MarkdownEditor(QTextEdit):
         dlg = EditLinkDialog(link_to=link_val, link_text=text_val, parent=self)
         if dlg.exec() == QDialog.Accepted:
             new_to = dlg.link_to() or link_val
-            raw_label = dlg.link_text()
-            link_label = raw_label or None
-            # Only normalize colon notation paths, not HTTP URLs
-            if new_to and not new_to.startswith(("http://", "https://")):
+            raw_label = dlg.link_text().strip()
+            # Normalize target for both HTTP and colon links
+            if new_to and new_to.startswith(("http://", "https://")):
+                new_to = self._normalize_external_link(new_to)
+            elif new_to:
                 match = COLON_LINK_PATTERN.match(new_to)
                 if match.hasMatch():
                     new_to = ensure_root_colon_link(new_to)
+
+            # Only keep a label if it differs from the target
+            link_label = ""
+            if raw_label:
+                match_left = raw_label.lstrip(":/")
+                target_left = new_to.lstrip(":/") if new_to else ""
+                if match_left != target_left:
+                    link_label = raw_label
             tc = QTextCursor(block)
             tc.setPosition(block.position() + start)
             tc.setPosition(block.position() + end, QTextCursor.KeepAnchor)
