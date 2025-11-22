@@ -3,15 +3,20 @@ from __future__ import annotations
 import re
 from pathlib import Path
 import hashlib
-from typing import List, Set
+from typing import List, Set, Optional
 
 from zimx.app import config
+from zimx.app.ui.path_utils import colon_to_path, normalize_link_target
+from zimx.server.adapters.files import PAGE_SUFFIX
 
 # Bump this when task parsing logic changes to force re-index even if file hash is unchanged.
 INDEX_SCHEMA_VERSION = "task-parse-v2"
 
 TAG_PATTERN = re.compile(r"@(\w+)")
-LINK_PATTERN = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+# Markdown-style links: [label](target)
+MARKDOWN_LINK_PATTERN = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+# Wiki-style links used by the editor's storage format: [target|label]
+WIKI_LINK_PATTERN = re.compile(r"\[(?P<link>[^\]|]+)\|[^\]]*\]")
 # Tasks: support "- [ ]", "- [x]", "( )", "(x)", "(X)", and Unicode checkboxes "☐"/"☑"
 TASK_PATTERN = re.compile(
     r"^(?P<indent>\s*)"
@@ -37,7 +42,7 @@ def index_page(path: str, content: str) -> bool:
         return False
 
     tags = sorted(set(TAG_PATTERN.findall(content)))
-    link_targets = {normalize_link(match) for match in LINK_PATTERN.findall(content) if match}
+    link_targets = _extract_link_targets(content)
     links = sorted(link_targets)
     tasks = extract_tasks(path, content)
     title = derive_title(path, content)
@@ -54,13 +59,59 @@ def derive_title(path: str, content: str) -> str:
     return Path(path).stem or Path(path).name
 
 
-def normalize_link(link: str) -> str:
-    cleaned = link.strip()
+def _extract_link_targets(content: str) -> Set[str]:
+    """Extract page link targets from markdown and wiki-style links."""
+    targets: Set[str] = set()
+    for raw in MARKDOWN_LINK_PATTERN.findall(content):
+        normalized = _normalize_page_link(raw)
+        if normalized:
+            targets.add(normalized)
+    for match in WIKI_LINK_PATTERN.finditer(content):
+        raw = match.group("link")
+        # Skip wiki-like text that is immediately followed by "(...)" to avoid
+        # counting markdown links twice.
+        end = match.end()
+        if end < len(content) and content[end] == "(":
+            continue
+        normalized = _normalize_page_link(raw)
+        if normalized:
+            targets.add(normalized)
+    return targets
+
+
+def _normalize_page_link(link: str) -> Optional[str]:
+    """Normalize a link target to a vault-relative page path with .txt suffix.
+
+    Returns None for external URLs or non-page resources.
+    """
+    cleaned = normalize_link_target(link or "").strip()
     if not cleaned:
-        return "/"
-    if cleaned.startswith("/"):
-        return cleaned
-    return "/" + cleaned
+        return None
+    if cleaned.startswith(("http://", "https://", "mailto:", "ftp://")):
+        return None
+    base = cleaned.split("#", 1)[0]
+    if not base:
+        return None
+
+    # Colon notation (PageA:PageB) is the preferred storage format
+    if ":" in base and not base.startswith("/"):
+        return colon_to_path(base)
+
+    # Slash paths - ensure they are anchored at root
+    path = base if base.startswith("/") else f"/{base}"
+    path_obj = Path(path)
+    # Skip obvious non-page assets (images, docs, etc.)
+    if path_obj.suffix and path_obj.suffix.lower() != PAGE_SUFFIX:
+        return None
+    if path_obj.suffix.lower() != PAGE_SUFFIX:
+        leaf = path_obj.name or path_obj.parent.name
+        if not leaf:
+            return None
+        path_obj = path_obj / f"{leaf}{PAGE_SUFFIX}"
+    normalized = path_obj.as_posix()
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    return normalized
 
 
 def extract_tasks(path: str, content: str) -> List[dict]:

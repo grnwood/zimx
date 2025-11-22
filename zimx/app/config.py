@@ -540,6 +540,38 @@ def fetch_tasks(query: str = "", tags: Sequence[str] = (), include_done: bool = 
     return result
 
 
+def fetch_link_relations(path: str) -> dict[str, list[str]]:
+    """Return incoming and outgoing links for a page path."""
+    conn = _get_conn()
+    if not conn or not path:
+        return {"incoming": [], "outgoing": []}
+    outgoing = [
+        row[0]
+        for row in conn.execute("SELECT to_path FROM links WHERE from_path = ?", (path,)).fetchall()
+    ]
+    incoming = [
+        row[0]
+        for row in conn.execute("SELECT from_path FROM links WHERE to_path = ?", (path,)).fetchall()
+    ]
+    return {"incoming": incoming, "outgoing": outgoing}
+
+
+def fetch_page_titles(paths: Iterable[str]) -> dict[str, str]:
+    """Return a mapping of page path -> title for the provided paths."""
+    conn = _get_conn()
+    if not conn:
+        return {}
+    unique = [p for p in set(paths) if p]
+    if not unique:
+        return {}
+    placeholders = ",".join("?" for _ in unique)
+    cur = conn.execute(
+        f"SELECT path, title FROM pages WHERE path IN ({placeholders})",
+        unique,
+    )
+    return {row[0]: row[1] for row in cur.fetchall()}
+
+
 def set_active_vault(root: Optional[str]) -> None:
     global _ACTIVE_CONN, _ACTIVE_ROOT
     if _ACTIVE_CONN:

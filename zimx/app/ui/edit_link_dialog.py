@@ -1,6 +1,47 @@
 from __future__ import annotations
+import sys
 
+def is_capslock_on():
+    """Check if CapsLock is currently enabled."""
+    if sys.platform.startswith('linux'):
+        import subprocess
+        try:
+            xset_output = subprocess.check_output(['xset', 'q'], text=True)
+            return 'Caps Lock:   on' in xset_output
+        except Exception:
+            return False
+    elif sys.platform.startswith('win'):
+        try:
+            import ctypes
+            # 0x14 is the virtual-key code for CapsLock
+            return bool(ctypes.WinDLL("User32.dll").GetKeyState(0x14) & 1)
+        except Exception:
+            return False
+    else:
+        return False
+
+def toggle_capslock():
+    """Toggle CapsLock key in a cross-platform way (Linux/Windows)."""
+    if sys.platform.startswith('linux'):
+        import subprocess
+        subprocess.run(['xdotool', 'key', 'Caps_Lock'])
+    elif sys.platform.startswith('win'):
+        try:
+            import keyboard
+        except ImportError:
+            raise ImportError("The 'keyboard' module is required on Windows. Please install it with 'pip install keyboard'.")
+        keyboard.press_and_release('caps lock')
+    else:
+        raise NotImplementedError("CapsLock toggle not implemented for this OS.")
+
+def ensure_capslock_off():
+    """Ensure CapsLock is off by toggling if needed."""
+    if is_capslock_on():
+        toggle_capslock()
 from PySide6.QtCore import Qt
+import sys
+from PySide6.QtGui import QKeyEvent
+from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -22,10 +63,18 @@ class EditLinkDialog(QDialog):
     - Link text: free text to display in the editor
     """
 
+    def _activate_current(self) -> bool:
+        """Accept the dialog as if OK was pressed, for Enter key handling."""
+        # Optionally, add validation here if needed
+        self.accept()
+        return True
+
     def __init__(self, link_to: str = "", link_text: str = "", parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Edit Link")
         self.resize(520, 420)
+        self.setModal(True)
+        self.setWindowModality(Qt.ApplicationModal)
         
         # Track whether user has manually edited the link name
         self._link_name_manually_edited = bool(link_text)  # True if editing existing link with text
@@ -61,16 +110,11 @@ class EditLinkDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+        self._force_list_sync = False
         self._refresh()
 
     def eventFilter(self, obj, event):  # type: ignore[override]
-        """Select all text in link name field when it receives focus."""
-        if obj is self.text_edit and event.type() == event.Type.FocusIn:
-            # Use a single-shot timer to select all after the focus event completes
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(0, self.text_edit.selectAll)
-            # Reset the manually edited flag when focus is received
-            self._link_name_manually_edited = False
+        # Let default behavior apply; we avoid resetting manual-edit tracking so free typing is preserved
         return super().eventFilter(obj, event)
     
     def _accept_from_list(self):
@@ -90,6 +134,7 @@ class EditLinkDialog(QDialog):
             if not self._link_name_manually_edited:
                 self.text_edit.setText(text)
             return
+        # Refresh suggestions without forcing a selection
         self._refresh()
         # Update link name if not manually edited
         if not self._link_name_manually_edited:
@@ -102,16 +147,8 @@ class EditLinkDialog(QDialog):
     def _on_selection_changed(self, current, previous):
         """Called when user navigates through the list with arrow keys."""
         if current:
-            colon_path = current.data(Qt.UserRole)
-            # Update the search field with the selected item
-            self.search_edit.blockSignals(True)
-            self.search_edit.setText(colon_path)
-            self.search_edit.blockSignals(False)
-            # Update link name if not manually edited
-            if not self._link_name_manually_edited:
-                self.text_edit.blockSignals(True)
-                self.text_edit.setText(colon_path)
-                self.text_edit.blockSignals(False)
+            self._sync_to_current_list_item(force=self._force_list_sync or self.list_widget.hasFocus())
+        self._force_list_sync = False
 
     def _refresh(self) -> None:
         orig_term = self.search_edit.text().strip()
@@ -130,14 +167,57 @@ class EditLinkDialog(QDialog):
             item.setToolTip(normalized_colon)
             item.setData(Qt.UserRole, normalized_colon)
             self.list_widget.addItem(item)
-        if self.list_widget.count() > 0:
-            match_value = normalize_link_target(orig_term) if orig_term else normalized_term
-            for i in range(self.list_widget.count()):
-                if self.list_widget.item(i).data(Qt.UserRole) == match_value:
-                    self.list_widget.setCurrentRow(i)
-                    break
-            else:
-                self.list_widget.setCurrentRow(0)
+        # Do not auto-select an item; user can choose via arrows/double-click
+
+    def keyPressEvent(self, event):  # type: ignore[override]
+        # Handle arrow keys and vi-mode shortcuts (Shift+J/K)
+        if event.key() in (Qt.Key_Up, Qt.Key_Down):
+            previous_focus = self.focusWidget()
+            if previous_focus in (self.search_edit, self.list_widget, self.text_edit):
+                self._force_list_sync = True
+                QApplication.sendEvent(self.list_widget, event)
+                if previous_focus is not self.list_widget:
+                    previous_focus.setFocus()
+                self._sync_to_current_list_item(force=True)
+                return
+        elif event.key() == Qt.Key_J and (event.modifiers() & Qt.ShiftModifier):
+            previous_focus = self.focusWidget()
+            down_event = QKeyEvent(event.type(), Qt.Key_Down, Qt.NoModifier)
+            self._force_list_sync = True
+            QApplication.sendEvent(self.list_widget, down_event)
+            if previous_focus is not self.list_widget:
+                previous_focus.setFocus()
+            self._sync_to_current_list_item(force=True)
+            return
+        elif event.key() == Qt.Key_K and (event.modifiers() & Qt.ShiftModifier):
+            previous_focus = self.focusWidget()
+            up_event = QKeyEvent(event.type(), Qt.Key_Up, Qt.NoModifier)
+            self._force_list_sync = True
+            QApplication.sendEvent(self.list_widget, up_event)
+            if previous_focus is not self.list_widget:
+                previous_focus.setFocus()
+            self._sync_to_current_list_item(force=True)
+            return
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            if self._activate_current():
+                return
+        super().keyPressEvent(event)
+
+    def _sync_to_current_list_item(self, force: bool = False) -> None:
+        item = self.list_widget.currentItem()
+        if not item:
+            return
+        colon_path = item.data(Qt.UserRole)
+        if not colon_path:
+            return
+        if force or self.list_widget.hasFocus():
+            self.search_edit.blockSignals(True)
+            self.search_edit.setText(colon_path)
+            self.search_edit.blockSignals(False)
+            self.text_edit.blockSignals(True)
+            self.text_edit.setText(colon_path)
+            self.text_edit.blockSignals(False)
+            self._link_name_manually_edited = False
 
     def link_to(self) -> str:
         text = self.search_edit.text().strip()

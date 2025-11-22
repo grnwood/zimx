@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QTabWidget, QWidget
 
 from .task_panel import TaskPanel
 from .attachments_panel import AttachmentsPanel
+from .link_navigator_panel import LinkNavigatorPanel
 
 
 class TabbedRightPanel(QWidget):
@@ -15,6 +16,7 @@ class TabbedRightPanel(QWidget):
     # Forward signals from child panels
     taskActivated = Signal(str, int)  # path, line (from TaskPanel)
     dateActivated = Signal(int, int, int)  # year, month, day (from TaskPanel calendar)
+    linkActivated = Signal(str)  # page path from Link Navigator
     
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -29,6 +31,10 @@ class TabbedRightPanel(QWidget):
         # Create Attachments tab
         self.attachments_panel = AttachmentsPanel()
         self.tabs.addTab(self.attachments_panel, "Attachments")
+
+        # Create Link Navigator tab
+        self.link_panel = LinkNavigatorPanel()
+        self.tabs.addTab(self.link_panel, "Link Navigator")
         
         # Set Tasks as default tab (index 0)
         self.tabs.setCurrentIndex(0)
@@ -36,6 +42,7 @@ class TabbedRightPanel(QWidget):
         # Forward signals
         self.task_panel.taskActivated.connect(self.taskActivated)
         self.task_panel.dateActivated.connect(self.dateActivated)
+        self.link_panel.pageActivated.connect(self.linkActivated)
         
         # Layout
         from PySide6.QtWidgets import QVBoxLayout
@@ -67,15 +74,29 @@ class TabbedRightPanel(QWidget):
         date = QDate(year, month, day)
         self.task_panel.calendar.setSelectedDate(date)
     
-    def set_current_page(self, page_path) -> None:
-        """Update the attachments panel with the current page."""
+    def set_current_page(self, page_path, relative_path=None) -> None:
+        """Update panels with the current page."""
         self.attachments_panel.set_page(page_path)
+        self.link_panel.set_page(relative_path)
         self._update_attachments_tab_label()
     
     def refresh_attachments(self) -> None:
         """Refresh the attachments panel."""
         self.attachments_panel.refresh()
         self._update_attachments_tab_label()
+
+    def refresh_links(self, page_path=None) -> None:
+        """Refresh the link navigator for the given page (or current)."""
+        self.link_panel.refresh(page_path)
+
+    def focus_link_tab(self, page_path=None) -> None:
+        """Switch to the Link Navigator tab and optionally set its page."""
+        if page_path is not None:
+            self.link_panel.set_page(page_path)
+        for i in range(self.tabs.count()):
+            if self.tabs.widget(i) == self.link_panel:
+                self.tabs.setCurrentIndex(i)
+                break
     
     def _update_attachments_tab_label(self) -> None:
         """Update the Attachments tab label with the count of attachments."""

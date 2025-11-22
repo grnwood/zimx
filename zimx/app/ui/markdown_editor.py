@@ -542,6 +542,7 @@ class MarkdownEditor(QTextEdit):
     openFileLocationRequested = Signal(str)  # Emits file path when user wants to open file location
     insertDateRequested = Signal()
     attachmentDropped = Signal(str)  # Emits filename when a file is dropped into the editor
+    backlinksRequested = Signal(str)  # Emits current page path when backlinks are requested
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -552,6 +553,7 @@ class MarkdownEditor(QTextEdit):
         self._vi_saved_flash_time: Optional[int] = None
         self._vi_last_cursor_pos: int = -1
         self._heading_outline: list[dict] = []
+        self._dialog_block_input: bool = False
         self.setPlaceholderText("Open a Markdown file to begin editing…")
         self.setAcceptRichText(True)
         self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(" "))
@@ -697,6 +699,9 @@ class MarkdownEditor(QTextEdit):
         # Disable timing to avoid overhead for subsequent edits
         self.highlighter.enable_timing(False)
 
+        # Ensure the editor has focus after loading and rendering
+        self.setFocus()
+
     def to_markdown(self) -> str:
         markdown = self._doc_to_markdown()
         markdown = self._normalize_markdown_images(markdown)
@@ -706,6 +711,26 @@ class MarkdownEditor(QTextEdit):
         font = self.font()
         font.setPointSize(size)
         self.setFont(font)
+
+    def begin_dialog_block(self) -> None:
+        """Completely freeze editor input and interaction while a modal dialog is open."""
+        self._dialog_block_input = True
+        self.setReadOnly(True)
+        self.setEnabled(False)
+        self.setContextMenuPolicy(Qt.NoContextMenu)
+        self.viewport().setCursor(Qt.ArrowCursor)
+        # Optionally, clear selection to avoid visual confusion
+        cursor = self.textCursor()
+        cursor.clearSelection()
+        self.setTextCursor(cursor)
+
+    def end_dialog_block(self) -> None:
+        """Re-enable editor input and interaction after a modal dialog closes."""
+        self._dialog_block_input = False
+        self.setReadOnly(False)
+        self.setEnabled(True)
+        self.setContextMenuPolicy(Qt.DefaultContextMenu)
+        self.viewport().unsetCursor()
 
     def insert_link(self, colon_path: str, link_name: str | None = None) -> None:
         """Insert a link at the current cursor position.
@@ -820,7 +845,14 @@ class MarkdownEditor(QTextEdit):
                     self.imageSaved.emit(saved.name)
                     return
 
-        # 2) Rich HTML → markdown (avoid pasting styled fragments)
+        # 2) Rich HTML → prefer plain text if available to avoid style noise
+        if source.hasHtml() and source.hasText():
+            plain = source.text()
+            if plain:
+                self.textCursor().insertText(plain)
+                return
+
+        # 3) Rich HTML → markdown (avoid pasting styled fragments)
         if source.hasHtml():
             html = source.html()
             plain_from_html = self._html_to_plaintext_with_links(html)
@@ -832,33 +864,8 @@ class MarkdownEditor(QTextEdit):
                     self._refresh_display()
                 return
 
-        # 3) Plain text link helpers (http/colon)
-        if source.hasText():
-            raw_text = source.text()
-            text = raw_text.strip()
-            if '\n' not in text:
-                if text.startswith(("http://", "https://")):
-                    normalized_link = self._normalize_external_link(text)
-                    self.textCursor().insertText(f"[{normalized_link}|]")
-                    self._refresh_display()
-                    return
-                if text.startswith(":") or (text.count(":") >= 2):
-                    normalized = ensure_root_colon_link(text.split('#')[0])
-                    if '#' in text:
-                        anchor = text.split('#', 1)[1]
-                        normalized = f"{normalized}#{anchor}"
-                    self.textCursor().insertText(f"[{normalized}|]")
-                    self._refresh_display()
-                    return
-
-        # 4) Default paste (plain text) then normalize if it looks like markdown
+        # 4) Default paste without auto-link munging
         super().insertFromMimeData(source)
-        if source.hasText():
-            pasted = source.text()
-            if '[' in pasted and '|' in pasted:
-                self._refresh_display()
-            elif self._has_markdown_syntax(pasted):
-                self._refresh_display()
 
     def _html_to_plaintext_with_links(self, html: str) -> str:
         """Strip HTML to plain text, converting anchors to [url|label] links."""
@@ -935,12 +942,8 @@ class MarkdownEditor(QTextEdit):
         return text.strip("\n")
 
     def _normalize_external_link(self, link: str) -> str:
-        """Convert external links to a consistent wiki-storage target."""
-        if link.startswith(("http://", "https://")):
-            _, remainder = link.split("://", 1)
-            # Normalize to leading slash so it behaves like other rooted links
-            return "/" + remainder
-        return link
+        """Preserve full external links (including scheme) for storage."""
+        return link.strip()
 
     def _has_markdown_syntax(self, text: str) -> bool:
         """Heuristic to decide if text is markdown (headings, lists, code, etc.)."""
@@ -1106,6 +1109,9 @@ class MarkdownEditor(QTextEdit):
         self.focusLost.emit()
 
     def keyPressEvent(self, event):  # type: ignore[override]
+        if self._dialog_block_input:
+            event.ignore()
+            return
         # Markdown formatting shortcuts (Ctrl+B, Ctrl+I, Ctrl+K, Ctrl+H)
         if event.modifiers() == Qt.ControlModifier:
             if event.key() == Qt.Key_B:
@@ -1350,6 +1356,10 @@ class MarkdownEditor(QTextEdit):
                     heading_text = entry.get("title", "") or None
                     break
             copy_action.triggered.connect(lambda: self._copy_link_to_location(link_text=None, anchor_text=heading_text))
+            backlinks_action = menu.addAction("Backlinks…")
+            backlinks_action.triggered.connect(
+                lambda: self.backlinksRequested.emit(self._current_path or "")
+            )
             insert_date_action = menu.addAction("Insert Date…")
             insert_date_action.triggered.connect(self.insertDateRequested)
             
@@ -1783,12 +1793,22 @@ class MarkdownEditor(QTextEdit):
     def _edit_link_at_cursor(self, cursor: QTextCursor) -> None:
         """Open edit link dialog and replace link under cursor (supports markdown, plain colon, or HTTP link)."""
         from .edit_link_dialog import EditLinkDialog
-        
+        from PySide6.QtWidgets import QApplication
+        # Find the main window to use as parent
+        main_window = None
+        widget = self
+        while widget is not None:
+            if widget.metaObject().className().endswith("MainWindow"):
+                main_window = widget
+                break
+            widget = widget.parent()
+        parent = main_window if main_window is not None else self.window()
+
         # Suspend Vi mode while dialog is open
         vi_was_active = self._vi_mode_active
         if vi_was_active:
             self.set_vi_mode(False)
-        
+
         block = cursor.block()
         md = self._markdown_link_at_cursor(cursor)
         if md:
@@ -1831,35 +1851,44 @@ class MarkdownEditor(QTextEdit):
             if rng is None:
                 return
             start, end = rng
-        dlg = EditLinkDialog(link_to=link_val, link_text=text_val, parent=self)
-        if dlg.exec() == QDialog.Accepted:
-            new_to = dlg.link_to() or link_val
-            raw_label = dlg.link_text().strip()
-            # Normalize target for both HTTP and colon links
-            if new_to and new_to.startswith(("http://", "https://")):
-                new_to = self._normalize_external_link(new_to)
-            elif new_to:
-                match = COLON_LINK_PATTERN.match(new_to)
-                if match.hasMatch():
-                    new_to = ensure_root_colon_link(new_to)
+        dlg = EditLinkDialog(link_to=link_val, link_text=text_val, parent=parent)
+        dlg.setWindowModality(Qt.ApplicationModal)
+        dlg.activateWindow()
+        dlg.raise_()
+        dlg.search_edit.setFocus()
+        self.begin_dialog_block()
+        try:
+            if dlg.exec() == QDialog.Accepted:
+                new_to = dlg.link_to() or link_val
+                raw_label = dlg.link_text().strip()
+                # Normalize target for both HTTP and colon links
+                if new_to and new_to.startswith(("http://", "https://")):
+                    new_to = self._normalize_external_link(new_to)
+                elif new_to:
+                    match = COLON_LINK_PATTERN.match(new_to)
+                    if match.hasMatch():
+                        new_to = ensure_root_colon_link(new_to)
 
-            # Only keep a label if it differs from the target
-            link_label = ""
-            if raw_label:
-                match_left = raw_label.lstrip(":/")
-                target_left = new_to.lstrip(":/") if new_to else ""
-                if match_left != target_left:
-                    link_label = raw_label
-            tc = QTextCursor(block)
-            tc.setPosition(block.position() + start)
-            tc.setPosition(block.position() + end, QTextCursor.KeepAnchor)
-            tc.removeSelectedText()
-            self.setTextCursor(tc)
-            self.insert_link(new_to, link_label)
-        
-        # Restore Vi mode if it was active
-        if vi_was_active:
-            self.set_vi_mode(True)
+                # Only keep a label if it differs from the target
+                link_label = ""
+                if raw_label:
+                    match_left = raw_label.lstrip(":/")
+                    target_left = new_to.lstrip(":/") if new_to else ""
+                    if match_left != target_left:
+                        link_label = raw_label
+                tc = QTextCursor(block)
+                tc.setPosition(block.position() + start)
+                tc.setPosition(block.position() + end, QTextCursor.KeepAnchor)
+                tc.removeSelectedText()
+                self.setTextCursor(tc)
+                self.insert_link(new_to, link_label)
+        finally:
+            self.end_dialog_block()
+            # Always restore focus to the editor after dialog closes
+            QTimer.singleShot(0, self.setFocus)
+            # Restore Vi mode if it was active
+            if vi_was_active:
+                self.set_vi_mode(True)
     
     def _copy_link_to_location(self, link_text: str | None = None, anchor_text: Optional[str] = None) -> Optional[str]:
         """Copy a link location as colon-notation to clipboard.
@@ -1951,6 +1980,9 @@ class MarkdownEditor(QTextEdit):
             self._vi_saved_flash_time = None
             self._vi_last_cursor_pos = -1
         self._update_vi_cursor()
+        # Ensure editor focus when vi mode is toggled and no dialog is open
+        if not self._dialog_block_input:
+            self.setFocus()
 
     def _maybe_update_vi_cursor(self) -> None:
         if not self._vi_mode_active or not self._vi_block_cursor_enabled:

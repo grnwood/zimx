@@ -22,3 +22,6 @@ dist/
 build/
 sample-vault/
 sample-vault/.zimx/settings.db
+dev-assets/vault-sample
+dev-assets/vault-sample/**
+

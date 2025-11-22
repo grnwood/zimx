@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QTreeView,
     QDialog,
+    QProgressDialog,
     QWidget,
     QVBoxLayout,
     QFrame,
@@ -144,6 +145,16 @@ class VaultTreeView(QTreeView):
 
 
 class MainWindow(QMainWindow):
+
+    # --- Vi-mode dialog lockout ---
+    def _lock_vi_mode_toggle(self):
+        """Prevent vi mode from being toggled (CapsLock key) while a dialog is open."""
+        self._vi_mode_locked = True
+
+    def _unlock_vi_mode_toggle(self):
+        """Allow vi mode to be toggled again after dialog closes."""
+        self._vi_mode_locked = False
+
     def __init__(self, api_base: str) -> None:
         super().__init__()
         self.setWindowTitle("ZimX Desktop")
@@ -218,6 +229,10 @@ class MainWindow(QMainWindow):
         self.editor.editPageSourceRequested.connect(self._view_page_source)
         self.editor.openFileLocationRequested.connect(self._open_tree_file_location)
         self.editor.attachmentDropped.connect(self._on_attachment_dropped)
+        self.editor.backlinksRequested.connect(
+            lambda path="": self._show_link_navigator_for_path(path or self.current_path)
+        )
+        self.editor.linkActivated.connect(self._open_link_in_context)
         self.font_size = 14
         self.editor.set_font_point_size(self.font_size)
         # Load vi-mode block cursor preference
@@ -240,6 +255,7 @@ class MainWindow(QMainWindow):
         self.right_panel.refresh_tasks()
         self.right_panel.taskActivated.connect(self._open_task_from_panel)
         self.right_panel.dateActivated.connect(self._open_journal_date)
+        self.right_panel.linkActivated.connect(self._open_link_from_panel)
         self._inline_editor: Optional[InlineNameEdit] = None
         self._pending_selection: Optional[str] = None
         self._suspend_autosave = False
@@ -564,6 +580,23 @@ class MainWindow(QMainWindow):
             return
         self.vault_root = resp.json().get("root")
         self.vault_root_name = Path(self.vault_root).name if self.vault_root else None
+        index_dir_missing = False
+        if self.vault_root:
+            index_dir = Path(self.vault_root) / ".zimx"
+            if not index_dir.exists():
+                reply = QMessageBox.question(
+                    self,
+                    "No Vault Detected",
+                    "No Vault Detected, Create new Index?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if reply != QMessageBox.Yes:
+                    self.statusBar().showMessage("Vault open cancelled (no index).", 4000)
+                    self.vault_root = None
+                    self.vault_root_name = None
+                    return
+                index_dir_missing = True
         if self.vault_root:
             config.set_active_vault(self.vault_root)
             config.save_last_vault(self.vault_root)
@@ -577,16 +610,14 @@ class MainWindow(QMainWindow):
         self.editor.set_context(self.vault_root, None)
         self.editor.set_markdown("")
         self.current_path = None
+        self.right_panel.set_current_page(None, None)
         self.statusBar().showMessage(f"Vault: {self.vault_root}")
         self._update_window_title()
         self._populate_vault_tree()
         
         # Check if index is empty and rebuild if needed
-        if config.is_vault_index_empty():
-            self.statusBar().showMessage("Building initial index...", 0)
-            self._reindex_vault(show_progress=True)
-        else:
-            self._reindex_vault()
+        needs_index = index_dir_missing or config.is_vault_index_empty()
+        self._reindex_vault(show_progress=needs_index)
         
         self._load_bookmarks()
         if self.vault_root:
@@ -989,9 +1020,9 @@ class MainWindow(QMainWindow):
         from pathlib import Path
         if path:
             full_path = Path(self.vault_root) / path.lstrip("/")
-            self.right_panel.set_current_page(full_path)
+            self.right_panel.set_current_page(full_path, path)
         else:
-            self.right_panel.set_current_page(None)
+            self.right_panel.set_current_page(None, None)
 
     def _save_current_file(self, auto: bool = False) -> None:
         if self._suspend_autosave:
@@ -1038,6 +1069,7 @@ class MainWindow(QMainWindow):
         if config.has_active_vault():
             indexer.index_page(self.current_path, payload["content"])
             self.right_panel.refresh_tasks()
+            self.right_panel.refresh_links(self.current_path)
         
         # Mark page as saved (remove from virtual pages)
         was_virtual = self.current_path in self.virtual_pages
@@ -1251,8 +1283,14 @@ class MainWindow(QMainWindow):
             selected_text = selected_text.replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ').strip()
         
         dlg = InsertLinkDialog(self, selected_text=selected_text)
-        result = dlg.exec()
-        
+        self.editor.begin_dialog_block()
+        try:
+            result = dlg.exec()
+        finally:
+            self.editor.end_dialog_block()
+            # Always restore focus to the editor after dialog closes
+            QTimer.singleShot(0, self.editor.setFocus)
+
         inserted = False
         if result == QDialog.Accepted:
             colon_path = dlg.selected_colon_path()
@@ -1267,9 +1305,7 @@ class MainWindow(QMainWindow):
                 label = link_name or colon_path
                 self.editor.insert_link(colon_path, label)
                 inserted = True
-        if inserted:
-            self.editor.setFocus()
-    
+
         self._restore_vi_mode_after_dialog(vi_was_active)
 
     def _insert_date(self) -> None:
@@ -1394,6 +1430,28 @@ class MainWindow(QMainWindow):
         # Focus first, then go to line so the selection isn't cleared
         self.editor.setFocus()
         self._goto_line(line, select_line=True)
+
+    def _open_link_from_panel(self, path: str) -> None:
+        if not path:
+            return
+        self._select_tree_path(path)
+        self._open_file(path)
+        self.right_panel.focus_link_tab(path)
+
+    def _open_link_in_context(self, link: str) -> None:
+        """Handle link activations from the editor."""
+        if not link:
+            return
+        if link.startswith(("http://", "https://")):
+            try:
+                from PySide6.QtGui import QDesktopServices
+                from PySide6.QtCore import QUrl
+            except Exception:
+                return
+            QDesktopServices.openUrl(QUrl(link))
+            return
+        # Otherwise treat as page link
+        self._open_camel_link(link)
     
     def _open_journal_date(self, year: int, month: int, day: int) -> None:
         """Open or create journal entry for the selected date."""
@@ -1488,9 +1546,9 @@ class MainWindow(QMainWindow):
         # Update attachments panel (virtual pages may still have folders)
         if rel_path:
             full_path = Path(self.vault_root) / rel_path.lstrip("/")
-            self.right_panel.set_current_page(full_path)
+            self.right_panel.set_current_page(full_path, rel_path)
         else:
-            self.right_panel.set_current_page(None)
+            self.right_panel.set_current_page(None, None)
     
     def _apply_journal_templates_for_date(self, day_file_path: str, year: int, month: int, day: int) -> None:
         """Apply journal templates for a specific date."""
@@ -1845,6 +1903,11 @@ class MainWindow(QMainWindow):
                 # Open File Location
                 open_loc = menu.addAction("Open File Location")
                 open_loc.triggered.connect(lambda checked=False, fp=file_path: self._open_tree_file_location(fp))
+                
+                backlinks_action = menu.addAction("Backlinks…")
+                backlinks_action.triggered.connect(
+                    lambda checked=False, fp=file_path: self._show_link_navigator_for_path(fp)
+                )
         else:
             menu.addAction("New Page", lambda checked=False: self._start_inline_creation("/", global_pos, None))
         if menu.actions():
@@ -1887,6 +1950,17 @@ class MainWindow(QMainWindow):
         folder_path = abs_path.parent
         
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder_path)))
+
+    def _show_link_navigator_for_path(self, file_path: Optional[str]) -> None:
+        """Open the Link Navigator tab for the given page."""
+        if not file_path:
+            return
+        if file_path != self.current_path:
+            try:
+                self._open_file(file_path)
+            except Exception:
+                return
+        self.right_panel.focus_link_tab(file_path)
 
     def _reload_current_page(self) -> None:
         """Reload the current page from disk without altering history."""
@@ -2041,6 +2115,7 @@ class MainWindow(QMainWindow):
         self._populate_vault_tree()
         self.right_panel.refresh_tasks()
         self.right_panel.refresh_calendar()
+        self.right_panel.refresh_links(self.current_path)
 
     def _parent_path(self, index: QModelIndex) -> str:
         parent = index.parent()
@@ -2278,34 +2353,37 @@ class MainWindow(QMainWindow):
         """Reindex all pages in the vault."""
         if not self.vault_root or not config.has_active_vault():
             return
-        import hashlib
-        
-        if show_progress:
-            self.statusBar().showMessage("Rebuilding index...", 0)
         
         root = Path(self.vault_root)
         txt_files = sorted(root.rglob(f"*{PAGE_SUFFIX}"))
         
-        for txt_file in txt_files:
+        progress = None
+        if show_progress:
+            progress = QProgressDialog("Indexing vault...", None, 0, len(txt_files), self)
+            progress.setWindowTitle("Reindexing")
+            progress.setCancelButton(None)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.show()
+            self.statusBar().showMessage("Building index...", 0)
+        
+        for idx, txt_file in enumerate(txt_files, start=1):
             rel_path = txt_file.relative_to(root)
             path_str = f"/{rel_path.as_posix()}"
-            
             try:
                 content = txt_file.read_text(encoding="utf-8")
-                title = indexer.derive_title(path_str, content)
-                tags = sorted(set(indexer.TAG_PATTERN.findall(content)))
-                link_targets = {indexer.normalize_link(m) for m in indexer.LINK_PATTERN.findall(content) if m}
-                links = sorted(link_targets)
-                tasks = indexer.extract_tasks(path_str, content)
-                config.update_page_index(path=path_str, title=title, tags=tags, links=links, tasks=tasks)
-                digest = hashlib.md5((indexer.INDEX_SCHEMA_VERSION + content).encode("utf-8")).hexdigest()
-                config.set_page_hash(path_str, digest)
+                indexer.index_page(path_str, content)
             except Exception:
                 continue
+            if progress:
+                progress.setValue(idx)
+                QApplication.processEvents()
         
         self.right_panel.refresh_tasks()
+        self.right_panel.refresh_links(self.current_path)
         
-        if show_progress:
+        if progress:
+            progress.close()
             page_count = len(txt_files)
             self.statusBar().showMessage(f"Index rebuilt: {page_count} pages", 3000)
 
@@ -2335,18 +2413,40 @@ class MainWindow(QMainWindow):
         if was_active:
             self._vi_mode_active = False
             self.editor.set_vi_mode(False)
+            self._apply_vi_mode_statusbar_style()
+        self._lock_vi_mode_toggle()
         return was_active
 
     def _restore_vi_mode_after_dialog(self, was_active: bool) -> None:
         """Re-enable vi-mode if it was active before a dialog was shown."""
+        self._unlock_vi_mode_toggle()
         if was_active:
             self._vi_mode_active = True
             self.editor.set_vi_mode(True)
+            self._apply_vi_mode_statusbar_style()
 
     def _toggle_vi_mode(self) -> None:
         """Toggle vi-mode navigation on/off with visual status bar indicator."""
+        if getattr(self, '_vi_mode_locked', False):
+            # Ignore toggle requests while locked for dialog
+            return
         self._vi_mode_active = not self._vi_mode_active
         self._apply_vi_mode_statusbar_style()
+        # After toggling vi mode off, try to ensure CapsLock is off on Linux
+        if not self._vi_mode_active:
+            import sys
+            if sys.platform.startswith('linux'):
+                try:
+                    import subprocess
+                    # Check if xdotool is available
+                    if subprocess.call(['which', 'xdotool'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0:
+                        # Check if CapsLock is ON
+                        caps_state = subprocess.check_output(['xset', 'q']).decode()
+                        if 'Caps Lock:   on' in caps_state:
+                            # Simulate CapsLock key press to turn it off
+                            subprocess.call(['xdotool', 'key', 'Caps_Lock'])
+                except Exception:
+                    pass
 
     def _install_vi_mode_filters(self) -> None:
         for target in getattr(self, "_vi_filter_targets", []):
@@ -2366,11 +2466,13 @@ class MainWindow(QMainWindow):
                 self._apply_vi_mode_statusbar_style()
                 return True
             if event.key() == Qt.Key_CapsLock:
+                # Block vi mode toggle if locked for dialog
+                if getattr(self, '_vi_mode_locked', False):
+                    return True  # Block CapsLock completely while dialog is open
                 # Toggle vi-mode and consume the event to prevent CapsLock from activating
                 # But first check if this is a synthetic event from _neutralize_capslock
                 if getattr(self, '_neutralizing_capslock', False):
                     return True  # Block it but don't toggle
-                
                 self._toggle_vi_mode()
                 # After Qt processes this, ensure OS CapsLock state is OFF
                 from PySide6.QtCore import QTimer

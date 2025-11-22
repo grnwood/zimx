@@ -25,6 +25,7 @@ class InsertLinkDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Insert Link")
         self.setModal(True)
+        self.setWindowModality(Qt.ApplicationModal)
         
         # Set up geometry save timer (debounced)
         self.geometry_save_timer = QTimer(self)

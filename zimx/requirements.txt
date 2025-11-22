@@ -5,3 +5,5 @@ httpx>=0.27
 watchdog>=4.0
 pydantic>=2.7
 pytest>=8.2
+
+keyboard>=0.13
