@@ -76,6 +76,17 @@ def _extract_link_targets(content: str) -> Set[str]:
         normalized = _normalize_page_link(raw)
         if normalized:
             targets.add(normalized)
+
+    # Extract CamelCase/plus-prefixed links: +PageName
+    camel_pattern = re.compile(r"\+(?P<link>[A-Za-z][\w]*)")
+    for match in camel_pattern.finditer(content):
+        link = match.group("link")
+        # Convert CamelCase to a vault-relative path (relative to current page's folder)
+        # Here, we treat CamelCase as a page in the same folder, so just add the .txt suffix
+        if link:
+            # This will be normalized to "/PageName/PageName.txt"
+            page_path = f"/{link}/{link}{PAGE_SUFFIX}"
+            targets.add(page_path)
     return targets
 
 

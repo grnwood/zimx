@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ZimX
+Comment=Your custom Zim Desktop Wiki rewrite
+Exec=/FULL/PATH/TO/ZimX   # 👈 change this
+Icon=/FULL/PATH/TO/icon.png  # optional
+Terminal=false
+Categories=Utility;Notes;
+StartupNotify=true
+StartupWMClass=ZimX

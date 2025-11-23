@@ -1434,6 +1434,21 @@ class MainWindow(QMainWindow):
     def _open_link_from_panel(self, path: str) -> None:
         if not path:
             return
+        # Special case: if the path matches the vault root name or is the vault root folder, open the main page
+        if self.vault_root_name:
+            # Accept /VaultRoot, VaultRoot, /VaultRoot/, or /VaultRoot/VaultRoot.txt as vault root
+            normalized = path.strip().strip("/")
+            if (
+                normalized == self.vault_root_name
+                or normalized == f"{self.vault_root_name}{PAGE_SUFFIX.strip()}"
+                or normalized == f"{self.vault_root_name}{PAGE_SUFFIX}"
+                or normalized == f"{self.vault_root_name}/{self.vault_root_name}{PAGE_SUFFIX}"
+            ):
+                main_page = f"/{self.vault_root_name}{PAGE_SUFFIX}"
+                self._select_tree_path(main_page)
+                self._open_file(main_page)
+                self.right_panel.focus_link_tab(main_page)
+                return
         self._select_tree_path(path)
         self._open_file(path)
         self.right_panel.focus_link_tab(path)
@@ -1719,10 +1734,23 @@ class MainWindow(QMainWindow):
         target_name, anchor = self._split_link_anchor(name)
         anchor_slug = self._anchor_slug(anchor)
         
-        # Check if this is a colon notation link (PageA:PageB:PageC)
+        # Check if this is a colon notation link (PageA:PageB:PageC or :VaultRoot)
         if ":" in target_name:
+            # Special case: :VaultRoot or :<vault_root_name> means open the vault's main page
+            vault_root_colon = f":{self.vault_root_name}"
+            if target_name.strip() in (":VaultRoot", vault_root_colon):
+                # Open the vault's main page (fake root concept)
+                main_page = f"/{self.vault_root_name}{PAGE_SUFFIX}"
+                self._open_file(main_page)
+                self._scroll_to_anchor_slug(anchor_slug)
+                return
             # Colon notation is absolute - convert directly to path
+            # Prevent duplicate vault root in path (e.g., VaultRoot/VaultRoot.txt)
             target_file = colon_to_path(target_name, self.vault_root_name)
+            # If the resolved file is the vault root's main page, force it to /VaultRoot.txt
+            vault_main_page = f"/{self.vault_root_name}{PAGE_SUFFIX}"
+            if target_file.replace("\\", "/").strip("/") in (self.vault_root_name + PAGE_SUFFIX, vault_main_page.strip("/")):
+                target_file = vault_main_page
             if not target_file:
                 self._alert(f"Invalid link format: {name}")
                 return
@@ -1743,6 +1771,12 @@ class MainWindow(QMainWindow):
             self._scroll_to_anchor_slug(anchor_slug)
         else:
             # CamelCase link is relative to current page
+            # Special case: if the link target matches the vault root name, open /VaultRoot.txt
+            if target_name == self.vault_root_name:
+                target_file = f"/{self.vault_root_name}{PAGE_SUFFIX}"
+                self._open_file(target_file)
+                self._scroll_to_anchor_slug(anchor_slug)
+                return
             rel_current = Path(self.current_path.lstrip("/"))
             parent_folder = rel_current.parent
             target_rel = parent_folder / target_name if parent_folder.parts else Path(target_name)
