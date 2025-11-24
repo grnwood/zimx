@@ -5,6 +5,7 @@ import threading
 import time
 import os
 import socket
+import traceback
 
 import uvicorn
 from PySide6.QtCore import QtMsgType, qInstallMessageHandler
@@ -122,12 +123,22 @@ def _parse_vault_arg(argv: list[str]) -> str | None:
     return None
 
 
+def _diag(msg: str) -> None:
+    """Lightweight diagnostic logger for startup/teardown events."""
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[ZimxDiag {timestamp}] {msg}", file=sys.stderr)
+
+
 def main() -> None:
+    start_ts = time.time()
+    _diag("Application starting.")
     config.init_settings()
     # Install custom message handler to suppress harmless Qt warnings
     qInstallMessageHandler(_qt_message_handler)
     port, _ = _start_api_server()
+    _diag(f"API server started on port {port}.")
     qt_app = QApplication(sys.argv)
+    qt_app.aboutToQuit.connect(lambda: _diag("QApplication aboutToQuit emitted."))
     # Set window/app icon if available (especially needed on Linux)
     _set_app_icon(qt_app)
     window = MainWindow(api_base=f"http://127.0.0.1:{port}")
@@ -136,11 +147,26 @@ def main() -> None:
     windows.append(window)
     qt_app._zimx_windows = windows
     vault_hint = _parse_vault_arg(sys.argv[1:])
-    if window.startup(vault_hint=vault_hint):
-        window.show()
-        sys.exit(qt_app.exec())
-    # User cancelled startup selection; graceful shutdown
-    qt_app.quit()
+    try:
+        if window.startup(vault_hint=vault_hint):
+            window.show()
+            _diag("Main window shown; entering Qt event loop.")
+            rc = qt_app.exec()
+            uptime = time.time() - start_ts
+            _diag(f"Qt event loop exited with code {rc} after {uptime:.2f}s.")
+            sys.exit(rc)
+        else:
+            _diag("Startup cancelled by user; quitting.")
+            qt_app.quit()
+    except BaseException as exc:
+        uptime = time.time() - start_ts
+        _diag(f"Unhandled exception after {uptime:.2f}s: {exc}")
+        traceback.print_exc()
+        try:
+            qt_app.quit()
+        except Exception:
+            pass
+        sys.exit(1)
 
 
 if __name__ == "__main__":  # pragma: no cover - manual entry point

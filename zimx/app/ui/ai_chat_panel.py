@@ -1,4 +1,76 @@
+
 from __future__ import annotations
+
+import json
+import os
+import sqlite3
+from pathlib import Path
+import html
+import re
+from typing import Dict, List, Optional, Tuple
+
+import httpx
+from PySide6 import QtCore, QtWidgets
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QPalette, QTextCursor, QKeyEvent, QDesktopServices, QCursor
+from markdown import markdown
+
+# Use zimx_config for global config storage
+from zimx.app import config as zimx_config
+
+# Shared config (aligns with slipstream/ask-server/ask-client.py defaults)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SERVER_CONFIG_FILE = PROJECT_ROOT / "slipstream" / "server_configs.json"
+DEFAULT_API_URL = os.getenv("PUBLISHED_API", "http://localhost:3000")
+DEFAULT_API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
+
+def fetch_and_cache_models(server_config: dict) -> List[str]:
+    """Fetch models from the server and cache them in the config file under 'server_models'."""
+    server = server_config or {}
+    fallback_model = server.get("default_model") or "gpt-3.5-turbo"
+    base_url = server.get("base_url", "")
+    if not base_url or not server.get("name"):
+        return [fallback_model]
+    models_path = server.get("models_path") or ("/mods" if server.get("auth_mode") == "proxy" else "/v1/models")
+    url = compose_url(base_url, models_path)
+    headers = build_auth_headers(server)
+    verify = bool(server.get("verify_ssl", True))
+    try:
+        print("[AIChat][models request]", {"url": url, "headers": headers})
+        with httpx.Client(timeout=10.0, verify=verify) as client:
+            resp = client.get(url, headers=headers)
+            resp.raise_for_status()
+            print(f"[AIChat][models response] {resp.status_code} {resp.text[:500]}")
+            payload = resp.json()
+    except Exception as exc:
+        print(f"Error fetching models from {url}: {exc}")
+        payload = None
+    model_ids: List[str] = []
+    if isinstance(payload, dict):
+        if "data" in payload and isinstance(payload["data"], list):
+            data_list = payload["data"]
+            if data_list and isinstance(data_list[0], dict):
+                model_ids = [item.get("id") for item in data_list if item.get("id")]
+            else:
+                model_ids = [str(item) for item in data_list if item]
+        elif "models" in payload and isinstance(payload["models"], list):
+            model_ids = [str(item) for item in payload["models"] if item]
+    elif isinstance(payload, list):
+        if payload and isinstance(payload[0], dict):
+            model_ids = [item.get("id") for item in payload if item.get("id")]
+        else:
+            model_ids = [str(item) for item in payload if item]
+    cleaned = sorted({m for m in model_ids if m})
+    if not cleaned:
+        cleaned = [fallback_model]
+    # Cache in config
+    payload = zimx_config._read_global_config()
+    server_models = payload.get("server_models", {})
+    server_models[server["name"]] = cleaned
+    zimx_config._update_global_config({"server_models": server_models})
+    return cleaned
+
+
 
 import json
 import os
@@ -11,6 +83,9 @@ from PySide6 import QtCore, QtWidgets
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QPalette, QTextCursor, QKeyEvent, QDesktopServices
 from markdown import markdown
+
+# Use zimx_config for global config storage
+from zimx.app import config as zimx_config
 
 # Shared config (aligns with slipstream/ask-server/ask-client.py defaults)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -66,32 +141,9 @@ class ServerManager:
     ACTIVE_SERVER_KEY = "active_server"
 
     def __init__(self, config_path: Optional[Path] = None):
-        self.config_path = config_path or SERVER_CONFIG_FILE
-        self._data = self._load_file()
         self._servers_cache: Optional[List[dict]] = None
 
-    def _load_file(self) -> dict:
-        data: dict = {}
-        if self.config_path.exists():
-            try:
-                loaded = json.loads(self.config_path.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    data = loaded
-            except Exception as exc:
-                print(f"Failed to load server configuration file: {exc}")
-        if not data:
-            data["servers"] = build_default_server_configs()
-            data["active_server"] = data["servers"][0]["name"]
-        self._data = data
-        self._save_file()
-        return data
-
-    def _save_file(self) -> None:
-        try:
-            self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            self.config_path.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
-        except Exception as exc:
-            print(f"Failed to save server configuration file: {exc}")
+    # No longer needed: _load_file and _save_file
 
     def _normalize_server(self, entry: dict) -> dict:
         entry = entry or {}
@@ -120,15 +172,14 @@ class ServerManager:
     def load_servers(self) -> List[dict]:
         if self._servers_cache is not None:
             return list(self._servers_cache)
-        servers = self._data.get(self.SERVERS_KEY, [])
+        payload = zimx_config._read_global_config()
+        servers = payload.get(self.SERVERS_KEY, [])
         if not servers:
             servers = build_default_server_configs()
         normalized = [self._normalize_server(entry) for entry in servers if entry]
         self._servers_cache = normalized
-        self._data[self.SERVERS_KEY] = normalized
-        if normalized and not self._data.get(self.ACTIVE_SERVER_KEY):
-            self._data[self.ACTIVE_SERVER_KEY] = normalized[0]["name"]
-        self._save_file()
+        if not payload.get(self.SERVERS_KEY):
+            zimx_config._update_global_config({self.SERVERS_KEY: normalized})
         return list(normalized)
 
     def list_server_names(self) -> List[str]:
@@ -144,12 +195,12 @@ class ServerManager:
 
     def set_active_server(self, name: str) -> None:
         if name and self.get_server(name):
-            self._data[self.ACTIVE_SERVER_KEY] = name
-            self._save_file()
+            zimx_config._update_global_config({self.ACTIVE_SERVER_KEY: name})
             self._servers_cache = None
 
     def get_active_server_name(self) -> Optional[str]:
-        active = self._data.get(self.ACTIVE_SERVER_KEY)
+        payload = zimx_config._read_global_config()
+        active = payload.get(self.ACTIVE_SERVER_KEY)
         names = self.list_server_names()
         if active in names:
             return active
@@ -172,10 +223,10 @@ class ServerManager:
             if any(existing["name"] == target_name for existing in servers):
                 raise ValueError(f"A server named '{target_name}' already exists.")
             servers.append(self._normalize_server(server))
-        elif original_name and self._data.get(self.ACTIVE_SERVER_KEY) == original_name:
-            self._data[self.ACTIVE_SERVER_KEY] = target_name
-        self._data[self.SERVERS_KEY] = servers
-        self._save_file()
+        payload = zimx_config._read_global_config()
+        if original_name and payload.get(self.ACTIVE_SERVER_KEY) == original_name:
+            zimx_config._update_global_config({self.ACTIVE_SERVER_KEY: target_name})
+        zimx_config._update_global_config({self.SERVERS_KEY: servers})
         self._servers_cache = None
         return self.get_server(target_name) or self._normalize_server(server)
 
@@ -183,12 +234,11 @@ class ServerManager:
         servers = [srv for srv in self.load_servers() if srv["name"] != name]
         if not servers:
             servers = build_default_server_configs()
-        self._data[self.SERVERS_KEY] = servers
+        zimx_config._update_global_config({self.SERVERS_KEY: servers})
         active_name = self.get_active_server_name()
         if active_name == name and servers:
-            self.set_active_server(servers[0]["name"])
+            zimx_config._update_global_config({self.ACTIVE_SERVER_KEY: servers[0]["name"]})
         self._servers_cache = None
-        self._save_file()
         return self.load_servers()
 
 
@@ -411,6 +461,14 @@ class AIChatStore:
         conn.commit()
         conn.close()
 
+    def has_chat_for_path(self, rel_path: Optional[str]) -> bool:
+        """Return True if a chat exists for the given page path."""
+        if not rel_path:
+            return bool(self.get_session_by_path("/", "chat"))
+        path_obj = Path(rel_path.lstrip("/"))
+        folder_path = self._normalize_folder_path("/" + path_obj.parent.as_posix())
+        return bool(self.get_session_by_path(folder_path, "chat"))
+
     def has_chats_under(self, folder_path: Optional[str]) -> bool:
         """Return True if any chat exists at or under the given folder path."""
         if not folder_path:
@@ -473,40 +531,14 @@ def build_auth_headers(server_config: dict) -> dict:
 def get_available_models(server_config: Optional[dict]) -> List[str]:
     server = server_config or {}
     fallback_model = server.get("default_model") or "gpt-3.5-turbo"
-    base_url = server.get("base_url", "")
-    if not base_url:
+    if not server.get("name"):
         return [fallback_model]
-    models_path = server.get("models_path") or ("/mods" if server.get("auth_mode") == "proxy" else "/v1/models")
-    url = compose_url(base_url, models_path)
-    headers = build_auth_headers(server)
-    verify = bool(server.get("verify_ssl", True))
-    try:
-        print("[AIChat][models request]", {"url": url, "headers": headers})
-        with httpx.Client(timeout=10.0, verify=verify) as client:
-            resp = client.get(url, headers=headers)
-            resp.raise_for_status()
-            print(f"[AIChat][models response] {resp.status_code} {resp.text[:500]}")
-            payload = resp.json()
-    except Exception as exc:
-        print(f"Error fetching models from {url}: {exc}")
+    payload = zimx_config._read_global_config()
+    server_models = payload.get("server_models", {})
+    models = server_models.get(server["name"], [])
+    if not models:
         return [fallback_model]
-    model_ids: List[str] = []
-    if isinstance(payload, dict):
-        if "data" in payload and isinstance(payload["data"], list):
-            data_list = payload["data"]
-            if data_list and isinstance(data_list[0], dict):
-                model_ids = [item.get("id") for item in data_list if item.get("id")]
-            else:
-                model_ids = [str(item) for item in data_list if item]
-        elif "models" in payload and isinstance(payload["models"], list):
-            model_ids = [str(item) for item in payload["models"] if item]
-    elif isinstance(payload, list):
-        if payload and isinstance(payload[0], dict):
-            model_ids = [item.get("id") for item in payload if item.get("id")]
-        else:
-            model_ids = [str(item) for item in payload if item]
-    cleaned = sorted({m for m in model_ids if m})
-    return cleaned or [fallback_model]
+    return sorted(set(models))
 
 
 def build_api_request(server_config: dict, messages: List[dict], model: str, stream: bool = True):
@@ -558,7 +590,7 @@ class ApiWorker(QtCore.QThread):
                         if not line:
                             continue
                         decoded = line.decode("utf-8") if isinstance(line, (bytes, bytearray)) else str(line)
-                        print(f"[AIChat][stream raw] {decoded}")
+                        #print(f"[AIChat][stream raw] {decoded}")
                         if decoded.startswith("data: "):
                             json_data = decoded[len("data: ") :]
                             if json_data.strip() == "[DONE]":
@@ -596,12 +628,20 @@ class ApiWorker(QtCore.QThread):
 
 
 class ServerConfigDialog(QtWidgets.QDialog):
-    def __init__(self, parent=None, server: Optional[dict] = None):
+    def __init__(self, parent=None, server: Optional[dict] = None, existing_names: Optional[List[str]] = None):
         super().__init__(parent)
         self.setWindowTitle("Server Configuration")
-        self.server = server or {}
+        # If adding a new server, set default paths
+        if server is None:
+            self.server = {
+                "models_path": "/v1/models",
+                "chat_path": "/v1/chat/completions"
+            }
+        else:
+            self.server = server
         self.original_name = self.server.get("name")
         self.result: Optional[dict] = None
+        self.existing_names = existing_names or []
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -621,6 +661,9 @@ class ServerConfigDialog(QtWidgets.QDialog):
         self.default_model_edit = QtWidgets.QLineEdit(self.server.get("default_model", "gpt-3.5-turbo"))
         self.verify_ssl_check = QtWidgets.QCheckBox("Verify SSL certificates")
         self.verify_ssl_check.setChecked(bool(self.server.get("verify_ssl", True)))
+        self.duplicate_label = QtWidgets.QLabel("")
+        self.duplicate_label.setStyleSheet("color: red; font-weight: bold;")
+        self.duplicate_label.hide()
         layout.addRow("Name", self.name_edit)
         layout.addRow("Base URL", self.base_edit)
         layout.addRow("Auth Mode", self.auth_combo)
@@ -633,17 +676,29 @@ class ServerConfigDialog(QtWidgets.QDialog):
         layout.addRow("Timeout (seconds)", self.timeout_edit)
         layout.addRow("Default Model", self.default_model_edit)
         layout.addRow(self.verify_ssl_check)
+        layout.addRow(self.duplicate_label)
 
-        button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        layout.addRow(button_box)
+        self.button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        self.button_box.accepted.connect(self._handle_accept)
+        self.button_box.rejected.connect(self.reject)
+        layout.addRow(self.button_box)
+        self.ok_button = self.button_box.button(QtWidgets.QDialogButtonBox.Ok)
+        if not self.original_name:
+            self.ok_button.setText("Add")
+        self.name_edit.textChanged.connect(self._validate_name)
+        self._validate_name()
 
-    def accept(self) -> None:
+    def _handle_accept(self):
         name = self.name_edit.text().strip()
         base = self.base_edit.text().strip()
         if not name or not base:
             QtWidgets.QMessageBox.warning(self, "Validation", "Name and Base URL are required.")
+            return
+        if self._is_duplicate(name):
+            self.duplicate_label.setText(f"Server name {name} already exists, choose a new name")
+            self.duplicate_label.show()
+            if self.ok_button:
+                self.ok_button.setEnabled(False)
             return
         auth_mode = self.auth_combo.currentText()
         models_path = self.models_path_edit.text().strip() or ("/mods" if auth_mode == "proxy" else "/v1/models")
@@ -674,6 +729,67 @@ class ServerConfigDialog(QtWidgets.QDialog):
         }
         super().accept()
 
+    def accept(self) -> None:
+        name = self.name_edit.text().strip()
+        base = self.base_edit.text().strip()
+        if not name or not base:
+            QtWidgets.QMessageBox.warning(self, "Validation", "Name and Base URL are required.")
+            return
+        if self._is_duplicate(name):
+            self.duplicate_label.setText(f"Server name {name} already exists, choose a new name")
+            self.duplicate_label.show()
+            if self.ok_button:
+                self.ok_button.setEnabled(False)
+            return
+        auth_mode = self.auth_combo.currentText()
+        models_path = self.models_path_edit.text().strip() or ("/mods" if auth_mode == "proxy" else "/v1/models")
+        chat_path = self.chat_path_edit.text().strip() or "/v1/chat/completions"
+
+        timeout_raw = self.timeout_edit.text().strip()
+        timeout_value = ""
+        if timeout_raw:
+            try:
+                timeout_value = float(timeout_raw)
+            except ValueError:
+                timeout_value = timeout_raw
+
+        self.result = {
+            "name": name,
+            "base_url": base,
+            "auth_mode": auth_mode,
+            "api_secret": self.api_secret_edit.text().strip(),
+            "api_key": self.api_key_edit.text().strip(),
+            "custom_header_name": self.custom_header_name_edit.text().strip(),
+            "custom_header_value": self.custom_header_value_edit.text().strip(),
+            "models_path": models_path,
+            "chat_path": chat_path,
+            "default_model": self.default_model_edit.text().strip() or "gpt-3.5-turbo",
+            "verify_ssl": self.verify_ssl_check.isChecked(),
+            "timeout": timeout_value,
+            "original_name": self.original_name,
+        }
+        super().accept()
+
+    def _is_duplicate(self, name: str) -> bool:
+        name_clean = name.strip()
+        if not name_clean:
+            return False
+        if name_clean == self.original_name:
+            return False
+        return name_clean in self.existing_names
+
+    def _validate_name(self) -> None:
+        name = self.name_edit.text().strip()
+        if self._is_duplicate(name):
+            self.duplicate_label.setText(f"Server name {name} already exists, choose a new name")
+            self.duplicate_label.show()
+            if self.ok_button:
+                self.ok_button.setEnabled(False)
+        else:
+            self.duplicate_label.hide()
+            if self.ok_button:
+                self.ok_button.setEnabled(True)
+
 
 class AIChatPanel(QtWidgets.QWidget):
     """Lightweight AI chat panel embedded in the right rail."""
@@ -682,7 +798,7 @@ class AIChatPanel(QtWidgets.QWidget):
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         if obj is self.input_edit and event.type() == QtCore.QEvent.KeyPress:
-            key_event: QKeyEvent = event  # type: ignore[assignment]
+            key_event = event  # type: ignore[assignment]
             if key_event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
                 modifiers = key_event.modifiers()
                 if modifiers & QtCore.Qt.ControlModifier:
@@ -693,27 +809,43 @@ class AIChatPanel(QtWidgets.QWidget):
                     return True
         return super().eventFilter(obj, event)
 
-    def __init__(self, parent=None, font_size: int = 13) -> None:
+    def __init__(self, parent=None, font_size=13):
         super().__init__(parent)
-        self.vault_root: Optional[str] = None
+        self.vault_root = None
         self.store = AIChatStore()
         self.server_manager = ServerManager()
-        self.current_server: Optional[dict] = self.server_manager.get_server(self.server_manager.get_active_server_name())
-        self.messages: List[Tuple[str, str]] = []
-        self._api_worker: Optional[ApiWorker] = None
-        self.current_session_id: Optional[int] = None
-        self.current_page_path: Optional[str] = None
+        self.current_server = self.server_manager.get_server(self.server_manager.get_active_server_name())
+        self.messages = []
+        self._api_worker = None
+        self._condense_worker = None
+        self.current_session_id = None
+        self.current_page_path = None
         self._building_tree = False
-        self._current_chat_path: Optional[str] = None
-        self.system_prompts: List[Dict[str, str]] = []
-        self.current_system_prompt: Optional[str] = None
+        self._current_chat_path = None
+        self.system_prompts = []
+        self.current_system_prompt = None
         self.font_size = font_size
+        self.condense_prompt = self._load_condense_prompt()
+        self._condense_buffer = ""
+        self._summary_content = None
         self._build_ui()
         self._load_system_prompts()
         self._refresh_server_dropdown()
         self._refresh_model_dropdown(initial=True)
         self._load_chat_tree()
         self._select_default_chat()
+
+    def _config_default_server(self) -> Optional[str]:
+        try:
+            return zimx_config.load_default_ai_server()
+        except Exception:
+            return None
+
+    def _config_default_model(self) -> Optional[str]:
+        try:
+            return zimx_config.load_default_ai_model()
+        except Exception:
+            return None
 
     def _build_ui(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
@@ -756,18 +888,16 @@ class AIChatPanel(QtWidgets.QWidget):
         server_row.addWidget(QtWidgets.QLabel("Server:"))
         self.server_combo = QtWidgets.QComboBox()
         self.server_combo.currentIndexChanged.connect(self._on_server_selected)
-        manage_btn = QtWidgets.QPushButton("Manage")
-        manage_btn.clicked.connect(self._manage_servers)
         server_row.addWidget(self.server_combo, 1)
-        server_row.addWidget(manage_btn)
         cfg_layout.addLayout(server_row)
 
         model_row = QtWidgets.QHBoxLayout()
         model_row.addWidget(QtWidgets.QLabel("Model:"))
         self.model_combo = QtWidgets.QComboBox()
+        self.model_combo.currentTextChanged.connect(self._on_model_selected)
         model_row.addWidget(self.model_combo, 1)
         refresh_models_btn = QtWidgets.QPushButton("Refresh Models")
-        refresh_models_btn.clicked.connect(lambda: self._refresh_model_dropdown(initial=False))
+        refresh_models_btn.clicked.connect(self._refresh_models_from_server)
         model_row.addWidget(refresh_models_btn)
         cfg_layout.addLayout(model_row)
 
@@ -811,6 +941,8 @@ class AIChatPanel(QtWidgets.QWidget):
         self.chat_view.setOpenExternalLinks(False)
         self.chat_view.setOpenLinks(False)
         self.chat_view.anchorClicked.connect(self._on_anchor_clicked)
+        self.chat_view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.chat_view.customContextMenuRequested.connect(self._on_history_context_menu)
         self.chat_view.setReadOnly(True)
         self.chat_view.setStyleSheet("QTextBrowser { padding: 6px; }")
         self._apply_font_size()
@@ -828,6 +960,11 @@ class AIChatPanel(QtWidgets.QWidget):
 
         btn_row = QtWidgets.QHBoxLayout()
         btn_row.addStretch()
+        self.condense_btn = QtWidgets.QToolButton()
+        self.condense_btn.setText("⤢")
+        self.condense_btn.setToolTip("Condense Chat")
+        self.condense_btn.clicked.connect(self._condense_chat)
+        self.condense_btn.setFixedWidth(28)
         self.send_btn = QtWidgets.QToolButton()
         self.send_btn.setText("➤")
         self.send_btn.setToolTip("Send message (Ctrl+Enter)")
@@ -838,6 +975,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self.reset_btn.setToolTip("Reset chat history")
         self.reset_btn.clicked.connect(self._reset_chat_history)
         self.reset_btn.setFixedWidth(28)
+        btn_row.addWidget(self.condense_btn)
         btn_row.addWidget(self.reset_btn)
         btn_row.addWidget(self.send_btn)
         input_layout.addLayout(btn_row)
@@ -856,7 +994,26 @@ class AIChatPanel(QtWidgets.QWidget):
         self._update_chat_name_label()
         self._apply_font_size()
 
+    def _load_condense_prompt(self) -> str:
+        """Load the condense prompt from file or fall back to a default."""
+        # Prefer a vault-specific prompt if present, otherwise try bundled paths.
+        candidates = []
+        if self.vault_root:
+            candidates.append(Path(self.vault_root) / ".zimx" / "condense_prompt.txt")
+        candidates.append(PROJECT_ROOT / "zimx" / "app" / "condense_prompt.txt")
+        candidates.append(Path(__file__).resolve().parent.parent / "condense_prompt.txt")
+        for path in candidates:
+            try:
+                if path.exists():
+                    return path.read_text(encoding="utf-8").strip()
+            except Exception:
+                continue
+        print("[AIChat][condense] Using fallback condense prompt; file not found.")
+        return "You are a helpful assistant. Summarize the following chat history."
+
     def focusInEvent(self, event):  # type: ignore[override]
+        # Update server dropdown to reflect latest config state
+        self._refresh_server_dropdown()
         super().focusInEvent(event)
         try:
             target_folder = self._current_chat_path
@@ -895,6 +1052,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self.server_config_widget.setVisible(checked)
         self.server_config_btn.setText("Hide Config" if checked else "Server Config")
         self.prompt_btn.setVisible(checked)
+        # Do not auto-refresh models on config toggle
 
     def _render_messages(self) -> None:
         parts: List[str] = []
@@ -910,34 +1068,298 @@ class AIChatPanel(QtWidgets.QWidget):
             f".actions a {{ margin-left:12px; text-decoration:none; color:{accent}; }}"
             f".user {{ background:rgba(80,120,200,0.10); }}"
             f".assistant {{ background:rgba(60,200,140,0.10); }}"
+            f".summary {{ border:1px solid #e88; }}"
             f".role {{ font-weight:bold; color:{accent}; }}</style>"
         )
-        self._message_map: Dict[str, Tuple[str, str]] = {}
+        self._message_map = {}
         for idx, (role, content) in enumerate(self.messages):
             cls = "assistant" if role == "assistant" else "user"
             msg_id = f"msg-{idx}"
-            html = markdown(content, extensions=["fenced_code", "tables"])
+            rendered = markdown(content, extensions=["fenced_code", "tables"])
+            if self._is_plain_markdown(rendered):
+                safe = html.escape(content).replace("\n", "<br>")
+                rendered = f"<p>{safe}</p>"
             actions = [
                 f"<a href='action:copy:{msg_id}' title='Copy message'>📋</a>",
                 f"<a href='action:goto:{msg_id}' title='Go to start'>⬆</a>",
                 f"<a href='action:delete:{msg_id}' title='Delete message'>🗑</a>",
             ]
             parts.append(
-                f"<div class='bubble {cls}' id='{msg_id}'><a name='{msg_id}'></a>"
-                f"<span class='role'>{role.title()}:</span><br>{html}"
+                f"<div class='bubble {cls}' id='{msg_id}'><a name='{msg_id}' href='msg:{msg_id}'></a>"
+                f"<span class='role'>{role.title()}:</span><br>{rendered}"
                 f"<div class='actions'>{' | '.join(actions)}</div>"
                 f"</div>"
             )
             self._message_map[msg_id] = (role, content)
+        if self._condense_buffer or self._summary_content:
+            summary_text = self._summary_content or self._condense_buffer
+            actions = []
+            if self._summary_content:
+                actions = [
+                    "<a href='action:summary:accept' title='Accept condensed chat'>Accept</a>",
+                    "<a href='action:summary:reject' title='Reject condensed chat'>Reject</a>",
+                ]
+            summary_html = markdown(summary_text, extensions=["fenced_code", "tables"])
+            if self._is_plain_markdown(summary_html):
+                safe = html.escape(summary_text).replace("\n", "<br>")
+                summary_html = f"<p>{safe}</p>"
+            parts.append(
+                f"<div class='bubble summary' id='summary'><a name='summary'></a>"
+                f"<span class='role'>Summary:</span><br>{summary_html}"
+                f"{'<div class=\"actions\">' + ' | '.join(actions) + '</div>' if actions else ''}"
+                f"</div>"
+            )
         self.chat_view.setHtml("".join(parts))
         cursor = self.chat_view.textCursor()
         cursor.movePosition(QTextCursor.End)
         self.chat_view.setTextCursor(cursor)
 
+    def _is_plain_markdown(self, rendered_html: str) -> bool:
+        """Heuristic: detect if the markdown output is just a <p> block without rich tags."""
+        if not rendered_html.startswith("<p>") or not rendered_html.endswith("</p>"):
+            return False
+        heavy_tags = ("<ul", "<ol", "<pre", "<code", "<h", "<table", "<blockquote", "<li", "<hr", "<img", "<a ")
+        return not any(tag in rendered_html for tag in heavy_tags)
+
+    def _on_history_context_menu(self, pos: QtCore.QPoint) -> None:
+        anchor = self.chat_view.anchorAt(pos)
+        msg_id = None
+        if anchor:
+            if anchor.startswith("msg:"):
+                msg_id = anchor.split(":", 1)[1]
+            elif anchor.startswith("action:") and ":" in anchor:
+                msg_id = anchor.split(":")[-1]
+        if not msg_id and self._message_map:
+            msg_id = list(self._message_map.keys())[-1]
+        self._show_history_context_menu_for(msg_id, pos)
+
+    def _show_history_context_menu_for(self, msg_id: Optional[str], pos: QtCore.QPoint) -> None:
+        if not msg_id or msg_id not in self._message_map:
+            return
+        _, content = self._message_map[msg_id]
+        menu = QtWidgets.QMenu(self)
+        copy_act = menu.addAction("Copy Message")
+        copy_act.triggered.connect(lambda: QtWidgets.QApplication.clipboard().setText(content))
+        goto_act = menu.addAction("Go To Start")
+        goto_act.triggered.connect(lambda: self.chat_view.scrollToAnchor(msg_id))
+        del_act = menu.addAction("Delete Message")
+        del_act.triggered.connect(lambda: self._delete_message(msg_id))
+        menu.addSeparator()
+        actions_menu = menu.addMenu("AI Actions")
+        self._populate_ai_actions_menu(actions_menu, content)
+        menu.exec(self.chat_view.mapToGlobal(pos))
+
+    def _populate_ai_actions_menu(self, parent_menu: QtWidgets.QMenu, text: str) -> None:
+        """Build AI actions submenu mirroring the editor."""
+
+        def add_actions(menu, items):
+            for title, prompt in items:
+                act = menu.addAction(title)
+                act.triggered.connect(lambda t=title, p=prompt: self.send_action_message(t, p, text))
+
+        ai_menu_summarize = parent_menu.addMenu("Summarize")
+        add_actions(
+            ai_menu_summarize,
+            [
+                ("Short Summary", "Summarize this note in 3–5 sentences."),
+                ("Bullet Summary", "Summarize into bullet points."),
+                ("Key Insights", "Extract key insights / themes."),
+                ("TL;DR", "Give a one-line TL;DR."),
+                ("Meeting Minutes Style", "Convert to meeting minutes."),
+                ("Executive Summary", "Summarize for an executive audience."),
+            ],
+        )
+
+        ai_menu_rewrite = parent_menu.addMenu("Rewrite / Improve Writing")
+        add_actions(
+            ai_menu_rewrite,
+            [
+                ("Rewrite for Clarity", "Rewrite for clarity."),
+                ("Rewrite Concisely", "Rewrite concisely."),
+                ("Rewrite More Detailed", "Rewrite to be more detailed."),
+                ("Rewrite More Casual", "Rewrite in a more casual tone."),
+                ("Rewrite More Professional", "Rewrite in a more professional tone."),
+                ("Rewrite as Email", "Rewrite as an email."),
+                ("Rewrite as Action Plan", "Rewrite as an action plan."),
+                ("Rewrite as Journal Entry", "Rewrite as a journal entry."),
+                ("Rewrite as Tutorial / Guide", "Rewrite as a tutorial or guide."),
+            ],
+        )
+
+        ai_menu_translate = parent_menu.addMenu("Translate")
+        add_actions(
+            ai_menu_translate,
+            [
+                ("Auto-Detect → English", "Translate to English (auto-detect source language)."),
+                ("English → Spanish", "Translate to Spanish."),
+                ("English → French", "Translate to French."),
+                ("English → German", "Translate to German."),
+                ("English → Italian", "Translate to Italian."),
+                ("English → Chinese", "Translate to Chinese."),
+                ("English → Japanese", "Translate to Japanese."),
+                ("English → Korean", "Translate to Korean."),
+            ],
+        )
+
+        ai_menu_extract = parent_menu.addMenu("Extract")
+        add_actions(
+            ai_menu_extract,
+            [
+                ("Tasks / To-Dos", "Extract tasks or to-dos."),
+                ("Dates / Deadlines", "Extract dates or deadlines."),
+                ("Names & People", "Extract names and people."),
+                ("Action Items", "Extract action items."),
+                ("Questions", "Extract questions."),
+                ("Entities & Keywords", "Extract entities and keywords."),
+                ("Topics / Tags", "Extract topics or tags."),
+                ("Structured JSON Data", "Extract structured JSON data."),
+                ("Links / URLs mentioned", "Extract links or URLs mentioned."),
+            ],
+        )
+
+        ai_menu_analyze = parent_menu.addMenu("Analyze")
+        add_actions(
+            ai_menu_analyze,
+            [
+                ("Sentiment Analysis", "Analyze sentiment."),
+                ("Tone Analysis", "Analyze tone."),
+                ("Bias / Assumptions", "Identify biases or assumptions."),
+                ("Logical Fallacies", "Find logical fallacies."),
+                ("Risk Assessment", "Provide a risk assessment."),
+                ("Pros & Cons", "Provide pros and cons."),
+                ("Root-Cause Analysis", "Provide a root-cause analysis."),
+                ("SWOT Analysis", "Provide a SWOT analysis."),
+            ],
+        )
+
+        ai_menu_explain = parent_menu.addMenu("Explain")
+        add_actions(
+            ai_menu_explain,
+            [
+                ("Explain Like I’m 5", "Explain like I'm 5."),
+                ("Explain for a Beginner", "Explain for a beginner."),
+                ("Explain for an Expert", "Explain for an expert."),
+                ("Break Down Step-By-Step", "Break down step by step."),
+                ("Provide Examples", "Provide examples."),
+                ("Define All Concepts", "Define all concepts."),
+                ("Explain the Why Behind Each Step", "Explain the 'why' behind each step."),
+            ],
+        )
+
+        ai_menu_brainstorm = parent_menu.addMenu("Brainstorm")
+        add_actions(
+            ai_menu_brainstorm,
+            [
+                ("Brainstorm Ideas", "Brainstorm ideas."),
+                ("Brainstorm Questions to Ask", "Brainstorm questions to ask."),
+                ("Alternative Approaches", "Suggest alternative approaches."),
+                ("Solutions to the Problem", "Suggest solutions to the problem."),
+                ("Potential Risks / Pitfalls", "List potential risks or pitfalls."),
+                ("Related Topics I Should Explore", "List related topics to explore."),
+            ],
+        )
+
+        ai_menu_transform = parent_menu.addMenu("Transform")
+        add_actions(
+            ai_menu_transform,
+            [
+                ("Convert to Markdown", "Convert to Markdown."),
+                ("Convert to Bullet Points", "Convert to bullet points."),
+                ("Convert to Outline", "Convert to an outline."),
+                ("Convert to Table", "Convert to a table."),
+                ("Convert to Checklist", "Convert to a checklist."),
+                ("Convert to JSON", "Convert to JSON."),
+                ("Convert to CSV", "Convert to CSV."),
+                ("Convert to Code Comments", "Convert to code comments."),
+                ("Convert to Script (Python / JS / Bash)", "Convert to a script (Python / JS / Bash)."),
+                ("Convert to Slide Outline", "Convert to a slide outline."),
+            ],
+        )
+
+        ai_menu_research = parent_menu.addMenu("Research Helper")
+        add_actions(
+            ai_menu_research,
+            [
+                ("Generate Questions I Should Ask", "Generate questions I should ask."),
+                ("List Assumptions", "List assumptions."),
+                ("Find Missing Info", "Find missing information."),
+                ("Provide Historical Context", "Provide historical context."),
+                ("Predict Outcomes", "Predict outcomes."),
+                ("Summarize Top Debates Around This Topic", "Summarize top debates around this topic."),
+                ("Give Related References / Sources (non-live)", "Give related references or sources (non-live)."),
+            ],
+        )
+
+        ai_menu_creative = parent_menu.addMenu("Creative")
+        add_actions(
+            ai_menu_creative,
+            [
+                ("Rewrite as Story", "Rewrite as a story."),
+                ("Rewrite as Poem", "Rewrite as a poem."),
+                ("Rewrite as Dialogue", "Rewrite as a dialogue."),
+                ("Rewrite as Song", "Rewrite as a song."),
+                ("Rewrite as Fiction Scene", "Rewrite as a fiction scene."),
+                ("Turn This Into: characters / plot / setting", "Turn this into characters, plot, and setting."),
+            ],
+        )
+
+        ai_menu_chat = parent_menu.addMenu("Chat-About-This Note")
+        add_actions(
+            ai_menu_chat,
+            [
+                ("Ask the AI About This Note", "Ask the AI about this note."),
+                ("Continue Thought from Here", "Continue the thought from here."),
+                ("What Should I Do Next Based on This Note?", "What should I do next based on this note?"),
+                ("How Can I Improve This?", "How can I improve this?"),
+                ("Generate Next Section", "Generate the next section."),
+            ],
+        )
+
+        ai_menu_memory = parent_menu.addMenu("Memory & Linking")
+        add_actions(
+            ai_menu_memory,
+            [
+                ("Suggest Tags", "Suggest tags."),
+                ("Suggest Backlinks", "Suggest backlinks."),
+                ("Build Concept Map", "Build a concept map."),
+                ("Identify Repeating Themes Across Notes", "Identify repeating themes across notes."),
+            ],
+        )
+
+        ai_menu_privacy = parent_menu.addMenu("Privacy / Redaction")
+        add_actions(
+            ai_menu_privacy,
+            [
+                ("Remove Personal Info", "Remove personal information."),
+                ("Anonymize Names", "Anonymize names."),
+                ("Anonymize Companies", "Anonymize companies."),
+                ("Detect Sensitive Content", "Detect sensitive content."),
+            ],
+        )
+
+        ai_menu_debug = parent_menu.addMenu("Debug Note Content")
+        add_actions(
+            ai_menu_debug,
+            [
+                ("Check for Contradictions", "Check for contradictions."),
+                ("Check for Missing Steps", "Check for missing steps."),
+                ("Check for Ambiguous Claims", "Check for ambiguous claims."),
+                ("Check for Outdated Info", "Check for outdated information."),
+                ("Validate Against External Knowledge (optional)", "Validate against external knowledge."),
+            ],
+        )
+
     def _select_default_chat(self) -> None:
         chat = self.store.get_session_by_path("/", "chat")
         if not chat:
             chat = self.store._create_root_chat()  # type: ignore[attr-defined]
+            if chat:
+                default_server = self._config_default_server()
+                if default_server:
+                    self.store.update_session_last_server(chat["id"], default_server)
+                default_model = self._config_default_model()
+                if default_model:
+                    self.store.update_session_last_model(chat["id"], default_model)
         if chat:
             self.current_session_id = chat["id"]
             self._load_chat_tree(select_id=chat["id"])
@@ -1012,6 +1434,8 @@ class AIChatPanel(QtWidgets.QWidget):
         """Apply stored server/model defaults to UI for a chat session."""
         # Server
         last_server = session.get("last_server")
+        if not last_server:
+            last_server = self._config_default_server()
         if last_server:
             names = self.server_manager.list_server_names()
             if last_server in names:
@@ -1019,8 +1443,11 @@ class AIChatPanel(QtWidgets.QWidget):
                 self.server_combo.setCurrentText(last_server)
                 self.server_combo.blockSignals(False)
                 self.current_server = self.server_manager.get_server(last_server)
+                if session.get("last_server") != last_server and self.current_session_id:
+                    self.store.update_session_last_server(self.current_session_id, last_server)
         # Model
         server = self.current_server or self.server_manager.get_server(self.server_combo.currentText())
+        # Only update model dropdown from cache, do not fetch
         models = get_available_models(server)
         if not models:
             models = [server.get("default_model") or "gpt-3.5-turbo"]
@@ -1028,6 +1455,10 @@ class AIChatPanel(QtWidgets.QWidget):
         self.model_combo.clear()
         self.model_combo.addItems(models)
         desired_model = session.get("last_model")
+        if not desired_model:
+            cfg_model = self._config_default_model()
+            if cfg_model in models:
+                desired_model = cfg_model
         if desired_model in models:
             self.model_combo.setCurrentText(desired_model)
         elif server.get("default_model") in models:
@@ -1035,28 +1466,43 @@ class AIChatPanel(QtWidgets.QWidget):
         else:
             self.model_combo.setCurrentIndex(0)
         self.model_combo.blockSignals(False)
+        if self.current_session_id:
+            chosen = self.model_combo.currentText()
+            if session.get("last_model") != chosen:
+                self.store.update_session_last_model(self.current_session_id, chosen)
         # System prompt
         self.current_system_prompt = session.get("system_prompt")
         self._update_model_status()
 
-    def _refresh_server_dropdown(self) -> None:
+    def _refresh_server_dropdown(self, select_name: Optional[str] = None) -> None:
         names = self.server_manager.list_server_names()
         self.server_combo.blockSignals(True)
         self.server_combo.clear()
         self.server_combo.addItems(names)
-        desired = None
-        if self.current_session_id:
+        desired = select_name
+        if not desired and self.current_session_id:
             session = self.store.get_session_by_id(self.current_session_id)
             if session and session.get("last_server") in names:
                 desired = session.get("last_server")
         if not desired:
             desired = self.server_manager.get_active_server_name()
+        if not desired:
+            cfg_default = self._config_default_server()
+            if cfg_default in names:
+                desired = cfg_default
         if desired and desired in names:
             self.server_combo.setCurrentText(desired)
         elif names:
             self.server_combo.setCurrentIndex(0)
         self.server_combo.blockSignals(False)
-        self.current_server = self.server_manager.get_server(self.server_combo.currentText())
+        current_name = self.server_combo.currentText()
+        self.current_server = self.server_manager.get_server(current_name)
+        if current_name:
+            self.server_manager.set_active_server(current_name)
+            if self.current_session_id:
+                session = self.store.get_session_by_id(self.current_session_id) or {}
+                if session.get("last_server") != current_name:
+                    self.store.update_session_last_server(self.current_session_id, current_name)
 
     def _refresh_model_dropdown(self, initial: bool) -> None:
         server = self.current_server or {}
@@ -1072,6 +1518,10 @@ class AIChatPanel(QtWidgets.QWidget):
             if session and session.get("last_model") in models:
                 target = session.get("last_model")
         if not target:
+            cfg_model = self._config_default_model()
+            if cfg_model in models:
+                target = cfg_model
+        if not target:
             target = server.get("default_model") or models[0]
         if target in models:
             self.model_combo.setCurrentText(target)
@@ -1082,6 +1532,14 @@ class AIChatPanel(QtWidgets.QWidget):
             self.status_label.setText("Models refreshed.")
         self._update_model_status()
 
+    def _refresh_models_from_server(self) -> None:
+        if not self.current_server:
+            QtWidgets.QMessageBox.warning(self, "No Server", "Please select a server to refresh models.")
+            return
+        models = fetch_and_cache_models(self.current_server)
+        self._refresh_model_dropdown(initial=False)
+        self.status_label.setText(f"Models refreshed from server. {len(models)} models cached.")
+
     def _on_server_selected(self) -> None:
         selected_name = self.server_combo.currentText()
         server = self.server_manager.get_server(selected_name)
@@ -1090,21 +1548,48 @@ class AIChatPanel(QtWidgets.QWidget):
             return
         self.current_server = server
         self.server_manager.set_active_server(selected_name)
+        if self.current_session_id:
+            self.store.update_session_last_server(self.current_session_id, selected_name)
         self._refresh_model_dropdown(initial=False)
         self.status_label.setText(f"Switched to server: {selected_name}")
         self._update_model_status()
 
+    def _on_model_selected(self) -> None:
+        """Persist chosen model for the current chat."""
+        if self.current_session_id:
+            self.store.update_session_last_model(self.current_session_id, self.model_combo.currentText())
+        self._update_model_status()
+
     def _manage_servers(self) -> None:
-        dialog = ServerConfigDialog(self, self.current_server)
+        dialog = ServerConfigDialog(self, self.current_server, existing_names=self.server_manager.list_server_names())
         if dialog.exec() == QtWidgets.QDialog.Accepted and dialog.result:
             try:
                 new_server = self.server_manager.add_or_update_server(dialog.result)
+                self._refresh_server_dropdown(select_name=new_server["name"])
+                self.current_server = new_server
+                self._refresh_model_dropdown(initial=True)
+                dialog.accept()  # Ensure dialog closes
             except ValueError as exc:
                 QtWidgets.QMessageBox.critical(self, "Server Exists", str(exc))
+                dialog.reject()
                 return
-            self._refresh_server_dropdown()
-            self.current_server = new_server
-            self._refresh_model_dropdown(initial=True)
+
+    def _add_server(self) -> None:
+        dialog = ServerConfigDialog(self, None, existing_names=self.server_manager.list_server_names())
+        if dialog.exec() == QtWidgets.QDialog.Accepted and dialog.result:
+            try:
+                new_server = self.server_manager.add_or_update_server(dialog.result)
+                # Fetch and cache models for the new server
+                fetch_and_cache_models(new_server)
+                self._refresh_server_dropdown(select_name=new_server["name"])
+                self.current_server = new_server
+                self._refresh_model_dropdown(initial=True)
+                self.status_label.setText(f"Added server: {new_server['name']} (models cached)")
+                dialog.accept()  # Ensure dialog closes
+            except ValueError as exc:
+                QtWidgets.QMessageBox.critical(self, "Server Exists", str(exc))
+                dialog.reject()
+                return
 
     def _ensure_active_chat(self) -> bool:
         if self.current_session_id:
@@ -1123,10 +1608,49 @@ class AIChatPanel(QtWidgets.QWidget):
 
     def send_action_message(self, action: str, prompt: str, text: str) -> None:
         """Send a structured action message into the chat."""
-        content = f"{action}:\n{prompt}\n\n{text}"
-        self._start_send(content)
+        content = f"[{action}] {prompt}\n\n{text}"
+        extra_system = f"AI Action: {action}\nInstruction: {prompt}"
+        self._start_send(content, extra_system=extra_system)
 
-    def _start_send(self, content: str) -> None:
+    def _condense_chat(self) -> None:
+        """Send the full chat history through the condense prompt."""
+        if self._condense_worker:
+            return
+        if not self.current_server:
+            QtWidgets.QMessageBox.critical(self, "Server", "Please configure a server before condensing.")
+            return
+        if not self._ensure_active_chat():
+            QtWidgets.QMessageBox.critical(self, "Chat", "Could not find or create a chat.")
+            return
+        if not self.messages:
+            QtWidgets.QMessageBox.information(self, "Condense", "No messages to condense yet.")
+            return
+        # Refresh prompt at use-time so edits take effect
+        self.condense_prompt = self._load_condense_prompt()
+        history_source = self.messages
+        if self.current_session_id:
+            try:
+                history_source = self.store.get_messages(self.current_session_id)
+            except Exception:
+                history_source = self.messages
+        history_text = "\n\n".join(f"{role.upper()}: {content}" for role, content in history_source)
+        blocks = [{"role": "system", "content": self.condense_prompt}, {"role": "user", "content": history_text}]
+        self._condense_buffer = ""
+        self._summary_content = None
+        self._render_messages()
+        try:
+            self._condense_worker = ApiWorker(self.current_server, blocks, self.model_combo.currentText(), stream=True)
+            self._condense_worker.chunk.connect(self._handle_condense_chunk)
+            self._condense_worker.finished.connect(self._handle_condense_finished)
+            self._condense_worker.failed.connect(self._handle_condense_error)
+            self._condense_worker.start()
+            self.status_label.setText("Condensing chat…")
+            self.condense_btn.setEnabled(False)
+        except Exception as exc:
+            self._condense_worker = None
+            QtWidgets.QMessageBox.critical(self, "Condense", str(exc))
+
+    def _start_send(self, content: str, extra_system: Optional[str] = None) -> None:
         content = (content or "").strip()
         if not content:
             return
@@ -1144,8 +1668,13 @@ class AIChatPanel(QtWidgets.QWidget):
         self._render_messages()
         try:
             blocks = [{"role": role, "content": text} for role, text in self.messages[:-1]]
+            merged_systems: List[str] = []
             if self.current_system_prompt:
-                blocks.insert(0, {"role": "system", "content": self.current_system_prompt})
+                merged_systems.append(self.current_system_prompt)
+            if extra_system:
+                merged_systems.append(extra_system)
+            if merged_systems:
+                blocks.insert(0, {"role": "system", "content": "\n\n".join(merged_systems)})
             self._api_worker = ApiWorker(self.current_server, blocks, self.model_combo.currentText(), stream=True)
             self._api_worker.chunk.connect(lambda chunk, idx=assistant_index: self._handle_chunk(idx, chunk))
             self._api_worker.finished.connect(lambda full, idx=assistant_index: self._handle_finished(idx, full))
@@ -1178,6 +1707,26 @@ class AIChatPanel(QtWidgets.QWidget):
         self._update_model_status()
         self.send_btn.setEnabled(True)
         self._api_worker = None
+
+    def _handle_condense_chunk(self, chunk: str) -> None:
+        self._condense_buffer += chunk
+        self._render_messages()
+
+    def _handle_condense_finished(self, full: str) -> None:
+        self._summary_content = full or self._condense_buffer
+        self._condense_buffer = ""
+        self._condense_worker = None
+        self.condense_btn.setEnabled(True)
+        self._render_messages()
+        self.status_label.setText("Condensed chat ready.")
+
+    def _handle_condense_error(self, err: str) -> None:
+        self._condense_buffer = ""
+        self._summary_content = None
+        self._condense_worker = None
+        self.condense_btn.setEnabled(True)
+        self._render_messages()
+        self.status_label.setText(f"Condense failed: {err}")
 
     def _handle_error(self, err: str) -> None:
         if self.messages and self.messages[-1][0] == "assistant" and not self.messages[-1][1]:
@@ -1225,6 +1774,12 @@ class AIChatPanel(QtWidgets.QWidget):
             parts = href.split(":")
             if len(parts) >= 3:
                 action, msg_id = parts[1], parts[2]
+                if action == "summary":
+                    if msg_id == "accept":
+                        self._accept_summary()
+                    elif msg_id == "reject":
+                        self._reject_summary()
+                    return
                 if action == "copy":
                     content = self._message_map.get(msg_id, ("", ""))[1]
                     QtWidgets.QApplication.clipboard().setText(content)
@@ -1233,8 +1788,33 @@ class AIChatPanel(QtWidgets.QWidget):
                 elif action == "delete":
                     self._delete_message(msg_id)
             return
+        if href.startswith("msg:"):
+            msg_id = href.split(":", 1)[1]
+            self._show_history_context_menu_for(msg_id, self.mapFromGlobal(QCursor.pos()))
+            return
         if href.startswith("http://") or href.startswith("https://"):
             QDesktopServices.openUrl(QUrl(href))
+
+    def _accept_summary(self) -> None:
+        """Replace history with condensed summary."""
+        if not self.current_session_id or not self._summary_content:
+            return
+        summary_text = self._summary_content
+        try:
+            self.store.clear_chat(self.current_session_id)
+            self.store.save_message(self.current_session_id, "assistant", summary_text)
+        except Exception:
+            pass
+        self.messages = [("assistant", summary_text)]
+        self._condense_buffer = ""
+        self._summary_content = None
+        self._render_messages()
+        self.status_label.setText("Chat condensed.")
+
+    def _reject_summary(self) -> None:
+        self._condense_buffer = ""
+        self._summary_content = None
+        self._render_messages()
 
     def _update_model_status(self) -> None:
         current_model = self.model_combo.currentText()
@@ -1302,32 +1882,70 @@ class AIChatPanel(QtWidgets.QWidget):
         if not ok or not name.strip():
             return
         chat = self.store.create_named_chat(folder_path, name.strip())
+        # Apply default server/model preferences to the new chat
+        default_server = self._config_default_server()
+        if default_server:
+            self.store.update_session_last_server(chat["id"], default_server)
+            if default_server in self.server_manager.list_server_names():
+                self.server_combo.setCurrentText(default_server)
+                self.current_server = self.server_manager.get_server(default_server)
+        models = get_available_models(self.current_server or {})
+        default_model = self._config_default_model()
+        if default_model and default_model in models:
+            self.store.update_session_last_model(chat["id"], default_model)
+        elif models:
+            self.store.update_session_last_model(chat["id"], models[0])
         self._load_chat_tree(select_id=chat["id"])
         self._load_chat_messages(chat["id"])
         self.status_label.setText(f"Created chat '{chat['name']}'")
 
     def _reset_chat_history(self) -> None:
-        if not self.current_session_id:
-            return
-        confirm = QtWidgets.QMessageBox.question(
-            self,
-            "Clear Chat",
-            "Are you sure you want to clear this chat history?",
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-            QtWidgets.QMessageBox.No,
-        )
-        if confirm != QtWidgets.QMessageBox.Yes:
-            return
         try:
+            if not self.current_session_id:
+                return
+            confirm = QtWidgets.QMessageBox.question(
+                self,
+                "Clear Chat",
+                "Are you sure you want to clear this chat history?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+            if confirm != QtWidgets.QMessageBox.Yes:
+                return
+            # Stop any active workers to avoid callbacks during reset
+            try:
+                if self._api_worker:
+                    self._api_worker.finished.disconnect()
+                    self._api_worker.failed.disconnect()
+                    self._api_worker.chunk.disconnect()
+            except Exception:
+                pass
+            try:
+                if self._condense_worker:
+                    self._condense_worker.finished.disconnect()
+                    self._condense_worker.failed.disconnect()
+                    self._condense_worker.chunk.disconnect()
+            except Exception:
+                pass
+            self._api_worker = None
+            self._condense_worker = None
+
             self.store.clear_chat(self.current_session_id)
             # Preserve last model/server for continuity
             if self.current_server:
                 self.store.update_session_last_model(self.current_session_id, self.model_combo.currentText())
                 self.store.update_session_last_server(self.current_session_id, self.current_server.get("name", ""))
+            self._condense_buffer = ""
+            self._summary_content = None
             self._load_chat_messages(self.current_session_id)
             self.status_label.setText("Chat history cleared.")
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "Reset Chat", f"Failed to clear chat:\n{exc}")
+        except BaseException as exc:  # catch SystemExit/KeyboardInterrupt too to keep app alive
+            print(f"[AIChat][reset] error clearing chat: {exc}")
+            try:
+                QtWidgets.QMessageBox.critical(self, "Reset Chat", f"Failed to clear chat:\n{exc}")
+            except Exception:
+                pass
+            return
 
     def _load_system_prompts(self):
         self.system_prompts = []

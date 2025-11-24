@@ -145,6 +145,30 @@ def save_enable_ai_chats(enabled: bool) -> None:
     _update_global_config({"enable_ai_chats": bool(enabled)})
 
 
+def load_default_ai_server() -> Optional[str]:
+    """Load preferred default AI server for new chats."""
+    payload = _read_global_config()
+    server = payload.get("default_ai_server")
+    return str(server) if server else None
+
+
+def save_default_ai_server(name: Optional[str]) -> None:
+    """Persist preferred default AI server for new chats."""
+    _update_global_config({"default_ai_server": name})
+
+
+def load_default_ai_model() -> Optional[str]:
+    """Load preferred default AI model for new chats."""
+    payload = _read_global_config()
+    model = payload.get("default_ai_model")
+    return str(model) if model else None
+
+
+def save_default_ai_model(model: Optional[str]) -> None:
+    """Persist preferred default AI model for new chats."""
+    _update_global_config({"default_ai_model": model})
+
+
 def load_toc_collapsed() -> bool:
     """Return whether the table-of-contents panel should start collapsed."""
     if not GLOBAL_CONFIG.exists():

@@ -2,8 +2,15 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QCheckBox, QDialogButtonBox, 
-    QLabel, QPushButton, QHBoxLayout
+    QDialog,
+    QVBoxLayout,
+    QCheckBox,
+    QDialogButtonBox,
+    QLabel,
+    QPushButton,
+    QHBoxLayout,
+    QMessageBox,
+    QComboBox,
 )
 
 from zimx.app import config
@@ -18,11 +25,11 @@ class PreferencesDialog(QDialog):
         self.setModal(True)
         self.resize(450, 250)
         
-        layout = QVBoxLayout(self)
+        self.layout = QVBoxLayout(self)
         
         # Vi-mode block cursor setting
         vi_section = QLabel("<b>Vi Mode</b>")
-        layout.addWidget(vi_section)
+        self.layout.addWidget(vi_section)
         
         self.vi_block_cursor_checkbox = QCheckBox("Use Vi Mode Block Cursor")
         self.vi_block_cursor_checkbox.setChecked(config.load_vi_block_cursor_enabled())
@@ -30,45 +37,154 @@ class PreferencesDialog(QDialog):
             "Show a colored block cursor when vi-mode is active.\n"
             "Disable this if you experience flickering on Linux/Cinnamon."
         )
-        layout.addWidget(self.vi_block_cursor_checkbox)
+        self.layout.addWidget(self.vi_block_cursor_checkbox)
 
         # Features
-        layout.addSpacing(10)
+        self.layout.addSpacing(10)
         features_label = QLabel("<b>Features</b>")
-        layout.addWidget(features_label)
+        self.layout.addWidget(features_label)
         self.enable_ai_chats_checkbox = QCheckBox("Enable AI Chats")
         self.enable_ai_chats_checkbox.setChecked(config.load_enable_ai_chats())
         self.enable_ai_chats_checkbox.stateChanged.connect(self._warn_restart_required)
-        layout.addWidget(self.enable_ai_chats_checkbox)
-        
-        layout.addSpacing(15)
-        
-        # Vault maintenance section
-        vault_section = QLabel("<b>Vault Maintenance</b>")
-        layout.addWidget(vault_section)
-        
-        rebuild_layout = QHBoxLayout()
-        rebuild_label = QLabel("Rebuild search index:")
-        rebuild_layout.addWidget(rebuild_label)
-        
-        self.rebuild_button = QPushButton("Rebuild Index")
-        self.rebuild_button.setToolTip(
-            "Rebuild the search index for all pages in the vault.\n"
-            "Use this if search results are incorrect or after manual file changes."
-        )
-        self.rebuild_button.clicked.connect(self._on_rebuild_clicked)
-        rebuild_layout.addWidget(self.rebuild_button)
-        rebuild_layout.addStretch(1)
-        
-        layout.addLayout(rebuild_layout)
-        
-        layout.addStretch(1)
-        
-        # OK/Cancel buttons
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
+        self.layout.addWidget(self.enable_ai_chats_checkbox)
+
+        # Manage Server button (after Enable AI Chats)
+        self.manage_server_btn = QPushButton("Manage Servers")
+        self.manage_server_btn.clicked.connect(self._open_manage_server_dialog)
+        self.layout.addWidget(self.manage_server_btn)
+
+        # Default server/model section
+        defaults_label = QLabel("<b>Default Server and Model</b>")
+        self.layout.addWidget(defaults_label)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Server:"))
+        self.default_server_combo = QComboBox()
+        self.default_server_combo.currentIndexChanged.connect(self._on_default_server_changed)
+        row.addWidget(self.default_server_combo, 1)
+        self.layout.addLayout(row)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Model:"))
+        self.default_model_combo = QComboBox()
+        row2.addWidget(self.default_model_combo, 1)
+        self.layout.addLayout(row2)
+
+        self._load_default_server_model()
+
+        # Dialog buttons
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(self.accept)
+        btn_box.rejected.connect(self.reject)
+        self.layout.addWidget(btn_box)
+
+    def _open_manage_server_dialog(self):
+        # Prevent duplicate Manage Server buttons by not adding UI elements here
+        from zimx.app.ui.ai_chat_panel import ServerManager, ServerConfigDialog
+        from PySide6.QtWidgets import QDialog, QComboBox, QPushButton, QHBoxLayout, QVBoxLayout, QLabel, QWidget
+        from PySide6.QtCore import Qt
+
+        # Create dialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Manage Servers")
+        dlg.setModal(True)
+        dlg.resize(480, 220)
+
+        layout = QVBoxLayout(dlg)
+        row = QHBoxLayout()
+        label = QLabel("Server:")
+        row.addWidget(label)
+        server_manager = ServerManager()
+        servers = server_manager.load_servers()
+        server_names = [s["name"] for s in servers]
+        combo = QComboBox()
+        combo.addItems(server_names + ["Add New..."])
+        row.addWidget(combo, 1)
+        edit_btn = QPushButton("Edit")
+        row.addWidget(edit_btn)
+        add_btn = QPushButton("Add New")
+        row.addWidget(add_btn)
+        layout.addLayout(row)
+
+        # Info label
+        info_label = QLabel("")
+        layout.addWidget(info_label)
+
+        def open_server_dialog(existing=None):
+            dialog = ServerConfigDialog(dlg, existing, existing_names=server_manager.list_server_names())
+            if dialog.exec() == QDialog.Accepted and dialog.result:
+                try:
+                    new_server = server_manager.add_or_update_server(dialog.result)
+                    # Refresh combo
+                    combo.clear()
+                    servers2 = server_manager.load_servers()
+                    combo.addItems([s["name"] for s in servers2] + ["Add New..."])
+                    combo.setCurrentText(new_server["name"])
+                    info_label.setText(f"Saved server: {new_server['name']}")
+                except Exception as exc:
+                    info_label.setText(f"Error: {exc}")
+
+        def on_combo_changed(idx):
+            if combo.currentText() == "Add New...":
+                open_server_dialog(None)
+        combo.currentIndexChanged.connect(on_combo_changed)
+
+        def on_edit():
+            name = combo.currentText()
+            if name == "Add New...":
+                open_server_dialog(None)
+            else:
+                server = server_manager.get_server(name)
+                open_server_dialog(server)
+        edit_btn.clicked.connect(on_edit)
+        add_btn.clicked.connect(lambda: open_server_dialog(None))
+
+        # OK/Cancel
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        dlg.exec()
+
+    def _load_default_server_model(self):
+        """Populate default server/model dropdowns based on configured servers."""
+        try:
+            from zimx.app.ui.ai_chat_panel import ServerManager, get_available_models
+
+            mgr = ServerManager()
+            servers = mgr.load_servers()
+            names = [srv["name"] for srv in servers]
+            self.default_server_combo.clear()
+            self.default_server_combo.addItems(names)
+            desired_server = config.load_default_ai_server()
+            if desired_server and desired_server in names:
+                self.default_server_combo.setCurrentText(desired_server)
+            elif names:
+                self.default_server_combo.setCurrentIndex(0)
+            self._refresh_default_models(mgr)
+        except Exception:
+            self.default_server_combo.clear()
+            self.default_model_combo.clear()
+
+    def _refresh_default_models(self, mgr=None):
+        try:
+            from zimx.app.ui.ai_chat_panel import ServerManager, get_available_models
+
+            manager = mgr or ServerManager()
+            server = manager.get_server(self.default_server_combo.currentText())
+            models = get_available_models(server)
+            self.default_model_combo.clear()
+            self.default_model_combo.addItems(models)
+            desired_model = config.load_default_ai_model()
+            if desired_model and desired_model in models:
+                self.default_model_combo.setCurrentText(desired_model)
+            elif models:
+                self.default_model_combo.setCurrentIndex(0)
+        except Exception:
+            self.default_model_combo.clear()
+
+    def _on_default_server_changed(self):
+        self._refresh_default_models()
     
     def _on_rebuild_clicked(self):
         """Handle rebuild index button click."""
@@ -80,6 +196,8 @@ class PreferencesDialog(QDialog):
         """Save preferences when OK is clicked."""
         config.save_vi_block_cursor_enabled(self.vi_block_cursor_checkbox.isChecked())
         config.save_enable_ai_chats(self.enable_ai_chats_checkbox.isChecked())
+        config.save_default_ai_server(self.default_server_combo.currentText() or None)
+        config.save_default_ai_model(self.default_model_combo.currentText() or None)
         super().accept()
 
     def _warn_restart_required(self) -> None:
