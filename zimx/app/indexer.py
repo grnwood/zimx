@@ -42,7 +42,34 @@ def index_page(path: str, content: str) -> bool:
         return False
 
     tags = sorted(set(TAG_PATTERN.findall(content)))
-    link_targets = _extract_link_targets(content)
+    link_targets = _extract_link_targets(content, path)
+    # Automatically add a link from the parent page to this page if it is a child
+    parent = Path(path).parent
+    if parent and parent.name and parent.as_posix() != ".":
+        parent_file = parent / f"{parent.name}{PAGE_SUFFIX}"
+        parent_path = f"/{parent_file.as_posix()}"
+        # Only add if not already present
+        if path not in link_targets:
+            # Add backlink from parent to this page
+            try:
+                # Read parent content
+                from zimx.app import config as _config
+                vault_root = _config.get_vault_root()
+                if vault_root:
+                    abs_parent = Path(vault_root) / parent_path.lstrip("/")
+                    if abs_parent.exists():
+                        with open(abs_parent, "r", encoding="utf-8") as f:
+                            parent_content = f.read()
+                        # Add link if not present
+                        if path not in _extract_link_targets(parent_content, parent_path):
+                            # Insert a link at the end and re-index parent
+                            new_content = parent_content.rstrip() + f"\n[{path}|]"
+                            with open(abs_parent, "w", encoding="utf-8") as f:
+                                f.write(new_content)
+                            # Recursively index parent
+                            index_page(parent_path, new_content)
+            except Exception:
+                pass
     links = sorted(link_targets)
     tasks = extract_tasks(path, content)
     title = derive_title(path, content)
@@ -59,7 +86,7 @@ def derive_title(path: str, content: str) -> str:
     return Path(path).stem or Path(path).name
 
 
-def _extract_link_targets(content: str) -> Set[str]:
+def _extract_link_targets(content: str, current_path: Optional[str] = None) -> Set[str]:
     """Extract page link targets from markdown and wiki-style links."""
     targets: Set[str] = set()
     for raw in MARKDOWN_LINK_PATTERN.findall(content):
@@ -68,8 +95,6 @@ def _extract_link_targets(content: str) -> Set[str]:
             targets.add(normalized)
     for match in WIKI_LINK_PATTERN.finditer(content):
         raw = match.group("link")
-        # Skip wiki-like text that is immediately followed by "(...)" to avoid
-        # counting markdown links twice.
         end = match.end()
         if end < len(content) and content[end] == "(":
             continue
@@ -81,14 +106,18 @@ def _extract_link_targets(content: str) -> Set[str]:
     camel_pattern = re.compile(r"\+(?P<link>[A-Za-z][\w]*)")
     for match in camel_pattern.finditer(content):
         link = match.group("link")
-        # Convert CamelCase to a vault-relative path (relative to current page's folder)
-        # Here, we treat CamelCase as a page in the same folder, so just add the .txt suffix
         if link:
-            # This will be normalized to "/PageName/PageName.txt"
-            page_path = f"/{link}/{link}{PAGE_SUFFIX}"
+            # Resolve relative to current page's folder
+            if current_path:
+                parent = Path(current_path).parent
+                if parent.parts:
+                    page_path = f"/{parent.as_posix()}/{link}{PAGE_SUFFIX}"
+                else:
+                    page_path = f"/{link}{PAGE_SUFFIX}"
+            else:
+                page_path = f"/{link}{PAGE_SUFFIX}"
             targets.add(page_path)
     return targets
-
 
 def _normalize_page_link(link: str) -> Optional[str]:
     """Normalize a link target to a vault-relative page path with .txt suffix.

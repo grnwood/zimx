@@ -530,6 +530,39 @@ class MarkdownHighlighter(QSyntaxHighlighter):
 
 
 class MarkdownEditor(QTextEdit):
+    def _convert_camelcase_links(self, text: str) -> str:
+        """Convert +CamelCase links to colon-style links [:Path:Path:Page|+CamelCase] using current page context, but only if not already inside a [link|label]."""
+        import re
+        from .path_utils import path_to_colon
+        current_path = self.current_relative_path() if hasattr(self, 'current_relative_path') else None
+        # Find all [link|label] spans so we can skip +CamelCase in the label part
+        link_spans = []
+        for m in re.finditer(r'\[([^\]|]+)\|([^\]]*)\]', text):
+            # Mark the label part (after the |)
+            link_start = m.start()
+            pipe = text.find('|', link_start, m.end())
+            if pipe != -1:
+                label_start = pipe + 1
+                link_spans.append((label_start, m.end() - 1))  # exclude the closing ]
+        def is_in_label(pos):
+            return any(start <= pos < end for start, end in link_spans)
+        def replacer(match):
+            start = match.start()
+            if is_in_label(start):
+                return match.group(0)  # Don't replace if in label part
+            link = match.group('link')
+            label = link  # Just the page name, no plus
+            if current_path:
+                base = current_path.strip('/').rsplit('/', 1)[0] if '/' in current_path else ''
+                if base:
+                    colon_path = path_to_colon(f"/{base}/{link}/{link}.txt")
+                else:
+                    colon_path = path_to_colon(f"/{link}/{link}.txt")
+            else:
+                colon_path = path_to_colon(f"/{link}/{link}.txt")
+            return f"[:{colon_path}|{label}]"
+        # Replace +CamelCase only if not in the label part of a [link|label]
+        return re.sub(r'\+(?P<link>[A-Z][\w]*)', replacer, text)
     imageSaved = Signal(str)
     focusLost = Signal()
     cursorMoved = Signal(int)
@@ -709,6 +742,8 @@ class MarkdownEditor(QTextEdit):
     def to_markdown(self) -> str:
         markdown = self._doc_to_markdown()
         markdown = self._normalize_markdown_images(markdown)
+        # Convert +CamelCase links to colon-style links before saving
+        markdown = self._convert_camelcase_links(markdown)
         return self._from_display(markdown)
 
     def set_font_point_size(self, size: int) -> None:

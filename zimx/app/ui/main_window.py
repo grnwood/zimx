@@ -1792,13 +1792,12 @@ class MainWindow(QMainWindow):
                 return
             rel_current = Path(self.current_path.lstrip("/"))
             parent_folder = rel_current.parent
-            target_rel = parent_folder / target_name if parent_folder.parts else Path(target_name)
-            rel_string = target_rel.as_posix()
-            folder_path = f"/{rel_string}" if rel_string else "/"
-            target_file = self._folder_to_file_path(folder_path)
-            if not target_file:
-                return
-            target_file = self._resolve_case_insensitive_rel_path(target_file)
+            # Always create a subfolder named after the link, and place the file inside it
+            if parent_folder.parts:
+                file_path = f"/{parent_folder.as_posix()}/{target_name}/{target_name}{PAGE_SUFFIX}"
+            else:
+                file_path = f"/{target_name}/{target_name}{PAGE_SUFFIX}"
+            target_file = self._resolve_case_insensitive_rel_path(file_path)
             folder_path = self._file_path_to_folder(target_file)
             # Check if file already exists before creating
             file_existed = self.vault_root and Path(self.vault_root, target_file.lstrip("/")).exists()
