@@ -25,3 +25,6 @@ sample-vault/.zimx/settings.db
 dev-assets/vault-sample
 dev-assets/vault-sample/**
 slipstream/
+.continue/agents/new-config.yaml
+.continue/mcpServers/new-mcp-server.yaml
+dev-assets/specs/slipstream-ai.md
