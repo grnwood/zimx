@@ -113,6 +113,38 @@ def save_vi_block_cursor_enabled(enabled: bool) -> None:
     _update_global_config({"vi_block_cursor": enabled})
 
 
+def load_ai_chat_font_size(default: int = 13) -> int:
+    """Load preferred font size for AI chat panel."""
+    if not GLOBAL_CONFIG.exists():
+        return default
+    try:
+        payload = json.loads(GLOBAL_CONFIG.read_text(encoding="utf-8"))
+        return int(payload.get("ai_chat_font_size", default))
+    except Exception:
+        return default
+
+
+def save_ai_chat_font_size(size: int) -> None:
+    """Persist preferred font size for AI chat panel."""
+    _update_global_config({"ai_chat_font_size": int(size)})
+
+
+def load_enable_ai_chats() -> bool:
+    """Load preference for enabling AI Chats tab. Defaults to False."""
+    if not GLOBAL_CONFIG.exists():
+        return False
+    try:
+        payload = json.loads(GLOBAL_CONFIG.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    return bool(payload.get("enable_ai_chats", False))
+
+
+def save_enable_ai_chats(enabled: bool) -> None:
+    """Save preference for enabling AI Chats tab."""
+    _update_global_config({"enable_ai_chats": bool(enabled)})
+
+
 def load_toc_collapsed() -> bool:
     """Return whether the table-of-contents panel should start collapsed."""
     if not GLOBAL_CONFIG.exists():

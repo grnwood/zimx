@@ -7,3 +7,4 @@ pydantic>=2.7
 pytest>=8.2
 
 keyboard>=0.13
+markdown>=3.5

@@ -543,6 +543,8 @@ class MarkdownEditor(QTextEdit):
     insertDateRequested = Signal()
     attachmentDropped = Signal(str)  # Emits filename when a file is dropped into the editor
     backlinksRequested = Signal(str)  # Emits current page path when backlinks are requested
+    aiChatRequested = Signal(str)  # Emits current page path when AI Chat is requested
+    aiActionRequested = Signal(str, str, str)  # title, prompt, text
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -554,6 +556,8 @@ class MarkdownEditor(QTextEdit):
         self._vi_last_cursor_pos: int = -1
         self._heading_outline: list[dict] = []
         self._dialog_block_input: bool = False
+        self._ai_actions_enabled: bool = True
+        self._ai_chat_available: bool = False
         self.setPlaceholderText("Open a Markdown file to begin editing…")
         self.setAcceptRichText(True)
         self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(" "))
@@ -1370,6 +1374,14 @@ class MarkdownEditor(QTextEdit):
             # Add Open File Location action (delegates to main window)
             open_loc_action = menu.addAction("Open File Location")
             open_loc_action.triggered.connect(lambda: self.openFileLocationRequested.emit(self._current_path))
+            ai_label = "AI: Go To Chat" if self._ai_chat_available else "AI Chat: Start Chat"
+            ai_chat_action = menu.addAction(ai_label)
+            ai_chat_action.triggered.connect(lambda: self.aiChatRequested.emit(self._current_path))
+            if self._ai_actions_enabled:
+                selection = self.textCursor().selectedText()
+                full_text = self.toPlainText()
+                if selection or full_text:
+                    self._populate_ai_actions_menu(menu, selection or full_text)
             
             menu.exec(event.globalPos())
             return
@@ -2860,3 +2872,256 @@ class MarkdownEditor(QTextEdit):
         if not ok:
             return
         self._resize_image_by_name(image_name, width)
+
+    def set_ai_actions_enabled(self, enabled: bool) -> None:
+        """Enable/disable AI actions menu entries."""
+        self._ai_actions_enabled = bool(enabled)
+
+    def set_ai_chat_available(self, available: bool) -> None:
+        """Toggle whether a chat already exists for the current page."""
+        self._ai_chat_available = bool(available)
+
+    def _populate_ai_actions_menu(self, parent_menu, text: str) -> None:
+        """Build the hierarchical AI Actions menu."""
+        def add_actions(menu, items):
+            for title, prompt in items:
+                act = menu.addAction(title)
+                act.triggered.connect(lambda t=title, p=prompt: self.aiActionRequested.emit(t, p, text))
+
+        ai_menu = parent_menu.addMenu("AI Actions")
+
+        ai_menu_summarize = ai_menu.addMenu("Summarize")
+        add_actions(
+            ai_menu_summarize,
+            [
+                ("Short Summary", "Summarize this note in 3–5 sentences."),
+                ("Bullet Summary", "Summarize into bullet points."),
+                ("Key Insights", "Extract key insights / themes."),
+                ("TL;DR", "Give a one-line TL;DR."),
+                ("Meeting Minutes Style", "Convert to meeting minutes."),
+                ("Executive Summary", "Summarize for an executive audience."),
+            ],
+        )
+
+        ai_menu_rewrite = ai_menu.addMenu("Rewrite / Improve Writing")
+        add_actions(
+            ai_menu_rewrite,
+            [
+                ("Rewrite for Clarity", "Rewrite for clarity."),
+                ("Rewrite Concisely", "Rewrite concisely."),
+                ("Rewrite More Detailed", "Rewrite with more detail."),
+                ("Rewrite More Casual", "Rewrite in a more casual tone."),
+                ("Rewrite More Professional", "Rewrite in a more professional tone."),
+                ("Rewrite as Email", "Rewrite this as an email."),
+                ("Rewrite as Action Plan", "Rewrite as an action plan."),
+                ("Rewrite as Journal Entry", "Rewrite as a journal entry."),
+                ("Rewrite as Tutorial / Guide", "Rewrite as a tutorial / guide."),
+            ],
+        )
+
+        ai_menu_translate = ai_menu.addMenu("Translate")
+        add_actions(
+            ai_menu_translate,
+            [
+                ("Auto-Detect → English", "Translate (auto-detect) to English."),
+                ("English → Spanish", "Translate from English to Spanish."),
+                ("English → French", "Translate from English to French."),
+                ("English → German", "Translate from English to German."),
+                ("English → Italian", "Translate from English to Italian."),
+                ("English → Chinese", "Translate from English to Chinese."),
+                ("English → Japanese", "Translate from English to Japanese."),
+                ("English → Korean", "Translate from English to Korean."),
+            ],
+        )
+        custom_lang = ai_menu_translate.addAction("Custom Language…")
+        custom_lang.triggered.connect(lambda: self._prompt_custom_translation(text))
+
+        ai_menu_extract = ai_menu.addMenu("Extract")
+        add_actions(
+            ai_menu_extract,
+            [
+                ("Tasks / To-Dos", "Extract tasks / to-dos."),
+                ("Dates / Deadlines", "Extract dates and deadlines."),
+                ("Names & People", "Extract names and people."),
+                ("Action Items", "Extract action items."),
+                ("Questions", "Extract questions."),
+                ("Entities & Keywords", "Extract entities and keywords."),
+                ("Topics / Tags", "Extract topics or tags."),
+                ("Structured JSON Data", "Extract structured JSON data."),
+                ("Links / URLs mentioned", "Extract links / URLs mentioned."),
+            ],
+        )
+
+        ai_menu_analyze = ai_menu.addMenu("Analyze")
+        add_actions(
+            ai_menu_analyze,
+            [
+                ("Sentiment Analysis", "Perform sentiment analysis."),
+                ("Tone Analysis", "Analyze tone."),
+                ("Bias / Assumptions", "Find bias or assumptions."),
+                ("Logical Fallacies", "Check for logical fallacies."),
+                ("Risk Assessment", "Provide a risk assessment."),
+                ("Pros & Cons", "List pros and cons."),
+                ("Root-Cause Analysis", "Perform root-cause analysis."),
+                ("SWOT Analysis", "Provide a SWOT analysis."),
+            ],
+        )
+        compare_note = ai_menu_analyze.addAction("Compare Against Another Note…")
+        compare_note.triggered.connect(lambda: self._prompt_compare_note(text))
+
+        ai_menu_explain = ai_menu.addMenu("Explain")
+        add_actions(
+            ai_menu_explain,
+            [
+                ("Explain Like I'm 5", "Explain like I'm 5."),
+                ("Explain for a Beginner", "Explain for a beginner."),
+                ("Explain for an Expert", "Explain for an expert."),
+                ("Break Down Step-By-Step", "Break down step by step."),
+                ("Provide Examples", "Provide examples."),
+                ("Define All Concepts", "Define all concepts."),
+                ("Explain the Why Behind Each Step", "Explain the why behind each step."),
+            ],
+        )
+
+        ai_menu_brainstorm = ai_menu.addMenu("Brainstorm")
+        add_actions(
+            ai_menu_brainstorm,
+            [
+                ("Brainstorm Ideas", "Brainstorm ideas."),
+                ("Brainstorm Questions to Ask", "Brainstorm questions to ask."),
+                ("Alternative Approaches", "Suggest alternative approaches."),
+                ("Solutions to the Problem", "Suggest solutions to the problem."),
+                ("Potential Risks / Pitfalls", "List potential risks or pitfalls."),
+                ("Related Topics I Should Explore", "List related topics to explore."),
+            ],
+        )
+
+        ai_menu_transform = ai_menu.addMenu("Transform")
+        add_actions(
+            ai_menu_transform,
+            [
+                ("Convert to Markdown", "Convert to Markdown."),
+                ("Convert to Bullet Points", "Convert to bullet points."),
+                ("Convert to Outline", "Convert to an outline."),
+                ("Convert to Table", "Convert to a table."),
+                ("Convert to Checklist", "Convert to a checklist."),
+                ("Convert to JSON", "Convert to JSON."),
+                ("Convert to CSV", "Convert to CSV."),
+                ("Convert to Code Comments", "Convert to code comments."),
+                ("Convert to Script (Python / JS / Bash)", "Convert to a script (Python / JS / Bash)."),
+                ("Convert to Slide Outline", "Convert to a slide outline."),
+            ],
+        )
+
+        if self._looks_like_code(text):
+            ai_menu_code = ai_menu.addMenu("Code Actions")
+            add_actions(
+                ai_menu_code,
+                [
+                    ("Explain Code", "Explain this code."),
+                    ("Optimize Code", "Optimize this code."),
+                    ("Refactor Code", "Refactor this code."),
+                    ("Add Comments", "Add comments to this code."),
+                    ("Convert to Another Language…", "Convert this code to another language."),
+                    ("Generate Unit Tests", "Generate unit tests for this code."),
+                    ("Find Bugs", "Find bugs in this code."),
+                ],
+            )
+
+        ai_menu_research = ai_menu.addMenu("Research Helper")
+        add_actions(
+            ai_menu_research,
+            [
+                ("Generate Questions I Should Ask", "Generate questions I should ask."),
+                ("List Assumptions", "List assumptions."),
+                ("Find Missing Info", "Find missing information."),
+                ("Provide Historical Context", "Provide historical context."),
+                ("Predict Outcomes", "Predict outcomes."),
+                ("Summarize Top Debates Around This Topic", "Summarize top debates around this topic."),
+                ("Give Related References / Sources (non-live)", "Give related references or sources (non-live)."),
+            ],
+        )
+
+        ai_menu_creative = ai_menu.addMenu("Creative")
+        add_actions(
+            ai_menu_creative,
+            [
+                ("Rewrite as Story", "Rewrite as a story."),
+                ("Rewrite as Poem", "Rewrite as a poem."),
+                ("Rewrite as Dialogue", "Rewrite as a dialogue."),
+                ("Rewrite as Song", "Rewrite as a song."),
+                ("Rewrite as Fiction Scene", "Rewrite as a fiction scene."),
+                ("Turn This Into: characters / plot / setting", "Turn this into characters, plot, and setting."),
+            ],
+        )
+
+        ai_menu_chat = ai_menu.addMenu("Chat-About-This Note")
+        add_actions(
+            ai_menu_chat,
+            [
+                ("Ask the AI About This Note", "Ask the AI about this note."),
+                ("Continue Thought from Here", "Continue the thought from here."),
+                ("What Should I Do Next Based on This Note?", "What should I do next based on this note?"),
+                ("How Can I Improve This?", "How can I improve this?"),
+                ("Generate Next Section", "Generate the next section."),
+            ],
+        )
+
+        ai_menu_memory = ai_menu.addMenu("Memory & Linking")
+        add_actions(
+            ai_menu_memory,
+            [
+                ("Suggest Tags", "Suggest tags."),
+                ("Suggest Backlinks", "Suggest backlinks."),
+                ("Build Concept Map", "Build a concept map."),
+                ("Identify Repeating Themes Across Notes", "Identify repeating themes across notes."),
+            ],
+        )
+
+        ai_menu_privacy = ai_menu.addMenu("Privacy / Redaction")
+        add_actions(
+            ai_menu_privacy,
+            [
+                ("Remove Personal Info", "Remove personal information."),
+                ("Anonymize Names", "Anonymize names."),
+                ("Anonymize Companies", "Anonymize companies."),
+                ("Detect Sensitive Content", "Detect sensitive content."),
+            ],
+        )
+
+        ai_menu_debug = ai_menu.addMenu("Debug Note Content")
+        add_actions(
+            ai_menu_debug,
+            [
+                ("Check for Contradictions", "Check for contradictions."),
+                ("Check for Missing Steps", "Check for missing steps."),
+                ("Check for Ambiguous Claims", "Check for ambiguous claims."),
+                ("Check for Outdated Info", "Check for outdated info."),
+                ("Validate Against External Knowledge (optional)", "Validate against external knowledge (optional)."),
+            ],
+        )
+
+    def _prompt_custom_translation(self, text: str) -> None:
+        lang, ok = QInputDialog.getText(self, "Custom Language", "Translate to which language?")
+        if not ok or not lang.strip():
+            return
+        self.aiActionRequested.emit("Custom Translation", f"Translate to {lang.strip()}.", text)
+
+    def _prompt_compare_note(self, text: str) -> None:
+        other, ok = QInputDialog.getText(self, "Compare Against", "Paste or type the other note to compare against:")
+        if not ok or not other.strip():
+            return
+        combined = f"Compare this note to the following note:\n\nOTHER NOTE:\n{other.strip()}\n\nORIGINAL NOTE:\n{text}"
+        self.aiActionRequested.emit("Compare Against Another Note", "Compare against the provided note.", combined)
+
+    def _looks_like_code(self, text: str) -> bool:
+        """Heuristic to decide if text is code-like."""
+        if not text:
+            return False
+        indicators = ("def ", "class ", "import ", "{", "}", ";", "=>", "#include", "function ")
+        if any(tok in text for tok in indicators):
+            return True
+        # many short lines with symbols
+        lines = text.splitlines()
+        symbol_lines = sum(1 for ln in lines if any(ch in ln for ch in "{}();<>"))
+        return symbol_lines >= max(3, len(lines) // 4)

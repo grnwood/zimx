@@ -31,6 +31,15 @@ class PreferencesDialog(QDialog):
             "Disable this if you experience flickering on Linux/Cinnamon."
         )
         layout.addWidget(self.vi_block_cursor_checkbox)
+
+        # Features
+        layout.addSpacing(10)
+        features_label = QLabel("<b>Features</b>")
+        layout.addWidget(features_label)
+        self.enable_ai_chats_checkbox = QCheckBox("Enable AI Chats")
+        self.enable_ai_chats_checkbox.setChecked(config.load_enable_ai_chats())
+        self.enable_ai_chats_checkbox.stateChanged.connect(self._warn_restart_required)
+        layout.addWidget(self.enable_ai_chats_checkbox)
         
         layout.addSpacing(15)
         
@@ -70,4 +79,8 @@ class PreferencesDialog(QDialog):
     def accept(self):
         """Save preferences when OK is clicked."""
         config.save_vi_block_cursor_enabled(self.vi_block_cursor_checkbox.isChecked())
+        config.save_enable_ai_chats(self.enable_ai_chats_checkbox.isChecked())
         super().accept()
+
+    def _warn_restart_required(self) -> None:
+        QMessageBox.information(self, "Restart Required", "This setting requires a restart.")

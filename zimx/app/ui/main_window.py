@@ -232,6 +232,8 @@ class MainWindow(QMainWindow):
         self.editor.backlinksRequested.connect(
             lambda path="": self._show_link_navigator_for_path(path or self.current_path)
         )
+        self.editor.aiChatRequested.connect(lambda path="": self._open_ai_chat_for_path(path or self.current_path, create=True))
+        self.editor.aiActionRequested.connect(self._handle_ai_action)
         self.editor.linkActivated.connect(self._open_link_in_context)
         self.font_size = 14
         self.editor.set_font_point_size(self.font_size)
@@ -251,11 +253,14 @@ class MainWindow(QMainWindow):
         self.editor.viewportResized.connect(self._position_toc_widget)
         self.editor.verticalScrollBar().valueChanged.connect(self._position_toc_widget)
 
-        self.right_panel = TabbedRightPanel()
+        self.right_panel = TabbedRightPanel(
+            enable_ai_chats=config.load_enable_ai_chats(), ai_chat_font_size=config.load_ai_chat_font_size()
+        )
         self.right_panel.refresh_tasks()
         self.right_panel.taskActivated.connect(self._open_task_from_panel)
         self.right_panel.dateActivated.connect(self._open_journal_date)
         self.right_panel.linkActivated.connect(self._open_link_from_panel)
+        self.right_panel.aiChatNavigateRequested.connect(self._on_ai_chat_navigate)
         self._inline_editor: Optional[InlineNameEdit] = None
         self._pending_selection: Optional[str] = None
         self._suspend_autosave = False
@@ -351,11 +356,12 @@ class MainWindow(QMainWindow):
         self._register_shortcuts()
         self._vi_filter_targets: list[QObject] = []
         self._install_vi_mode_filters()
-        # Update focus borders when focus moves between widgets
+        self._focus_recent = ["editor", "tree", "right"]
+        # Update focus borders and focus history when focus moves between widgets
         app = QApplication.instance()
         if app is not None:
             try:
-                app.focusChanged.connect(lambda old, now: self._apply_focus_borders())
+                app.focusChanged.connect(lambda old, now: self._on_focus_changed(now))
             except Exception:
                 pass
         # Apply initial border state
@@ -376,6 +382,7 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self._vi_status_label, 0)
 
         # Startup vault selection is orchestrated by main.py via .startup()
+        self.editor.set_ai_actions_enabled(config.load_enable_ai_chats())
 
     # --- UI wiring -----------------------------------------------------
     def _build_toolbar(self) -> None:
@@ -1020,9 +1027,11 @@ class MainWindow(QMainWindow):
         from pathlib import Path
         if path:
             full_path = Path(self.vault_root) / path.lstrip("/")
-            self.right_panel.set_current_page(full_path, path)
+            has_chat = self.right_panel.set_current_page(full_path, path)
+            self.editor.set_ai_chat_available(has_chat)
         else:
             self.right_panel.set_current_page(None, None)
+            self.editor.set_ai_chat_available(False)
 
     def _save_current_file(self, auto: bool = False) -> None:
         if self._suspend_autosave:
@@ -1422,6 +1431,8 @@ class MainWindow(QMainWindow):
             # Re-apply vi-mode state to refresh cursor
             if self._vi_mode_active:
                 self.editor.set_vi_mode(True)
+            self.right_panel.set_ai_enabled(config.load_enable_ai_chats())
+            self.editor.set_ai_actions_enabled(config.load_enable_ai_chats())
         self._restore_vi_mode_after_dialog(vi_was_active)
 
     def _open_task_from_panel(self, path: str, line: int) -> None:
@@ -1561,9 +1572,11 @@ class MainWindow(QMainWindow):
         # Update attachments panel (virtual pages may still have folders)
         if rel_path:
             full_path = Path(self.vault_root) / rel_path.lstrip("/")
-            self.right_panel.set_current_page(full_path, rel_path)
+            has_chat = self.right_panel.set_current_page(full_path, rel_path)
+            self.editor.set_ai_chat_available(has_chat)
         else:
             self.right_panel.set_current_page(None, None)
+            self.editor.set_ai_chat_available(False)
     
     def _apply_journal_templates_for_date(self, day_file_path: str, year: int, month: int, day: int) -> None:
         """Apply journal templates for a specific date."""
@@ -1801,13 +1814,22 @@ class MainWindow(QMainWindow):
             self._scroll_to_anchor_slug(anchor_slug)
 
     def _adjust_font_size(self, delta: int) -> None:
-        new_size = max(10, min(36, self.font_size + delta))
-        if new_size == self.font_size:
-            return
-        self.font_size = new_size
-        self.editor.set_font_point_size(self.font_size)
-        if config.has_active_vault():
-            config.save_font_size(self.font_size)
+        new_size = max(6, min(24, self.font_size + delta))
+        fw = self.focusWidget()
+        ai_focus = False
+        if fw and self.right_panel.ai_chat_panel:
+            if fw is self.right_panel.ai_chat_panel or self.right_panel.ai_chat_panel.isAncestorOf(fw):
+                ai_focus = True
+        if ai_focus:
+            self.right_panel.set_font_size(new_size)
+            config.save_ai_chat_font_size(new_size)
+        else:
+            if new_size == self.font_size:
+                return
+            self.font_size = new_size
+            self.editor.set_font_point_size(self.font_size)
+            if config.has_active_vault():
+                config.save_font_size(self.font_size)
 
     def _focus_editor_from_tree(self) -> None:
         self._focus_editor()
@@ -1817,14 +1839,50 @@ class MainWindow(QMainWindow):
 
     # --- Focus toggle & visual indication ---------------------------
     def _toggle_focus_between_tree_and_editor(self) -> None:
-        """Toggle focus between navigation tree and editor (Ctrl+Space)."""
-        fw = self.focusWidget()
-        if fw is self.editor or (self.editor and self.editor.isAncestorOf(fw)):
-            # Go to tree
-            self.tree_view.setFocus()
-        else:
-            # Go to editor
+        """Toggle focus between tree, editor, and right panel (Ctrl+Space) using MRU order."""
+        current = self._focus_target_for_widget(self.focusWidget())
+        if current in self._focus_recent:
+            # Rotate MRU list so current moves to end, pick next
+            self._focus_recent = [t for t in self._focus_recent if t != current] + [current]
+        target = self._focus_recent[0] if self._focus_recent else "editor"
+        self._set_focus_target(target)
+
+    def _set_focus_target(self, target: str) -> None:
+        """Move focus to target and update MRU list."""
+        if target == "editor":
             self.editor.setFocus()
+        elif target == "tree":
+            self.tree_view.setFocus()
+        elif target == "right":
+            current_tab = self.right_panel.tabs.currentWidget()
+            if current_tab:
+                current_tab.setFocus()
+            else:
+                self.right_panel.setFocus()
+        if target in self._focus_recent:
+            self._focus_recent = [target] + [t for t in self._focus_recent if t != target]
+        else:
+            self._focus_recent.insert(0, target)
+        self._apply_focus_borders()
+
+    def _focus_target_for_widget(self, widget: Optional[QWidget]) -> Optional[str]:
+        if not widget:
+            return None
+        if widget is self.editor or (self.editor and self.editor.isAncestorOf(widget)):
+            return "editor"
+        if widget is self.tree_view or self.tree_view.isAncestorOf(widget):
+            return "tree"
+        if widget is self.right_panel or self.right_panel.isAncestorOf(widget):
+            return "right"
+        return None
+
+    def _on_focus_changed(self, widget: Optional[QWidget]) -> None:
+        target = self._focus_target_for_widget(widget)
+        if target:
+            if target in self._focus_recent:
+                self._focus_recent = [target] + [t for t in self._focus_recent if t != target]
+            else:
+                self._focus_recent.insert(0, target)
         self._apply_focus_borders()
 
     def _apply_focus_borders(self) -> None:
@@ -1832,12 +1890,18 @@ class MainWindow(QMainWindow):
         focused = self.focusWidget()
         editor_has = focused is self.editor or (self.editor and self.editor.isAncestorOf(focused))
         tree_has = focused is self.tree_view or self.tree_view.isAncestorOf(focused)
+        right_has = focused is self.right_panel or self.right_panel.isAncestorOf(focused)
         # Styles: subtle 1px border with accent color; remove when unfocused
         editor_style = "QTextEdit { border: 1px solid #4A90E2; border-radius:3px; }" if editor_has else "QTextEdit { border: 1px solid transparent; }"
         tree_style = "QTreeView { border: 1px solid #4A90E2; border-radius:3px; }" if tree_has else "QTreeView { border: 1px solid transparent; }"
+        right_style = "QTabWidget::pane { border: 1px solid #4A90E2; border-radius:3px; }" if right_has else ""
         # Preserve existing styles by appending (simple approach)
         self.editor.setStyleSheet(editor_style)
         self.tree_view.setStyleSheet(tree_style)
+        if right_style:
+            self.right_panel.tabs.setStyleSheet(right_style)
+        else:
+            self.right_panel.tabs.setStyleSheet("")
 
     def _goto_line(self, line: int, select_line: bool = False) -> None:
         # Convert line number (1-indexed) to block number (0-indexed)
@@ -1942,6 +2006,8 @@ class MainWindow(QMainWindow):
                 backlinks_action.triggered.connect(
                     lambda checked=False, fp=file_path: self._show_link_navigator_for_path(fp)
                 )
+                ai_chat_action = menu.addAction("AI Chat…")
+                ai_chat_action.triggered.connect(lambda checked=False, fp=file_path: self._open_ai_chat_for_path(fp, create=True))
         else:
             menu.addAction("New Page", lambda checked=False: self._start_inline_creation("/", global_pos, None))
         if menu.actions():
@@ -1995,6 +2061,42 @@ class MainWindow(QMainWindow):
             except Exception:
                 return
         self.right_panel.focus_link_tab(file_path)
+
+    def _open_ai_chat_for_path(self, file_path: Optional[str], create: bool = False) -> None:
+        """Open the AI Chat tab and sync to the given page."""
+        if not file_path or not self.right_panel.ai_chat_panel:
+            return
+        self.right_panel.focus_ai_chat(file_path, create=create)
+
+    def _handle_ai_action(self, action: str, prompt: str, text: str) -> None:
+        """Send selected text to AI chat with the chosen action."""
+        if not config.load_enable_ai_chats() or not self.right_panel.ai_chat_panel:
+            QMessageBox.information(self, "AI Chat", "Enable AI Chats in Preferences to use AI actions.")
+            return
+        target_path = self.current_path
+        self.right_panel.focus_ai_chat(target_path, create=True)
+        self.right_panel.send_ai_action(action, prompt, text)
+
+    def _on_ai_chat_navigate(self, chat_folder: Optional[str]) -> None:
+        """Handle 'Go To Page' from AI chat by focusing the matching page in the editor."""
+        if not chat_folder:
+            return
+        file_path = self._folder_to_file_path(chat_folder)
+        if not file_path:
+            return
+        if self.current_path == file_path:
+            self.editor.setFocus()
+            self._apply_focus_borders()
+            return
+        # Keep AI Chat tab visible while navigating
+        self.right_panel.focus_ai_chat(chat_folder)
+        try:
+            self._select_tree_path(file_path)
+            self._open_file(file_path, force=True)
+            self.editor.setFocus()
+            self._apply_focus_borders()
+        except Exception:
+            return
 
     def _reload_current_page(self) -> None:
         """Reload the current page from disk without altering history."""
@@ -2122,7 +2224,20 @@ class MainWindow(QMainWindow):
         confirm = QMessageBox(self)
         confirm.setIcon(QMessageBox.Warning)
         confirm.setWindowTitle("Delete")
-        confirm.setText(f"Delete {folder_path}? This cannot be undone.")
+        warning = ""
+        store = None
+        target_folder = folder_path
+        if folder_path.lower().endswith(str(PAGE_SUFFIX)):
+            target_folder = self._file_path_to_folder(folder_path)
+        try:
+            if self.right_panel.ai_chat_panel:
+                store = self.right_panel.ai_chat_panel.store  # type: ignore[attr-defined]
+            if store and store.has_chats_under(target_folder):
+                warning = '<br><span style="color:red; font-weight:bold;">WARNING: this will delete any stored AI chats.</span>'
+        except Exception:
+            warning = ""
+        confirm.setTextFormat(Qt.TextFormat.RichText)
+        confirm.setText(f"Delete {folder_path}? This cannot be undone.{warning}")
         confirm.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         confirm.setDefaultButton(QMessageBox.No)
         confirm.adjustSize()
@@ -2136,6 +2251,11 @@ class MainWindow(QMainWindow):
         except httpx.HTTPError as exc:
             self._alert(f"Failed to delete {folder_path}: {exc}")
             return
+        if store:
+            try:
+                store.delete_chats_under(target_folder)  # type: ignore[attr-defined]
+            except Exception:
+                pass
         
         # Clean up database: delete all pages under this folder
         # folder_path is like "/PageA/PageB" (folder) not "/PageA/PageB/PageB.txt" (file)
