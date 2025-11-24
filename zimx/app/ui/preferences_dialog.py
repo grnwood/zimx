@@ -195,6 +195,7 @@ class PreferencesDialog(QDialog):
     def accept(self):
         """Save preferences when OK is clicked."""
         config.save_vi_block_cursor_enabled(self.vi_block_cursor_checkbox.isChecked())
+        print(f"[DEBUG] Saving enable_ai_chats: {self.enable_ai_chats_checkbox.isChecked()}")
         config.save_enable_ai_chats(self.enable_ai_chats_checkbox.isChecked())
         config.save_default_ai_server(self.default_server_combo.currentText() or None)
         config.save_default_ai_model(self.default_model_combo.currentText() or None)

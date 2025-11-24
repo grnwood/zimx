@@ -11,14 +11,14 @@
 
 param(
     [string]$AppName = "ZimX",
-    [string]$ExeName = "..\..\dist\ZimX.exe"
+    [string]$ExeName = "ZimX.exe"
 )
 
 # Base directory = folder where this script lives
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Paths relative to script
-$DistDir    = Join-Path $ScriptRoot "..\..\dist"
+$DistDir    = Join-Path $ScriptRoot "..\..\dist\ZimX"
 $AssetsDir  = Join-Path $ScriptRoot "..\..\assets"
 
 # Install location (user space)
@@ -131,7 +131,7 @@ if ($CreateDesktopShortcut) {
     $DesktopShortcut.Save()
 
     Write-Host "✔️  Desktop shortcut created: $DesktopShortcutPath"
-}
+
 
 Write-Host ""
 Write-Host "🎉 $AppName installed successfully!" -ForegroundColor Green
