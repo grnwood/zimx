@@ -2,8 +2,37 @@
 
 Logbook of all the development efforts on zim.
 
-[:AI_Features|]
-[:Links_and_Navigation|]
-[:Server_Side|]
-[:UI_Editor|]
+### Calendar
+
+( )  I'm seeing some blue dates on a fresh calendar, i only have the 24th defined? @zimx
+		￼	
+( )  Add Calendar panel @zimx
+	move the calendar to its own tab (first)
+	put the Journal part of the file tree under it.
+	move tasks to its own tab
+	Tasks can have just the full rail.
+	remove 'show jornal' from left nav since it's under calendar.
+	
+### Editor
+( )  I still see sometimes my page doesn't save, there is some kind of navigation why to lose the buffer, keep an eye out. @zimx
+	pretty sure this is VI navigation (soft keys) doing this, need to make sure it fires a write ALL the time. Gotta hitj ctrl-s for now.
+	I found **ONE** : If you activate a link before page saved it loses buffer, need to fix!
+( )  should i use fast api locally if server and ui are in the same place? @zimx
+( )  don't let the page vieport scroll past the end of buffer (arrow keys) @zimx
+
+### Page Templages
+( )  ctrl-n should default to the `New Page` template.  @zimx
+( ) Add some more? @zimx
+
+### Printing
+( )  print to browser feature? @zimx  <2025-12-01
+
+### Ai Stuff
+( )  need to add chroma/rag into chat. @zimx
+	* add the page text into chroma by default?
+	* (#) hash tag loads list of file attachements from page?
+	* (@) allows linking to any other page in the notebook
+	  * How to handle subfolders, etc?
+	* Delete has to remove from chroma or get to big.
+	* Chroma per chat?  or global chroma file for the whole app?
 
