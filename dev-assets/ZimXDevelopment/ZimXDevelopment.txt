@@ -10,7 +10,7 @@ Logbook of all the development efforts on zim.
 
 ### Calendar
 (x)  I'm seeing some blue dates on a fresh calendar, i only have the 24th defined? @zimx
-		￼	
+		 	
 (x)  Add Calendar panel @zimx @cal
 	move the calendar to its own tab (first)
 	put the Journal part of the file tree under it.
@@ -27,6 +27,8 @@ Logbook of all the development efforts on zim.
 ( )  support file links on either OS, it not http, if not in wiki links, then file link? @zimx @links
 ( )  when i navigate back to a page, restore last caret position, currently only works on recent lnks @zimx @links
 	aka. save cursor position in all files, refactor out the 'history only' logic.
+( )  still able to get a double folder link somehow? See `/ZimXDevelopment/FolderHiding/FolderHiding/FolderHiding.txt`
+	I *think* this is defining or activating a link in the middle of a task line and activating before save maybe?
 	
 ### Task Panel
 ( )  make strikeouts format more visually (at least on windows) @zimx @tasks
