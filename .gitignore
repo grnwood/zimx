@@ -21,6 +21,7 @@ zimx/app/ui/__pycache__/task_panel.cpython-312.py
 dist/
 build/
 sample-vault/
+vault-sample/
 sample-vault/.zimx/settings.db
 dev-assets/vault-sample
 dev-assets/vault-sample/**

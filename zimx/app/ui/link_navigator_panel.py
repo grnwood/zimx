@@ -401,8 +401,12 @@ class LinkNavigatorPanel(QWidget):
             return titles[path]
         colon = path_to_colon(path)
         if colon:
-            return colon
-        return path.rsplit("/", 1)[-1] or path
+            return colon.split(":")[-1] or colon
+        leaf = path.rsplit("/", 1)[-1] or path
+        # Drop trailing .txt if present
+        if leaf.endswith(".txt"):
+            leaf = leaf[:-4]
+        return leaf
 
     def _update_raw_view(self, center: _LinkNode, incoming: Sequence[_LinkNode], outgoing: Sequence[_LinkNode]) -> None:
         def _link_html(node: _LinkNode, arrow: str) -> str:

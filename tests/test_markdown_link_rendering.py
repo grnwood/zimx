@@ -75,3 +75,11 @@ def test_paste_complex_http_link_normalizes(editor):
     editor._refresh_display()
     expected = "/teams.microsoft.com/l/message/19:5071d17824ad4b278afaa9b39ca3fea4@thread.v2/1763757927194?context=%7B%22contextType%22%3A%22chat%22%7D|"
     assert expected in editor.toPlainText()
+
+
+def test_camelcase_link_uses_parent_folder(editor):
+    # When current page is /Journal/.../PickleSausage/PickleSausage.txt, +NewTopic should live under that folder once
+    editor.set_context("/vault", "/Journal/2025/11/22/SuchandSuchCall/PickleSausage/PickleSausage.txt")
+    text = "Discuss +RandomActsOfKindess tomorrow"
+    converted = editor._convert_camelcase_links(text)
+    assert "[:Journal:2025:11:22:SuchandSuchCall:PickleSausage:RandomActsOfKindess|RandomActsOfKindess]" in converted

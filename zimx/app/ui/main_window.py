@@ -990,6 +990,8 @@ class MainWindow(QMainWindow):
         updated = indexer.index_page(path, content)
         if updated:
             self.right_panel.refresh_tasks()
+        # Keep Link Navigator in sync when a page is opened or reloaded
+        self.right_panel.refresh_links(path)
         move_cursor_to_end = cursor_at_end or self._should_focus_hr_tail(content)
         restored_history_cursor = False
         if restore_history_cursor:

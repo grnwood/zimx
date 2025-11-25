@@ -533,8 +533,18 @@ class MarkdownEditor(QTextEdit):
     def _convert_camelcase_links(self, text: str) -> str:
         """Convert +CamelCase links to colon-style links [:Path:Path:Page|+CamelCase] using current page context, but only if not already inside a [link|label]."""
         import re
+        from pathlib import Path
+        from zimx.server.adapters.files import PAGE_SUFFIX
         from .path_utils import path_to_colon
-        current_path = self.current_relative_path() if hasattr(self, 'current_relative_path') else None
+        current_path = self.current_relative_path() if hasattr(self, "current_relative_path") else None
+        base_dir: Optional[Path] = None
+        if current_path:
+            try:
+                current = Path(current_path)
+                # When pointed at /Page/Page.txt, use the containing folder as the base
+                base_dir = current.parent if current.suffix == PAGE_SUFFIX else current
+            except Exception:
+                base_dir = None
         # Find all [link|label] spans so we can skip +CamelCase in the label part
         link_spans = []
         for m in re.finditer(r'\[([^\]|]+)\|([^\]]*)\]', text):
@@ -552,12 +562,11 @@ class MarkdownEditor(QTextEdit):
                 return match.group(0)  # Don't replace if in label part
             link = match.group('link')
             label = link  # Just the page name, no plus
-            if current_path:
-                base = current_path.strip('/').rsplit('/', 1)[0] if '/' in current_path else ''
-                if base:
-                    colon_path = path_to_colon(f"/{base}/{link}/{link}.txt")
-                else:
-                    colon_path = path_to_colon(f"/{link}/{link}.txt")
+            if base_dir:
+                target_path = (base_dir / link / f"{link}{PAGE_SUFFIX}").as_posix()
+                if not target_path.startswith("/"):
+                    target_path = f"/{target_path}"
+                colon_path = path_to_colon(target_path)
             else:
                 colon_path = path_to_colon(f"/{link}/{link}.txt")
             return f"[:{colon_path}|{label}]"
@@ -606,6 +615,12 @@ class MarkdownEditor(QTextEdit):
         self._heading_timer.setSingleShot(True)
         self._heading_timer.timeout.connect(self._emit_heading_outline)
         self.textChanged.connect(self._schedule_heading_outline)
+        # Timer for CamelCase link conversion; explicitly started on key triggers
+        self._camel_refresh_timer = QTimer(self)
+        self._camel_refresh_timer.setInterval(120)
+        self._camel_refresh_timer.setSingleShot(True)
+        self._camel_refresh_timer.timeout.connect(self._refresh_camel_links)
+        self._last_camel_trigger: Optional[str] = None
         # Enable mouse tracking for hover cursor changes
         self.viewport().setMouseTracking(True)
         # Enable drag and drop for file attachments
@@ -745,6 +760,79 @@ class MarkdownEditor(QTextEdit):
         # Convert +CamelCase links to colon-style links before saving
         markdown = self._convert_camelcase_links(markdown)
         return self._from_display(markdown)
+
+    def _schedule_camel_refresh(self) -> None:
+        """Schedule a quick refresh to render +CamelCase links into colon format."""
+        if self._display_guard:
+            return
+        text = self.toPlainText()
+        # Fast path: skip if there's no +CamelCase pattern
+        if "+" not in text:
+            return
+        import re
+        if not re.search(r"\+[A-Za-z][\w]*", text):
+            return
+        self._camel_refresh_timer.start()
+
+    def _refresh_camel_links(self) -> None:
+        """Convert any +CamelCase links in the document and re-render display."""
+        if self._display_guard:
+            return
+        current_text = self.toPlainText()
+        storage_text = self._from_display(current_text)
+        converted = self._convert_camelcase_links(storage_text)
+        if converted == storage_text:
+            return
+        # Re-render with updated links
+        self._display_guard = True
+        display_text = self._to_display(converted)
+        cursor_pos = self.textCursor().position()
+        self.document().setPlainText(display_text)
+        new_cursor = self.textCursor()
+        new_cursor.setPosition(min(cursor_pos, len(display_text)))
+        # After conversion, move cursor appropriately based on trigger
+        self._position_cursor_after_camel(new_cursor, display_text)
+        self.setTextCursor(new_cursor)
+        self._render_images(display_text)
+        self._display_guard = False
+        self._schedule_heading_outline()
+        self._apply_scroll_past_end_margin()
+
+    def _position_cursor_after_camel(self, cursor: QTextCursor, text: str) -> None:
+        """Place cursor after the converted link based on last trigger (space/enter)."""
+        trigger = self._last_camel_trigger
+        self._last_camel_trigger = None
+        if not trigger:
+            return
+        # Find the last display-format link sentinel sequence to place cursor after it
+        sentinel = "\x00"
+        last_link = text.rfind(sentinel)
+        if last_link == -1:
+            return
+        # Walk forward: \x00link\x00label\x00
+        start = last_link
+        first_sep = text.find(sentinel, start + 1)
+        if first_sep == -1:
+            return
+        second_sep = text.find(sentinel, first_sep + 1)
+        if second_sep == -1:
+            return
+        end = text.find(sentinel, second_sep + 1)
+        if end == -1:
+            end = second_sep  # label might be empty
+        # Place cursor after label (visible text)
+        pos = end + 1
+        cursor.setPosition(min(pos, len(text)))
+        if trigger == "space":
+            # Add a space if not already present
+            if pos < len(text) and text[pos] != " ":
+                cursor.insertText(" ")
+                cursor.setPosition(cursor.position())
+        elif trigger == "enter":
+            # Insert newline if not already at line break
+            if pos < len(text) and text[pos] != "\n":
+                cursor.insertText("\n")
+                cursor.setPosition(cursor.position())
 
     def set_font_point_size(self, size: int) -> None:
         font = self.font()
@@ -1335,6 +1423,10 @@ class MarkdownEditor(QTextEdit):
 
     def keyReleaseEvent(self, event):  # type: ignore[override]
         super().keyReleaseEvent(event)
+        # Only schedule CamelCase conversion when space/enter are released (typing flow)
+        if event.key() in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter) and not (event.modifiers() & ~Qt.KeypadModifier):
+            self._last_camel_trigger = "enter" if event.key() in (Qt.Key_Return, Qt.Key_Enter) else "space"
+            self._schedule_camel_refresh()
 
     def contextMenuEvent(self, event):  # type: ignore[override]
         # Check if right-clicking on an image
@@ -2205,6 +2297,8 @@ class MarkdownEditor(QTextEdit):
         current_text = self.toPlainText()
         # First convert FROM display back to storage (in case text is already partially in display format)
         storage_text = self._from_display(current_text)
+        # Convert +CamelCase links immediately so display is updated without waiting for save
+        storage_text = self._convert_camelcase_links(storage_text)
         # Then convert to display format
         display_text = self._to_display(storage_text)
         old_cursor_pos = self.textCursor().position()
