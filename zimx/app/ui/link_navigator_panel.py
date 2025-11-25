@@ -583,12 +583,17 @@ class LinkNavigatorPanel(QWidget):
         self.refresh()
 
     def refresh(self, page_path: Optional[str] = None) -> None:
+        # Preserve focus only if the panel currently has it
+        had_focus = self.hasFocus() or self.graph_view.hasFocus() or self.raw_view.hasFocus()
         if page_path is not None:
             self.current_page = page_path
         if not self.current_page or not config.has_active_vault():
             self.graph_view.clear()
             self.raw_view.setPlainText("No page selected.")
             self.title_label.setText("Link Navigator")
+            if had_focus:
+                target = self.graph_view if self.mode == "graph" else self.raw_view
+                target.setFocus()
             return
 
         relations = config.fetch_link_relations(self.current_page)
@@ -613,8 +618,9 @@ class LinkNavigatorPanel(QWidget):
         self.graph_view.reset_zoom()
         # Disable keyboard-driven animation until user navigates again
         self.graph_view.reset_keyboard_focus_state()
-        if self.mode == "graph":
-            self.graph_view.setFocus()
+        if had_focus:
+            target = self.graph_view if self.mode == "graph" else self.raw_view
+            target.setFocus()
         self._update_raw_view(center, incoming_nodes, outgoing_nodes)
         self.title_label.setText(f"Link Navigator: {center.label}")
 

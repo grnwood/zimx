@@ -88,6 +88,7 @@ class InlineNameEdit(QLineEdit):
 
 class VaultTreeView(QTreeView):
     enterActivated = Signal()
+    arrowNavigated = Signal()
 
     def keyPressEvent(self, event):  # type: ignore[override]
         if event.key() == Qt.Key_Escape and event.modifiers() == Qt.NoModifier:
@@ -97,12 +98,15 @@ class VaultTreeView(QTreeView):
         if event.modifiers() == Qt.ControlModifier and event.key() in (Qt.Key_Down, Qt.Key_Up):
             direction = 1 if event.key() == Qt.Key_Down else -1
             self._walk_tree(direction)
+            self.arrowNavigated.emit()
             event.accept()
             return
         if event.key() in (Qt.Key_Return, Qt.Key_Enter) and event.modifiers() == Qt.NoModifier:
             super().keyPressEvent(event)
             self.enterActivated.emit()
             return
+        if event.key() in (Qt.Key_Up, Qt.Key_Down, Qt.Key_Left, Qt.Key_Right):
+            self.arrowNavigated.emit()
         super().keyPressEvent(event)
 
     def _walk_tree(self, direction: int) -> None:
@@ -193,8 +197,10 @@ class MainWindow(QMainWindow):
         self.tree_view.customContextMenuRequested.connect(self._open_context_menu)
         self.tree_view.selectionModel().currentChanged.connect(self._on_selection_changed)
         self.tree_view.enterActivated.connect(self._focus_editor_from_tree)
+        self.tree_view.arrowNavigated.connect(self._mark_tree_arrow_nav)
         self.dir_icon = self.style().standardIcon(QStyle.SP_DirIcon)
         self.file_icon = self.style().standardIcon(QStyle.SP_FileIcon)
+        self._tree_arrow_focus_pending = False
         
         # Create custom header widget with "Show Journal" checkbox
         self.tree_header_widget = QWidget()
@@ -922,6 +928,9 @@ class MainWindow(QMainWindow):
         self._debug(
             f"Tree selection changed: current={self._describe_index(current)}, previous={self._describe_index(previous)}"
         )
+        restore_tree_focus = self._tree_arrow_focus_pending and self.tree_view.hasFocus()
+        # One-shot flag: consume after evaluating
+        self._tree_arrow_focus_pending = False
         if previous.isValid():
             prev_target = previous.data(OPEN_ROLE) or previous.data(PATH_ROLE)
             if prev_target and prev_target == self.current_path:
@@ -946,6 +955,9 @@ class MainWindow(QMainWindow):
             return
         try:
             self._open_file(open_target)
+            if restore_tree_focus:
+                self.tree_view.setFocus(Qt.OtherFocusReason)
+                self._apply_focus_borders()
         except Exception as exc:
             self._debug(f"Tree selection crash while opening {open_target!r}: {exc!r}")
             raise
@@ -1854,6 +1866,10 @@ class MainWindow(QMainWindow):
 
     def _focus_editor(self) -> None:
         self.editor.setFocus()
+
+    def _mark_tree_arrow_nav(self) -> None:
+        """Flag that tree navigation via arrow keys should keep focus on the tree."""
+        self._tree_arrow_focus_pending = True
 
     # --- Focus toggle & visual indication ---------------------------
     def _toggle_focus_between_tree_and_editor(self) -> None:

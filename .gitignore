@@ -29,3 +29,4 @@ slipstream/
 .continue/agents/new-config.yaml
 .continue/mcpServers/new-mcp-server.yaml
 dev-assets/specs/slipstream-ai.md
+dev-assets/ZimXDevelopment/.zimx/ai-chats.db
