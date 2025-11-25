@@ -135,6 +135,8 @@ class TabbedRightPanel(QWidget):
         for i in range(self.tabs.count()):
             if self.tabs.widget(i) == self.link_panel:
                 self.tabs.setCurrentIndex(i)
+                # Ensure content is fresh whenever the tab gains focus
+                self.link_panel.refresh(page_path)
                 break
 
     def focus_ai_chat(self, page_path=None, create=False) -> None:

@@ -222,7 +222,7 @@ class MainWindow(QMainWindow):
         self.editor.imageSaved.connect(self._on_image_saved)
         self.editor.textChanged.connect(lambda: self.autosave_timer.start())
         self.editor.focusLost.connect(lambda: self._save_current_file(auto=True))
-        self.editor.linkActivated.connect(self._open_camel_link)
+        self.editor.linkActivated.connect(lambda link: self._open_camel_link(link, focus_target="editor"))
         self.editor.linkHovered.connect(self._on_link_hovered)
         self.editor.linkCopied.connect(self._on_link_copied)
         self.editor.insertDateRequested.connect(self._insert_date)
@@ -1461,10 +1461,12 @@ class MainWindow(QMainWindow):
                 self._select_tree_path(main_page)
                 self._open_file(main_page)
                 self.right_panel.focus_link_tab(main_page)
+                self._apply_navigation_focus("navigator")
                 return
         self._select_tree_path(path)
         self._open_file(path)
         self.right_panel.focus_link_tab(path)
+        self._apply_navigation_focus("navigator")
 
     def _open_link_in_context(self, link: str) -> None:
         """Handle link activations from the editor."""
@@ -1479,7 +1481,7 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl(link))
             return
         # Otherwise treat as page link
-        self._open_camel_link(link)
+        self._open_camel_link(link, focus_target="editor")
     
     def _open_journal_date(self, year: int, month: int, day: int) -> None:
         """Open or create journal entry for the selected date."""
@@ -1707,7 +1709,7 @@ class MainWindow(QMainWindow):
             else:
                 self.statusBar().showMessage("")
     
-    def _open_camel_link(self, name: str) -> None:
+    def _open_camel_link(self, name: str, focus_target: str | None = None) -> None:
         """Open a link - handles both CamelCase (relative), colon notation (absolute), and HTTP URLs."""
         # Handle HTTP/HTTPS links
         if name.startswith("http://") or name.startswith("https://"):
@@ -1758,6 +1760,7 @@ class MainWindow(QMainWindow):
                 main_page = f"/{self.vault_root_name}{PAGE_SUFFIX}"
                 self._open_file(main_page)
                 self._scroll_to_anchor_slug(anchor_slug)
+                self._apply_navigation_focus(focus_target)
                 return
             # Colon notation is absolute - convert directly to path
             # Prevent duplicate vault root in path (e.g., VaultRoot/VaultRoot.txt)
@@ -1784,6 +1787,7 @@ class MainWindow(QMainWindow):
             self._populate_vault_tree()
             self._open_file(target_file, cursor_at_end=is_new_page)
             self._scroll_to_anchor_slug(anchor_slug)
+            self._apply_navigation_focus(focus_target)
         else:
             # CamelCase link is relative to current page
             # Special case: if the link target matches the vault root name, open /VaultRoot.txt
@@ -1791,6 +1795,7 @@ class MainWindow(QMainWindow):
                 target_file = f"/{self.vault_root_name}{PAGE_SUFFIX}"
                 self._open_file(target_file)
                 self._scroll_to_anchor_slug(anchor_slug)
+                self._apply_navigation_focus(focus_target)
                 return
             rel_current = Path(self.current_path.lstrip("/"))
             parent_folder = rel_current.parent
@@ -1813,6 +1818,7 @@ class MainWindow(QMainWindow):
             self._populate_vault_tree()
             self._open_file(target_file, cursor_at_end=is_new_page)
             self._scroll_to_anchor_slug(anchor_slug)
+            self._apply_navigation_focus(focus_target)
 
     def _adjust_font_size(self, delta: int) -> None:
         new_size = max(6, min(24, self.font_size + delta))
@@ -1831,6 +1837,17 @@ class MainWindow(QMainWindow):
             self.editor.set_font_point_size(self.font_size)
             if config.has_active_vault():
                 config.save_font_size(self.font_size)
+
+    def _apply_navigation_focus(self, focus_target: str | None) -> None:
+        """Set focus after navigation based on source (editor vs link navigator)."""
+        if focus_target == "navigator":
+            self.right_panel.focus_link_tab(self.current_path)
+            try:
+                self.right_panel.link_panel.graph_view.setFocus()
+            except Exception:
+                pass
+        elif focus_target == "editor":
+            self.editor.setFocus()
 
     def _focus_editor_from_tree(self) -> None:
         self._focus_editor()

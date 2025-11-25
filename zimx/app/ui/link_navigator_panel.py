@@ -5,7 +5,7 @@ import math
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-from PySide6.QtGui import QBrush, QPen
+from PySide6.QtGui import QBrush, QPen, QFont
 
 from PySide6.QtCore import QPointF, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QPen, QBrush, QPainter
@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QGraphicsEllipseItem,
     QGraphicsLineItem,
     QGraphicsScene,
-    QGraphicsTextItem,
+    QGraphicsSimpleTextItem,
     QGraphicsView,
     QGraphicsItem,
     QGraphicsItem,
@@ -44,38 +44,48 @@ class _LinkNodeItem(QGraphicsEllipseItem):
     def __init__(self, path: str, label: str, radius: float, color: QColor) -> None:
         super().__init__(-radius, -radius, radius * 2, radius * 2)
         self.page_path = path
+        self._radius = radius
         self.setBrush(QBrush(color))
-        self.setPen(QPen(QColor("#222222"), 2))
+        self._base_pen = QPen(QColor("#222222"), 2)
+        self._focus_pen = QPen(QColor("#ffffff"), 3.4)
+        self.setPen(self._base_pen)
         self.setToolTip(label)
 
-        # Center the label inside the node
-        text = QGraphicsTextItem(label, self)
-        font = text.font()
-        font.setPointSize(13)
-        font.setBold(True)
+        # Center the label inside the node with a crisp outline for readability
+        text = QGraphicsSimpleTextItem(label, self)
+        font = QFont(text.font())
+        font.setPointSize(14)
+        font.setWeight(QFont.Weight.Black)
         text.setFont(font)
-        text.setDefaultTextColor(QColor("#222222"))  # dark for contrast
+        text.setBrush(QBrush(QColor("#ffffff")))
+        text.setPen(QPen(QColor("#000000"), 2))
         text.setZValue(10)
         text.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
         # Center label after font is set
         text_rect = text.boundingRect()
         text.setPos(-text_rect.width() / 2, -text_rect.height() / 2)
         self.text_item = text
+        self._add_depth_dots()
 
-        # Draw dots for each depth layer (number of colons in path)
-        depth = path.count(":") + path.count("/")
-        if depth > 0:
-            from PySide6.QtWidgets import QGraphicsEllipseItem
-            dot_radius = 3
-            spacing = 8
-            total_width = (depth - 1) * spacing
-            y_offset = radius - 10  # place dots near bottom inside node
-            for i in range(depth):
-                x = -total_width / 2 + i * spacing
-                dot = QGraphicsEllipseItem(-dot_radius, -dot_radius, dot_radius * 2, dot_radius * 2, self)
-                dot.setPos(x, y_offset)
-                dot.setBrush(QBrush(QColor("#f8f8f8")))
-                dot.setPen(QPen(QColor("#222222"), 1))
+    def set_focused(self, focused: bool) -> None:
+        self.setPen(self._focus_pen if focused else self._base_pen)
+
+    def _add_depth_dots(self) -> None:
+        """Render small dots indicating depth; keeps constructors lean."""
+        depth = self.page_path.count(":") + self.page_path.count("/")
+        if depth <= 0:
+            return
+        from PySide6.QtWidgets import QGraphicsEllipseItem
+        dot_radius = 3
+        spacing = 8
+        total_width = (depth - 1) * spacing
+        y_offset = self._radius - 10  # place dots near bottom inside node
+        for i in range(depth):
+            x = -total_width / 2 + i * spacing
+            dot = QGraphicsEllipseItem(-dot_radius, -dot_radius, dot_radius * 2, dot_radius * 2, self)
+            dot.setPos(x, y_offset)
+            dot.setBrush(QBrush(QColor("#f8f8f8")))
+            dot.setPen(QPen(QColor("#222222"), 1))
 
 
 class LinkGraphView(QGraphicsView):
@@ -90,18 +100,34 @@ class LinkGraphView(QGraphicsView):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setMouseTracking(True)
+        # Soft, spacey backdrop
+        self.setStyleSheet(
+            "background: qradialgradient(cx:0.5, cy:0.5, radius:0.9, "
+            "fx:0.5, fy:0.45, stop:0 rgba(18,18,26,230), stop:1 rgba(10,10,14,255));"
+        )
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
+        self.setFocusPolicy(Qt.StrongFocus)
         self._zoom = 1.0
         self._scene_rect = None
         self._edges: list[tuple[QGraphicsLineItem, _LinkNodeItem, _LinkNodeItem]] = []
         self._nodes: list[_LinkNodeItem] = []
         self._base_positions: dict[_LinkNodeItem, QPointF] = {}
         self._wiggle_timer = QTimer(self)
-        self._wiggle_timer.setInterval(140)
+        # Fast cadence for a "vibrate" feel
+        self._wiggle_timer.setInterval(22)
         self._wiggle_timer.timeout.connect(self._apply_wiggle)
         self._wiggle_target: Optional[_LinkNodeItem] = None
         self._wiggle_phase = 0
+        self._press_pos: Optional[QPointF] = None
+        self._press_item: Optional[_LinkNodeItem] = None
+        self._dragging = False
+        self._label_hide_threshold = 0.9
+        self._center_item: Optional[_LinkNodeItem] = None
+        self._incoming_items: list[_LinkNodeItem] = []
+        self._outgoing_items: list[_LinkNodeItem] = []
+        self._focused_item: Optional[_LinkNodeItem] = None
+        self._keyboard_nav_used = False
 
     def set_graph(
         self,
@@ -112,12 +138,17 @@ class LinkGraphView(QGraphicsView):
         self._scene.clear()
         self._edges.clear()
         self._nodes.clear()
+        self._incoming_items.clear()
+        self._outgoing_items.clear()
+        self._focused_item = None
+        self._center_item = None
         center_radius = 42
         center_item = _LinkNodeItem(center.path, center.label, center_radius, QColor("#4A90E2"))
         center_item.setPos(0, 0)
         self._scene.addItem(center_item)
         self._nodes.append(center_item)
         self._base_positions[center_item] = QPointF(0, 0)
+        self._center_item = center_item
 
         neighbors = list(incoming) + list(outgoing)
         if not neighbors:
@@ -131,9 +162,11 @@ class LinkGraphView(QGraphicsView):
         outgoing_positions = self._spread_positions(len(outgoing), math.radians(30), math.radians(150), radius)
 
         for node, pos in zip(incoming, incoming_positions):
-            self._add_neighbor(center_item, node, pos, QColor("#7BD88F"))
+            item = self._add_neighbor(center_item, node, pos, QColor("#7BD88F"))
+            self._incoming_items.append(item)
         for node, pos in zip(outgoing, outgoing_positions):
-            self._add_neighbor(center_item, node, pos, QColor("#F5A623"))
+            item = self._add_neighbor(center_item, node, pos, QColor("#F5A623"))
+            self._outgoing_items.append(item)
 
         bounds = self._scene.itemsBoundingRect().adjusted(-30, -30, 30, 30)
         self._scene_rect = bounds
@@ -141,8 +174,11 @@ class LinkGraphView(QGraphicsView):
         self._apply_zoom()
         self._wiggle_target = None
         self._wiggle_timer.stop()
+        # Default focus to the center node
+        if self._center_item:
+            self._set_focused_item(self._center_item)
 
-    def _add_neighbor(self, center_item: _LinkNodeItem, node: _LinkNode, pos: QPointF, color: QColor) -> None:
+    def _add_neighbor(self, center_item: _LinkNodeItem, node: _LinkNode, pos: QPointF, color: QColor) -> _LinkNodeItem:
         item = _LinkNodeItem(node.path, node.label, 28, color)
         item.setPos(pos)
         self._scene.addItem(item)
@@ -167,6 +203,7 @@ class LinkGraphView(QGraphicsView):
         line.setPen(pen)
         self._scene.addItem(line)
         self._edges.append((line, center_item, item))
+        return item
 
     def clear(self) -> None:
         self._scene.clear()
@@ -174,6 +211,9 @@ class LinkGraphView(QGraphicsView):
         self._edges.clear()
         self._nodes.clear()
         self._base_positions.clear()
+        self._keyboard_nav_used = False
+        self._wiggle_timer.stop()
+        self._wiggle_target = None
 
     def wheelEvent(self, event):  # type: ignore[override]
         if event.modifiers() & Qt.ControlModifier:
@@ -192,6 +232,10 @@ class LinkGraphView(QGraphicsView):
     def zoom_out(self) -> None:
         self._adjust_zoom(1 / 1.1)
 
+    def reset_zoom(self) -> None:
+        self._zoom = 1.0
+        self._apply_zoom()
+
     def _adjust_zoom(self, factor: float) -> None:
         self._zoom = min(2.5, max(0.4, self._zoom * factor))
         self._apply_zoom()
@@ -202,6 +246,7 @@ class LinkGraphView(QGraphicsView):
         self.resetTransform()
         self.fitInView(self._scene_rect, Qt.AspectRatioMode.KeepAspectRatio)
         self.scale(self._zoom, self._zoom)
+        self._update_label_visibility()
 
     def _spread_positions(self, count: int, start_angle: float, end_angle: float, radius: float) -> list[QPointF]:
         if count <= 0:
@@ -216,12 +261,9 @@ class LinkGraphView(QGraphicsView):
         ]
 
     def mousePressEvent(self, event):  # type: ignore[override]
-        item = self.itemAt(event.pos())
-        node_item = self._resolve_node_item(item)
-        if node_item:
-            self.nodeActivated.emit(node_item.page_path)
-            event.accept()
-            return
+        self._press_pos = event.pos()
+        self._press_item = self._resolve_node_item(self.itemAt(event.pos()))
+        self._dragging = False
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):  # type: ignore[override]
@@ -236,12 +278,46 @@ class LinkGraphView(QGraphicsView):
             else:
                 self._wiggle_timer.stop()
                 self._highlight_node(None)
+        # When hovering, temporarily focus the hovered node for clarity without stealing keyboard focus
+        if node_item:
+            self._set_hover_focus(node_item)
+        if event.buttons() & Qt.LeftButton and self._press_pos is not None:
+            # Mark as dragging once the cursor moves a little to allow panning the scene
+            if (event.pos() - self._press_pos).manhattanLength() > 6:
+                self._dragging = True
+        self._update_label_visibility()
         super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):  # type: ignore[override]
+        if not self._dragging and self._press_item and event.button() == Qt.LeftButton:
+            # Treat as click (no drag) -> activate
+            self.nodeActivated.emit(self._press_item.page_path)
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+        self._press_pos = None
+        self._press_item = None
+        self._dragging = False
+
+    def keyPressEvent(self, event):  # type: ignore[override]
+        handled = False
+        key = event.key()
+        if key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
+            handled = self._move_focus(key)
+        elif key in (Qt.Key_Return, Qt.Key_Enter):
+            if self._focused_item:
+                self.nodeActivated.emit(self._focused_item.page_path)
+                handled = True
+        if handled:
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def leaveEvent(self, event):  # type: ignore[override]
         self._wiggle_timer.stop()
         self._wiggle_target = None
         self._highlight_node(None)
+        self._update_label_visibility()
         super().leaveEvent(event)
 
     def _resolve_node_item(self, item):
@@ -281,11 +357,13 @@ class LinkGraphView(QGraphicsView):
     def _apply_wiggle(self) -> None:
         if not self._wiggle_target:
             return
-        amplitude = 2.5
-        offset = amplitude * math.sin(self._wiggle_phase * math.pi / 4)
+        # Higher-frequency, small-amplitude shake to feel energetic without obscuring text
+        amplitude = 1.4
+        offset_x = amplitude * math.sin(self._wiggle_phase * 1.6)
+        offset_y = (amplitude * 0.65) * math.cos(self._wiggle_phase * 2.1)
         base = self._base_positions.get(self._wiggle_target, self._wiggle_target.pos())
-        self._wiggle_target.setPos(base.x() + offset, base.y())
-        self._wiggle_phase = (self._wiggle_phase + 1) % 8
+        self._wiggle_target.setPos(base.x() + offset_x, base.y() + offset_y)
+        self._wiggle_phase = (self._wiggle_phase + 1) % 24
         if self._wiggle_phase == 0:
             # Reset to base to avoid drift
             self._wiggle_target.setPos(base)
@@ -306,6 +384,135 @@ class LinkGraphView(QGraphicsView):
             color.setAlpha(255 if target and node is target else 200)
             brush.setColor(color)
             node.setBrush(brush)
+            # Ensure hovered node (and its label) stay visually on top
+            if target and node is target:
+                node.setZValue(5)
+                node.text_item.setZValue(6)
+            else:
+                node.setZValue(0)
+                node.text_item.setZValue(1)
+        self._update_label_visibility()
+
+    def _set_focused_item(self, target: Optional[_LinkNodeItem], force_show_label: bool = True) -> None:
+        if self._focused_item is target:
+            return
+        # Clear previous focus
+        if self._focused_item:
+            self._focused_item.set_focused(False)
+        self._focused_item = target
+        if self._focused_item:
+            self._focused_item.set_focused(True)
+            self._focused_item.setZValue(6)
+            self._focused_item.text_item.setZValue(7)
+            self._focused_item.text_item.setVisible(True)
+        if force_show_label and self._focused_item:
+            if self._keyboard_nav_used:
+                self._wiggle_target = self._focused_item
+                self._wiggle_phase = 0
+                self._wiggle_timer.start()
+            else:
+                self._wiggle_timer.stop()
+                self._wiggle_target = None
+        elif not self._focused_item:
+            self._wiggle_timer.stop()
+            self._wiggle_target = None
+        # Always refresh highlight state to raise focused node/edges
+        self._highlight_node(self._focused_item)
+        self._update_label_visibility()
+
+    def _set_hover_focus(self, node: _LinkNodeItem) -> None:
+        # Do not steal keyboard focus; just keep hovered label visible and on top
+        if node is not self._focused_item:
+            node.text_item.setVisible(True)
+            node.text_item.setZValue(7)
+
+    def _current_group_and_index(self) -> tuple[str, int]:
+        if not self._focused_item:
+            return ("center", 0)
+        if self._focused_item is self._center_item:
+            return ("center", 0)
+        if self._focused_item in self._incoming_items:
+            return ("incoming", self._sorted_ring(self._incoming_items).index(self._focused_item))
+        if self._focused_item in self._outgoing_items:
+            return ("outgoing", self._sorted_ring(self._outgoing_items).index(self._focused_item))
+        return ("center", 0)
+
+    def _sorted_ring(self, items: list[_LinkNodeItem]) -> list[_LinkNodeItem]:
+        """Order nodes by their layout (left-to-right) for predictable arrow traversal."""
+        return sorted(items, key=lambda i: self._base_positions.get(i, i.pos()).x())
+
+    def _move_focus(self, key: int) -> bool:
+        # Mark that keyboard navigation is in use so focus animation can engage
+        self._keyboard_nav_used = True
+        group, idx = self._current_group_and_index()
+        def pick(lst: list[_LinkNodeItem], new_idx: int, prefer_left: bool = False, prefer_right: bool = False) -> bool:
+            if not lst:
+                return False
+            ordered = self._sorted_ring(lst)
+            # When jumping from center, choose leftmost/rightmost intentionally
+            if prefer_left:
+                target = ordered[0]
+            elif prefer_right:
+                target = ordered[-1]
+            else:
+                target = ordered[new_idx % len(ordered)]
+            self._set_focused_item(target)
+            return True
+
+        if key == Qt.Key_Left:
+            if group == "incoming":
+                return pick(self._incoming_items, idx - 1)
+            if group == "outgoing":
+                return pick(self._outgoing_items, idx - 1)
+            # center: prefer incoming ring
+            if self._incoming_items:
+                return pick(self._incoming_items, 0, prefer_left=True)
+            if self._outgoing_items:
+                return pick(self._outgoing_items, 0, prefer_left=True)
+        elif key == Qt.Key_Right:
+            if group == "incoming":
+                return pick(self._incoming_items, idx + 1)
+            if group == "outgoing":
+                return pick(self._outgoing_items, idx + 1)
+            # center: prefer outgoing ring
+            if self._outgoing_items:
+                return pick(self._outgoing_items, 0, prefer_right=True)
+            if self._incoming_items:
+                return pick(self._incoming_items, 0, prefer_right=True)
+        elif key == Qt.Key_Up:
+            if group == "center":
+                return pick(self._incoming_items, 0, prefer_left=True)
+            if group == "incoming":
+                return pick(self._incoming_items, idx - 1)
+            if group == "outgoing":
+                # move toward center from outgoing
+                if self._center_item:
+                    self._set_focused_item(self._center_item)
+                    return True
+        elif key == Qt.Key_Down:
+            if group == "center":
+                return pick(self._outgoing_items, 0)
+            if group == "outgoing":
+                return pick(self._outgoing_items, idx + 1)
+            if group == "incoming":
+                # move toward center from incoming
+                if self._center_item:
+                    self._set_focused_item(self._center_item)
+                    return True
+        return False
+
+    def reset_keyboard_focus_state(self) -> None:
+        """Reset keyboard navigation effects (used after opening a new page)."""
+        self._keyboard_nav_used = False
+        self._wiggle_timer.stop()
+        self._wiggle_target = None
+
+    def _update_label_visibility(self) -> None:
+        hide = self._zoom < self._label_hide_threshold
+        target = self._wiggle_target
+        for node in self._nodes:
+            show = (not hide) or (target is node)
+            node.text_item.setVisible(show)
 
 
 class LinkNavigatorPanel(QWidget):
@@ -317,11 +524,14 @@ class LinkNavigatorPanel(QWidget):
         super().__init__(parent)
         self.current_page: Optional[str] = None
         self.mode = "graph"
+        self.setFocusPolicy(Qt.StrongFocus)
 
         self.title_label = QLabel("Link Navigator")
         self.title_label.setStyleSheet("font-weight: bold; padding: 6px 8px;")
 
         self.graph_view = LinkGraphView()
+        # Route panel focus to the graph so arrow keys work without extra clicks
+        self.setFocusProxy(self.graph_view)
         self.graph_view.setMinimumHeight(320)
         self.graph_view.nodeActivated.connect(self.pageActivated.emit)
         self.graph_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -331,6 +541,11 @@ class LinkNavigatorPanel(QWidget):
         self.zoom_out_btn.setText("-")
         self.zoom_out_btn.setToolTip("Zoom out (Ctrl + scroll down)")
         self.zoom_out_btn.clicked.connect(self.graph_view.zoom_out)
+
+        self.zoom_reset_btn = QToolButton()
+        self.zoom_reset_btn.setText("⟳")
+        self.zoom_reset_btn.setToolTip("Reset zoom to fit")
+        self.zoom_reset_btn.clicked.connect(self.graph_view.reset_zoom)
 
         self.zoom_in_btn = QToolButton()
         self.zoom_in_btn.setText("+")
@@ -342,6 +557,7 @@ class LinkNavigatorPanel(QWidget):
         header.addWidget(self.title_label)
         header.addStretch()
         header.addWidget(self.zoom_out_btn)
+        header.addWidget(self.zoom_reset_btn)
         header.addWidget(self.zoom_in_btn)
 
         self.raw_view = QTextBrowser()
@@ -393,6 +609,12 @@ class LinkNavigatorPanel(QWidget):
             for p in relations["outgoing"]
         ]
         self.graph_view.set_graph(center, incoming_nodes, outgoing_nodes)
+        # Fit the new graph without requiring a manual refresh click
+        self.graph_view.reset_zoom()
+        # Disable keyboard-driven animation until user navigates again
+        self.graph_view.reset_keyboard_focus_state()
+        if self.mode == "graph":
+            self.graph_view.setFocus()
         self._update_raw_view(center, incoming_nodes, outgoing_nodes)
         self.title_label.setText(f"Link Navigator: {center.label}")
 
@@ -434,7 +656,7 @@ class LinkNavigatorPanel(QWidget):
             toggle = menu.addAction("Show Graph View")
         toggle.triggered.connect(self._toggle_mode)
         refresh_action = menu.addAction("Refresh")
-        refresh_action.triggered.connect(lambda: self.refresh())
+        refresh_action.triggered.connect(self._refresh_and_reset_zoom)
         widget = self.sender()
         global_pos = widget.mapToGlobal(pos) if hasattr(widget, "mapToGlobal") else self.mapToGlobal(pos)
         menu.exec(global_pos)
@@ -442,3 +664,9 @@ class LinkNavigatorPanel(QWidget):
     def _toggle_mode(self) -> None:
         self.mode = "raw" if self.mode == "graph" else "graph"
         self.stack.setCurrentIndex(1 if self.mode == "raw" else 0)
+        if self.mode == "graph":
+            self.graph_view.setFocus()
+
+    def _refresh_and_reset_zoom(self) -> None:
+        self.refresh()
+        self.graph_view.reset_zoom()
