@@ -3,20 +3,4 @@ Created Monday 24 November 2025
  ---
 
 [:AI_Features:LMStudio|LMStudio]
-
 [:AI_Features:ProxyServer|ProxyServer]
-[:AI_Features:ProxyServer|ProxyServer]
-
-this is a [:AI_Features:ProxyServer|ProxyServer]
-
-this is a [:AI_Features:ProxyServer|ProxyServer] that i like.
-
-[:AI_Features:ProxyServer|ProxyServer]
-[:AI_Features:ProxyServer|ProxyServer]
-you gotta love a [:AI_Features:ProxyServer|ProxyServer]
-
-
-( )  pick up hte milk! @boom
-
-![paste_image_001](./paste_image_001.png)
-

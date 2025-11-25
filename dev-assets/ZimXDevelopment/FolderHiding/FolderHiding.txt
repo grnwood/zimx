@@ -1,0 +1,13 @@
+# FolderHiding
+Created Tuesday 25 November 2025
+---
+
+Goal:
+Filter the left nav by the current page and it's decendants.
+
+This should effect the nav bar
+Should this affectg the link navigator?
+
+How to exit this mode?  Suggest Esc key, unfilters this mode as well as rolls up the index.
+
+

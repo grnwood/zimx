@@ -1,0 +1,17 @@
+# OpenWindow
+Created Tuesday 25 November 2025
+---
+
+Goal:
+Right click on a nav item, or bookmarks, or recent page button.
+Right click... "open a `new` window".
+
+New window opens with **just the editor** all other elements disabled
+	includes left nave
+	includes entire right tab panel.
+
+This window is editable within itself.
+No alt-left/right/up/down or vi key navigation.
+ctrl-l works, but ctrl-j does not.
+
+Any links clicked will navigate in the 'main' window, not the currently opened window.
