@@ -60,6 +60,12 @@ WIKI_LINK_STORAGE_PATTERN = re.compile(
     re.MULTILINE
 )
 
+# Handles a rare duplication bug where a wiki link tail is re-appended after decoding,
+# e.g. [link|label]tail|label] where tail is a suffix of link.
+WIKI_LINK_DUPLICATE_TAIL_PATTERN = re.compile(
+    r"\[(?P<link>[^\]|]+)\|(?P<label>[^\]]*)\](?P<tail>[^\s\]]+)\|\s*(?P=label)\]"
+)
+
 # Display pattern for rendered links (sentinel + link + sentinel + label + sentinel)
 # Uses \x00 sentinel for all links (both HTTP and page links)
 WIKI_LINK_DISPLAY_PATTERN = re.compile(r"\x00(?P<link>[^\x00\n]+)\x00(?P<label>[^\x00\n]*)\x00")
@@ -2193,6 +2199,16 @@ class MarkdownEditor(QTextEdit):
 
         # Restore wiki-style links: \x00link\x00label\x00 → [link|label]
         restored = WIKI_LINK_DISPLAY_PATTERN.sub(self._decode_wiki_link, text)
+        # Drop duplicated link tails that sometimes get re-appended after decoding.
+        def _dedupe_tail(m: re.Match[str]) -> str:
+            link = m.group("link")
+            label = m.group("label")
+            tail = m.group("tail")
+            if tail and link.endswith(tail):
+                return f"[{link}|{label}]"
+            return m.group(0)
+
+        restored = WIKI_LINK_DUPLICATE_TAIL_PATTERN.sub(_dedupe_tail, restored)
         restored = HEADING_DISPLAY_PATTERN.sub(self._decode_heading, restored)
         restored = DISPLAY_TASK_PATTERN.sub(repl, restored)
         # Restore bullets: • → *
