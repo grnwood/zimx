@@ -231,14 +231,14 @@ def save_bookmarks(paths: list[str]) -> None:
 
 
 def load_show_journal() -> bool:
-    """Load show_journal setting. Defaults to True."""
+    """Load show_journal setting. Defaults to False (hidden)."""
     conn = _get_conn()
     if not conn:
-        return True
+        return False
     cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("show_journal",))
     row = cur.fetchone()
     if not row:
-        return True
+        return False
     return str(row[0]).lower() == "true"
 
 

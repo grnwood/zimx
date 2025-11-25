@@ -4,21 +4,24 @@ from typing import Optional
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QTabWidget, QWidget
+from PySide6.QtCore import Qt
 from zimx.app import config
 
 from .ai_chat_panel import AIChatPanel
 from .task_panel import TaskPanel
 from .attachments_panel import AttachmentsPanel
 from .link_navigator_panel import LinkNavigatorPanel
+from .calendar_panel import CalendarPanel
 
 
 class TabbedRightPanel(QWidget):
-    """Tabbed panel containing Tasks and Attachments views."""
+    """Tabbed panel containing Tasks, Calendar, Attachments, and Link views."""
     
     # Forward signals from child panels
     taskActivated = Signal(str, int)  # path, line (from TaskPanel)
-    dateActivated = Signal(int, int, int)  # year, month, day (from TaskPanel calendar)
+    dateActivated = Signal(int, int, int)  # year, month, day (from Calendar tab)
     linkActivated = Signal(str)  # page path from Link Navigator
+    calendarPageActivated = Signal(str)  # page path from Calendar tab
     aiChatNavigateRequested = Signal(str)  # page path from AI Chat tab
     
     def __init__(self, parent=None, enable_ai_chats: bool = False, ai_chat_font_size: int = 13) -> None:
@@ -33,6 +36,10 @@ class TabbedRightPanel(QWidget):
         # Create Tasks tab (now includes calendar)
         self.task_panel = TaskPanel()
         self.tabs.addTab(self.task_panel, "Tasks")
+
+        # Create Calendar tab
+        self.calendar_panel = CalendarPanel()
+        self.tabs.addTab(self.calendar_panel, "Calendar")
         
         # Create Attachments tab
         self.attachments_panel = AttachmentsPanel()
@@ -48,10 +55,12 @@ class TabbedRightPanel(QWidget):
         
         # Set Tasks as default tab (index 0)
         self.tabs.setCurrentIndex(0)
+        self.tabs.currentChanged.connect(self._focus_current_tab)
         
         # Forward signals
         self.task_panel.taskActivated.connect(self.taskActivated)
-        self.task_panel.dateActivated.connect(self.dateActivated)
+        self.calendar_panel.dateActivated.connect(self.dateActivated)
+        self.calendar_panel.pageActivated.connect(self.calendarPageActivated)
         self.link_panel.pageActivated.connect(self.linkActivated)
         
         # Layout
@@ -60,6 +69,7 @@ class TabbedRightPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.tabs)
         self.setLayout(layout)
+        self._focus_current_tab()
     
     def refresh_tasks(self) -> None:
         """Refresh the task panel."""
@@ -73,18 +83,17 @@ class TabbedRightPanel(QWidget):
         """Set vault root for calendar in task panel."""
         if vault_root:
             self.task_panel.set_vault_root(vault_root)
+            self.calendar_panel.set_vault_root(vault_root)
         if self.ai_chat_panel:
             self.ai_chat_panel.set_vault_root(vault_root)
     
     def refresh_calendar(self) -> None:
         """Refresh the calendar to update bold dates."""
-        self.task_panel._update_calendar_dates()
+        self.calendar_panel.refresh()
     
     def set_calendar_date(self, year: int, month: int, day: int) -> None:
         """Set the calendar to show a specific date."""
-        from PySide6.QtCore import QDate
-        date = QDate(year, month, day)
-        self.task_panel.calendar.setSelectedDate(date)
+        self.calendar_panel.set_calendar_date(year, month, day)
     
     def set_current_page(self, page_path, relative_path=None) -> bool:
         """Update panels with the current page."""
@@ -138,6 +147,16 @@ class TabbedRightPanel(QWidget):
                 # Ensure content is fresh whenever the tab gains focus
                 self.link_panel.refresh(page_path)
                 break
+
+    def _focus_current_tab(self) -> None:
+        """Ensure the active tab gains focus when selected."""
+        widget = self.tabs.currentWidget()
+        if widget:
+            # If Tasks tab, focus its search bar for quick typing
+            if widget == self.task_panel and hasattr(self.task_panel, "focus_search"):
+                self.task_panel.focus_search()
+            else:
+                widget.setFocus(Qt.OtherFocusReason)
 
     def focus_ai_chat(self, page_path=None, create=False) -> None:
         """Switch to AI Chat tab and sync to the given page."""

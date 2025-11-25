@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
+import os
 
 import httpx
 from PySide6.QtCore import QEvent, QModelIndex, QPoint, Qt, Signal, QTimer, QObject
@@ -17,10 +18,10 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QPen,
+    QPalette,
 )
 from PySide6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QFileDialog,
     QLineEdit,
     QMenu,
@@ -38,6 +39,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QLabel,
     QHBoxLayout,
+    QToolButton,
 )
 
 from zimx.app import config, indexer
@@ -59,6 +61,7 @@ from .open_vault_dialog import OpenVaultDialog
 PATH_ROLE = int(Qt.ItemDataRole.UserRole)
 TYPE_ROLE = PATH_ROLE + 1
 OPEN_ROLE = TYPE_ROLE + 1
+_DETAILED_LOGGING = os.getenv("ZIMX_DETAILED_LOGGING", "0") not in ("0", "false", "False", "", None)
 
 
 class InlineNameEdit(QLineEdit):
@@ -175,6 +178,9 @@ class MainWindow(QMainWindow):
         self._suspend_selection_open: bool = False
         # Remember cursor positions for history navigation
         self._history_cursor_positions: dict[str, int] = {}
+        # Track last-saved content to detect dirty buffers
+        self._last_saved_content: Optional[str] = None
+        self._vi_suspended_for_tasks: bool = False
         
         # Track virtual (unsaved) pages
         self.virtual_pages: set[str] = set()
@@ -205,20 +211,30 @@ class MainWindow(QMainWindow):
         # Create custom header widget with "Show Journal" checkbox
         self.tree_header_widget = QWidget()
         tree_header_layout = QHBoxLayout()
-        tree_header_layout.setContentsMargins(5, 2, 5, 2)
-        tree_header_layout.setSpacing(10)
+        tree_header_layout.setContentsMargins(8, 4, 8, 4)
+        tree_header_layout.setSpacing(8)
         
         tree_header_label = QLabel("Vault")
         tree_header_label.setStyleSheet("font-weight: bold;")
         tree_header_layout.addWidget(tree_header_label)
         
-        self.show_journal_checkbox = QCheckBox("Show Journal")
-        self.show_journal_checkbox.setChecked(True)
-        self.show_journal_checkbox.toggled.connect(self._on_show_journal_toggled)
-        tree_header_layout.addWidget(self.show_journal_checkbox)
+        self.show_journal_button = QToolButton()
+        self.show_journal_button.setCheckable(True)
+        self.show_journal_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.show_journal_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
+        self.show_journal_button.setAutoRaise(True)
+        pal = QApplication.instance().palette()
+        tooltip_fg = pal.color(QPalette.ToolTipText).name()
+        tooltip_bg = pal.color(QPalette.ToolTipBase).name()
+        self.show_journal_button.setToolTip(
+            f"<div style='color:{tooltip_fg}; background:{tooltip_bg}; padding:2px 4px;'>Toggle Journal in navigator</div>"
+        )
+        self.show_journal_button.toggled.connect(self._on_show_journal_toggled)
+        tree_header_layout.addWidget(self.show_journal_button)
         
         tree_header_layout.addStretch()
         self.tree_header_widget.setLayout(tree_header_layout)
+        self.tree_header_widget.setStyleSheet("background: palette(midlight); border-bottom: 1px solid #555;")
         
         # Set the custom header widget
         self.tree_view.header().hide()
@@ -266,7 +282,12 @@ class MainWindow(QMainWindow):
         self.right_panel.taskActivated.connect(self._open_task_from_panel)
         self.right_panel.dateActivated.connect(self._open_journal_date)
         self.right_panel.linkActivated.connect(self._open_link_from_panel)
+        self.right_panel.calendarPageActivated.connect(self._open_calendar_page)
         self.right_panel.aiChatNavigateRequested.connect(self._on_ai_chat_navigate)
+        try:
+            self.right_panel.task_panel.focusGained.connect(self._suspend_vi_for_tasks)
+        except Exception:
+            pass
         self._inline_editor: Optional[InlineNameEdit] = None
         self._pending_selection: Optional[str] = None
         self._suspend_autosave = False
@@ -375,17 +396,27 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Select a vault to get started")
         self._default_status_stylesheet = self.statusBar().styleSheet()
 
-    # Create a right-aligned permanent status widget for VI mode indicator
+        # Create status badges (Dirty + VI)
+        self._badge_base_style = "border: 1px solid #666; padding: 2px 6px; border-radius: 3px;"
+
+        self._dirty_status_label = QLabel("")
+        self._dirty_status_label.setObjectName("dirtyStatusLabel")
+        self._dirty_status_label.setStyleSheet(self._badge_base_style + " background-color: transparent; margin-right: 6px;")
+        self._dirty_status_label.setToolTip("Unsaved changes")
+        self.statusBar().addPermanentWidget(self._dirty_status_label, 0)
+
         self._vi_status_label = QLabel("VI")
         self._vi_status_label.setObjectName("viStatusLabel")
-        # Base badge styling; background color will be toggled
-        self._vi_badge_base_style = (
-            "border: 1px solid #666; padding: 2px 6px; border-radius: 3px;"
-        )
-        # Start in OFF state (transparent background)
+        self._vi_badge_base_style = self._badge_base_style
         self._vi_status_label.setStyleSheet(self._vi_badge_base_style + " background-color: transparent;")
-        # Add to right side of the status bar
         self.statusBar().addPermanentWidget(self._vi_status_label, 0)
+
+        # Keep dirty indicator in sync with edits
+        try:
+            self.editor.document().modificationChanged.connect(lambda _: self._update_dirty_indicator())
+        except Exception:
+            pass
+        self._update_dirty_indicator()
 
         # Startup vault selection is orchestrated by main.py via .startup()
         self.editor.set_ai_actions_enabled(config.load_enable_ai_chats())
@@ -481,9 +512,14 @@ class MainWindow(QMainWindow):
         jump_shortcut = QShortcut(QKeySequence("Ctrl+J"), self)
         jump_shortcut.activated.connect(self._jump_to_page)
         link_shortcut = QShortcut(QKeySequence("Ctrl+L"), self)
+        link_shortcut.setContext(Qt.ApplicationShortcut)
         link_shortcut.activated.connect(self._insert_link)
         copy_link_shortcut = QShortcut(QKeySequence("Ctrl+Shift+L"), self)
+        copy_link_shortcut.setContext(Qt.ApplicationShortcut)
         copy_link_shortcut.activated.connect(self._copy_current_page_link)
+        focus_tasks_shortcut = QShortcut(QKeySequence("Ctrl+\\"), self)
+        focus_tasks_shortcut.setContext(Qt.ApplicationShortcut)
+        focus_tasks_shortcut.activated.connect(self._focus_tasks_search)
         date_shortcut = QShortcut(QKeySequence("Ctrl+D"), self)
         date_shortcut.activated.connect(self._insert_date)
         open_vault_shortcut = QShortcut(QKeySequence("Ctrl+O"), self)
@@ -619,7 +655,7 @@ class MainWindow(QMainWindow):
             self.editor.set_font_point_size(self.font_size)
             # Load show_journal setting
             show_journal = config.load_show_journal()
-            self.show_journal_checkbox.setChecked(show_journal)
+            self.show_journal_button.setChecked(show_journal)
         self.editor.set_context(self.vault_root, None)
         self.editor.set_markdown("")
         self.current_path = None
@@ -680,56 +716,69 @@ class MainWindow(QMainWindow):
         # Save window geometry (size and position)
         geometry = self.saveGeometry().toBase64().data().decode('ascii')
         config.save_window_geometry(geometry)
-        print(f"[Geometry] Saved window geometry: {len(geometry)} chars")
+        if _DETAILED_LOGGING:
+            print(f"[Geometry] Saved window geometry: {len(geometry)} chars")
         
         # Save main splitter state (tree vs editor+right panel)
         splitter_state = self.main_splitter.saveState().toBase64().data().decode('ascii')
         config.save_splitter_state(splitter_state)
-        print(f"[Geometry] Saved main splitter state: {len(splitter_state)} chars")
+        if _DETAILED_LOGGING:
+            print(f"[Geometry] Saved main splitter state: {len(splitter_state)} chars")
         
         # Save editor splitter state (editor vs right panel)
         editor_splitter_state = self.editor_split.saveState().toBase64().data().decode('ascii')
         config.save_editor_splitter_state(editor_splitter_state)
-        print(f"[Geometry] Saved editor splitter state: {len(editor_splitter_state)} chars")
+        if _DETAILED_LOGGING:
+            print(f"[Geometry] Saved editor splitter state: {len(editor_splitter_state)} chars")
 
     def _restore_geometry(self) -> None:
         """Restore window geometry and splitter positions."""
         if not config.has_active_vault():
-            print("[Geometry] No active vault, skipping restore")
+            if _DETAILED_LOGGING:
+                print("[Geometry] No active vault, skipping restore")
             return
         
         # Restore window geometry
         geometry_str = config.load_window_geometry()
         if geometry_str:
-            print(f"[Geometry] Restoring window geometry: {len(geometry_str)} chars")
+            if _DETAILED_LOGGING:
+                print(f"[Geometry] Restoring window geometry: {len(geometry_str)} chars")
             from PySide6.QtCore import QByteArray
             geometry = QByteArray.fromBase64(geometry_str.encode('ascii'))
             result = self.restoreGeometry(geometry)
-            print(f"[Geometry] Window geometry restore result: {result}")
+            if _DETAILED_LOGGING:
+                print(f"[Geometry] Window geometry restore result: {result}")
         else:
-            print("[Geometry] No saved window geometry found")
+            if _DETAILED_LOGGING:
+                print("[Geometry] No saved window geometry found")
         
         # Restore main splitter state
         splitter_state_str = config.load_splitter_state()
         if splitter_state_str:
-            print(f"[Geometry] Restoring main splitter state: {len(splitter_state_str)} chars")
+            if _DETAILED_LOGGING:
+                print(f"[Geometry] Restoring main splitter state: {len(splitter_state_str)} chars")
             from PySide6.QtCore import QByteArray
             splitter_state = QByteArray.fromBase64(splitter_state_str.encode('ascii'))
             result = self.main_splitter.restoreState(splitter_state)
-            print(f"[Geometry] Main splitter restore result: {result}")
+            if _DETAILED_LOGGING:
+                print(f"[Geometry] Main splitter restore result: {result}")
         else:
-            print("[Geometry] No saved main splitter state found")
+            if _DETAILED_LOGGING:
+                print("[Geometry] No saved main splitter state found")
         
         # Restore editor splitter state
         editor_splitter_state_str = config.load_editor_splitter_state()
         if editor_splitter_state_str:
-            print(f"[Geometry] Restoring editor splitter state: {len(editor_splitter_state_str)} chars")
+            if _DETAILED_LOGGING:
+                print(f"[Geometry] Restoring editor splitter state: {len(editor_splitter_state_str)} chars")
             from PySide6.QtCore import QByteArray
             editor_splitter_state = QByteArray.fromBase64(editor_splitter_state_str.encode('ascii'))
             result = self.editor_split.restoreState(editor_splitter_state)
-            print(f"[Geometry] Editor splitter restore result: {result}")
+            if _DETAILED_LOGGING:
+                print(f"[Geometry] Editor splitter restore result: {result}")
         else:
-            print("[Geometry] No saved editor splitter state found")
+            if _DETAILED_LOGGING:
+                print("[Geometry] No saved editor splitter state found")
 
     def _on_splitter_moved(self, pos: int, index: int) -> None:
         """Save splitter positions when moved (debounced)."""
@@ -883,7 +932,7 @@ class MainWindow(QMainWindow):
         self.tree_model.removeRows(0, self.tree_model.rowCount())
         
         # Check if Journal should be filtered
-        show_journal = self.show_journal_checkbox.isChecked()
+        show_journal = self.show_journal_button.isChecked()
         
         for node in data:
             # Hide the root vault node (path == "/") and render only its children
@@ -937,7 +986,6 @@ class MainWindow(QMainWindow):
                 # Check if leaving an unsaved virtual page
                 if self.current_path in self.virtual_pages:
                     self._cleanup_virtual_page_if_unchanged(self.current_path)
-                self._save_current_file(auto=True)
         if not current.isValid():
             self._debug("Tree selection cleared (no valid index).")
             return
@@ -965,6 +1013,9 @@ class MainWindow(QMainWindow):
     def _open_file(self, path: str, retry: bool = False, add_to_history: bool = True, force: bool = False, cursor_at_end: bool = False, restore_history_cursor: bool = False) -> None:
         if not path or (path == self.current_path and not force):
             return
+        # Save current page if dirty before switching
+        if self.current_path and path != self.current_path:
+            self._save_dirty_page()
         
         # Clean up current page if it's an unchanged virtual page
         if self.current_path and self.current_path in self.virtual_pages:
@@ -999,6 +1050,13 @@ class MainWindow(QMainWindow):
         self._suspend_autosave = True
         self.editor.set_markdown(content)
         self._suspend_autosave = False
+        # Mark buffer clean for dirty tracking
+        try:
+            self.editor.document().setModified(False)
+        except Exception:
+            pass
+        self._last_saved_content = self.editor.to_markdown()
+        self._update_dirty_indicator()
         updated = indexer.index_page(path, content)
         if updated:
             self.right_panel.refresh_tasks()
@@ -1072,6 +1130,12 @@ class MainWindow(QMainWindow):
                 self._debug(f"Virtual page {self.current_path} unchanged from template, skipping save.")
                 # Still stop the timer to prevent repeated attempts
                 self.autosave_timer.stop()
+                self._last_saved_content = current_content
+                try:
+                    self.editor.document().setModified(False)
+                except Exception:
+                    pass
+                self._update_dirty_indicator()
                 return
             
             # Content has changed, ensure folders exist before saving
@@ -1093,6 +1157,12 @@ class MainWindow(QMainWindow):
             indexer.index_page(self.current_path, payload["content"])
             self.right_panel.refresh_tasks()
             self.right_panel.refresh_links(self.current_path)
+        self._last_saved_content = payload["content"]
+        try:
+            self.editor.document().setModified(False)
+        except Exception:
+            pass
+        self._update_dirty_indicator()
         
         # Mark page as saved (remove from virtual pages)
         was_virtual = self.current_path in self.virtual_pages
@@ -1106,6 +1176,18 @@ class MainWindow(QMainWindow):
         message = "Auto-saved" if auto else "Saved"
         display_path = path_to_colon(self.current_path) if self.current_path else ""
         self.statusBar().showMessage(f"{message} {display_path}", 2000 if auto else 4000)
+
+    def _is_editor_dirty(self) -> bool:
+        """Return True if the buffer differs from last saved content."""
+        if not self.current_path:
+            return False
+        current = self.editor.to_markdown()
+        return current != (self._last_saved_content or "")
+
+    def _save_dirty_page(self) -> None:
+        """Save the current page if there are unsaved edits."""
+        if self._is_editor_dirty():
+            self._save_current_file(auto=True)
 
     def _open_journal_today(self) -> None:
         if not self.vault_root:
@@ -1454,6 +1536,7 @@ class MainWindow(QMainWindow):
         self._open_file(path)
         # Focus first, then go to line so the selection isn't cleared
         self.editor.setFocus()
+        self._restore_vi_if_suspended()
         self._goto_line(line, select_line=True)
 
     def _open_link_from_panel(self, path: str) -> None:
@@ -1479,6 +1562,19 @@ class MainWindow(QMainWindow):
         self._open_file(path)
         self.right_panel.focus_link_tab(path)
         self._apply_navigation_focus("navigator")
+
+    def _open_calendar_page(self, path: str) -> None:
+        """Open a page from the Calendar tab without changing tabs."""
+        if not path:
+            return
+        self._select_tree_path(path)
+        self._open_file(path)
+        # Keep the Calendar tab active and return focus to its tree
+        try:
+            self.right_panel.tabs.setCurrentWidget(self.right_panel.calendar_panel)
+            self.right_panel.calendar_panel.journal_tree.setFocus(Qt.OtherFocusReason)
+        except Exception:
+            pass
 
     def _open_link_in_context(self, link: str) -> None:
         """Handle link activations from the editor."""
@@ -1866,6 +1962,35 @@ class MainWindow(QMainWindow):
 
     def _focus_editor(self) -> None:
         self.editor.setFocus()
+
+    def _focus_tasks_search(self) -> None:
+        """Focus the Tasks tab search bar."""
+        try:
+            # Switch to Tasks tab
+            self.right_panel.tabs.setCurrentIndex(0)
+            # Suspend vi-mode while interacting with tasks
+            self._suspend_vi_for_tasks()
+            # Explicitly focus the search box
+            if hasattr(self.right_panel.task_panel, "focus_search"):
+                self.right_panel.task_panel.focus_search()
+            else:
+                self.right_panel.task_panel.search.setFocus(Qt.ShortcutFocusReason)
+        except Exception:
+            pass
+
+    def _suspend_vi_for_tasks(self) -> None:
+        """Turn off vi-mode while interacting with Tasks, remembering prior state."""
+        if getattr(self, "_vi_mode_active", False):
+            self._vi_suspended_for_tasks = True
+            self._vi_mode_active = False
+            self._apply_vi_mode_statusbar_style()
+
+    def _restore_vi_if_suspended(self) -> None:
+        """Restore vi-mode if it was suspended for task interactions."""
+        if self._vi_suspended_for_tasks:
+            self._vi_suspended_for_tasks = False
+            self._vi_mode_active = True
+            self._apply_vi_mode_statusbar_style()
 
     def _mark_tree_arrow_nav(self) -> None:
         """Flag that tree navigation via arrow keys should keep focus on the tree."""
@@ -2962,6 +3087,24 @@ class MainWindow(QMainWindow):
         release_event = QKeyEvent(QEvent.KeyRelease, key, modifiers, "", False, 1)
         QApplication.sendEvent(target, press_event)
         QApplication.sendEvent(target, release_event)
+
+    def _update_dirty_indicator(self) -> None:
+        """Refresh the dirty badge next to the VI indicator."""
+        if not hasattr(self, "_dirty_status_label"):
+            return
+        dirty = self._is_editor_dirty()
+        if dirty:
+            self._dirty_status_label.setText("●")
+            self._dirty_status_label.setStyleSheet(
+                self._badge_base_style + " background-color: #e57373; color: #000; margin-right: 6px;"
+            )
+            self._dirty_status_label.setToolTip("Unsaved changes")
+        else:
+            self._dirty_status_label.setText("●")
+            self._dirty_status_label.setStyleSheet(
+                self._badge_base_style + " background-color: #81c784; color: #000; margin-right: 6px;"
+            )
+            self._dirty_status_label.setToolTip("All changes saved")
 
     def _apply_vi_mode_statusbar_style(self) -> None:
         # Switch editor cursor styling for vi-mode; no banners/overlays

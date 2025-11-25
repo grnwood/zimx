@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+import re
 from typing import Iterable, Optional
 
-from PySide6.QtCore import QEvent, Qt, Signal, QDate
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QCalendarWidget,
     QCheckBox,
     QLineEdit,
     QListWidget,
@@ -21,27 +21,20 @@ from PySide6.QtWidgets import (
 )
 
 from zimx.app import config
-from zimx.server.adapters.files import PAGE_SUFFIX
 from .path_utils import path_to_colon
 
 
 class TaskPanel(QWidget):
     taskActivated = Signal(str, int)
-    dateActivated = Signal(int, int, int)  # year, month, day
+    focusGained = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        
-        # Calendar widget for journal date selection
-        self.calendar = QCalendarWidget()
-        self.calendar.setGridVisible(True)
-        self.calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
-        self.calendar.clicked.connect(self._on_date_clicked)
-        self.calendar.setSelectedDate(QDate.currentDate())
-        
+
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search tasks…")
         self.search.textChanged.connect(self._refresh_tasks)
+        self.search.installEventFilter(self)
 
         self.tag_list = QListWidget()
         self.tag_list.setSelectionMode(QAbstractItemView.NoSelection)
@@ -49,6 +42,7 @@ class TaskPanel(QWidget):
         self.tag_list.itemClicked.connect(self._toggle_tag_selection)
         self.tag_list.viewport().installEventFilter(self)
         self.active_tags: set[str] = set()
+        self._available_tags: set[str] = set()
 
         self.show_completed = QCheckBox("Show completed")
         self.show_completed.setChecked(False)
@@ -71,6 +65,9 @@ class TaskPanel(QWidget):
         header.sectionClicked.connect(self._handle_header_click)
         header.setSortIndicator(self.sort_column, self.sort_order)
         self.task_tree.setColumnWidth(0, 40)
+        self.task_tree.setFocusPolicy(Qt.StrongFocus)
+        self.task_tree.installEventFilter(self)
+        self.task_tree.setFocusPolicy(Qt.StrongFocus)
 
         sidebar = QVBoxLayout()
         sidebar.addWidget(QLabel("Tags"))
@@ -86,12 +83,36 @@ class TaskPanel(QWidget):
         splitter.setSizes([180, 360])
 
         layout = QVBoxLayout()
-        layout.addWidget(self.calendar)
         layout.addWidget(self.search)
         layout.addWidget(splitter, 1)
         self.setLayout(layout)
         
         self.vault_root = None
+        self._setup_focus_defaults()
+
+    def _setup_focus_defaults(self) -> None:
+        """Ensure sensible default focus inside the Tasks tab."""
+        self.search.setFocusPolicy(Qt.StrongFocus)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.search.setFocus()
+        self.task_tree.setFocusPolicy(Qt.StrongFocus)
+        self.search.installEventFilter(self)
+        self.task_tree.installEventFilter(self)
+
+    def focusInEvent(self, event):  # type: ignore[override]
+        super().focusInEvent(event)
+        self.focus_search()
+        try:
+            self.focusGained.emit()
+        except Exception:
+            pass
+
+    def focus_search(self) -> None:
+        """Public helper to focus the task search field."""
+        try:
+            self.search.setFocus(Qt.OtherFocusReason)
+        except Exception:
+            pass
 
     def eventFilter(self, obj, event):
         if obj is self.tag_list.viewport() and event.type() == QEvent.MouseButtonPress:
@@ -100,9 +121,14 @@ class TaskPanel(QWidget):
                 self._refresh_tasks()
                 self._refresh_tags()
                 return True
+        if obj in (self.search, self.task_tree) and event.type() == QEvent.KeyPress:
+            if self._handle_task_nav_key(event):
+                return True
         return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event):
+        if self._handle_task_nav_key(event):
+            return
         if event.key() == Qt.Key_Escape:
             self.active_tags.clear()
             self.search.clear()
@@ -111,6 +137,64 @@ class TaskPanel(QWidget):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def _handle_task_nav_key(self, event) -> bool:
+        """Handle up/down navigation (including vi j/k) within the task list."""
+        key = event.key()
+        if key in (Qt.Key_J, Qt.Key_Down):
+            self._cycle_task_selection(1)
+            event.accept()
+            return True
+        if key in (Qt.Key_K, Qt.Key_Up):
+            self._cycle_task_selection(-1)
+            event.accept()
+            return True
+        return False
+
+    def _cycle_task_selection(self, direction: int) -> None:
+        """Move selection up/down with wrap-around in the task list."""
+        count = self.task_tree.topLevelItemCount()
+        if count == 0:
+            return
+        current_item = self.task_tree.currentItem()
+        if not current_item:
+            target_index = 0 if direction > 0 else count - 1
+        else:
+            try:
+                current_index = next(
+                    i for i in range(count) if self.task_tree.topLevelItem(i) == current_item
+                )
+            except StopIteration:
+                current_index = -1
+            target_index = (current_index + direction) % count
+        target_item = self.task_tree.topLevelItem(target_index)
+        if target_item:
+            self.task_tree.setCurrentItem(target_item)
+            self.task_tree.scrollToItem(target_item)
+            self.task_tree.setFocus(Qt.OtherFocusReason)
+
+    def _parse_search_tags(self, text: str) -> tuple[str, Optional[list[str]], list[str]]:
+        """Extract @tags from search text; return (query_without_tags, found_tags_or_None, missing_tags)."""
+        tags = re.findall(r"@([A-Za-z0-9_]+)", text)
+        if not tags:
+            return text, None, []
+        found = [t for t in tags if t in self._available_tags]
+        missing = [t for t in tags if t not in self._available_tags]
+        # Remove tags from query
+        query = re.sub(r"@([A-Za-z0-9_]+)", "", text).strip()
+        return query, found, missing
+
+    def _apply_search_tag_feedback(self, found: Optional[list[str]], missing: list[str]) -> None:
+        """Color the search field based on tag validity."""
+        if found is None:
+            # No tags in search: reset color
+            self.search.setStyleSheet("")
+            return
+        if missing:
+            self.search.setStyleSheet("color: #c62828;")  # red for missing tags
+        else:
+            # At least one tag present and all valid
+            self.search.setStyleSheet("color: #2e7d32;")  # green for valid tags
 
     def _toggle_tag_selection(self, item: QListWidgetItem) -> None:
         tag = item.data(Qt.UserRole)
@@ -139,6 +223,7 @@ class TaskPanel(QWidget):
         self.tag_list.blockSignals(True)
         self.tag_list.clear()
         tags = config.fetch_task_tags()
+        self._available_tags = {tag for tag, _ in tags}
         for tag, count in tags:
             item = QListWidgetItem(f"{tag} ({count})")
             item.setData(Qt.UserRole, tag)
@@ -152,8 +237,16 @@ class TaskPanel(QWidget):
 
     def _refresh_tasks(self) -> None:
         query = self.search.text().strip()
+        query, found_tags, missing_tags = self._parse_search_tags(query)
+        self._apply_search_tag_feedback(found_tags, missing_tags)
+        # If tags were supplied in the search, override active_tags and keep tag list in sync
+        if found_tags is not None:
+            if set(found_tags) != self.active_tags:
+                self.active_tags = set(found_tags)
+                self._refresh_tags()
         include_done = self.show_completed.isChecked()
-        tasks = config.fetch_tasks(query, sorted(self.active_tags), include_done=include_done)
+        effective_tags = self.active_tags
+        tasks = config.fetch_tasks(query, sorted(effective_tags), include_done=include_done)
         self.task_tree.clear()
         for task in tasks:
             if self._is_future_task(task) and not self.show_future.isChecked():
@@ -240,18 +333,10 @@ class TaskPanel(QWidget):
     def _present_path(self, path: str) -> str:
         return path_to_colon(path)
     
-    def _on_date_clicked(self, date: QDate) -> None:
-        """Handle calendar date click - emit signal to create/open journal entry."""
-        year = date.year()
-        month = date.month()
-        day = date.day()
-        self.dateActivated.emit(year, month, day)
-    
     def set_vault_root(self, vault_root: str) -> None:
-        """Set vault root for calendar date formatting."""
+        """Set vault root for task filtering preferences."""
         self.vault_root = vault_root
         self._apply_show_future_preference()
-        self._update_calendar_dates()
 
     def _on_show_future_toggled(self, checked: bool) -> None:
         if config.has_active_vault():
@@ -278,49 +363,3 @@ class TaskPanel(QWidget):
         self.show_future.setChecked(saved)
         self.show_future.blockSignals(False)
         self._refresh_tasks()
-
-    def _update_calendar_dates(self) -> None:
-        """Scan journal folder and bold dates that have saved entries."""
-        if not self.vault_root:
-            return
-        
-        from pathlib import Path
-        from PySide6.QtGui import QTextCharFormat, QFont
-        
-        vault_path = Path(self.vault_root)
-        journal_path = vault_path / "Journal"
-        
-        if not journal_path.exists():
-            return
-        
-        # Get current month/year from calendar
-        current_date = self.calendar.selectedDate()
-        year = current_date.year()
-        month = current_date.month()
-        
-        # Bold format for dates with entries
-        bold_format = QTextCharFormat()
-        bold_font = QFont()
-        bold_font.setBold(True)
-        bold_font.setWeight(QFont.Black)  # Maximum weight for prominence
-        bold_format.setFont(bold_font)
-        # Add a distinct color to make it more visible on Windows
-        bold_format.setForeground(QColor(0, 100, 200))  # Dark blue color
-        
-        # Check each day in the current month
-        year_path = journal_path / str(year)
-        month_path = year_path / f"{month:02d}"
-        
-        if month_path.exists():
-            for day_dir in month_path.iterdir():
-                if day_dir.is_dir():
-                    try:
-                        day_num = int(day_dir.name)
-                        day_file = day_dir / f"{day_dir.name}{PAGE_SUFFIX}"
-                        
-                        # Check if the file exists (saved page)
-                        if day_file.exists():
-                            date = QDate(year, month, day_num)
-                            self.calendar.setDateTextFormat(date, bold_format)
-                    except (ValueError, OSError):
-                        continue

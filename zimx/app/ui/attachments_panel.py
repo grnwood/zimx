@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
+import os
 
 from PySide6.QtCore import Qt, QUrl, QSize, QMimeData
 from PySide6.QtGui import QIcon, QPixmap, QDesktopServices, QDrag
@@ -14,6 +15,10 @@ from PySide6.QtWidgets import (
     QToolButton,
     QFileIconProvider,
 )
+
+from zimx.app import config
+
+_DETAILED_LOGGING = os.getenv("ZIMX_DETAILED_LOGGING", "0") not in ("0", "false", "False", "", None)
 
 
 class AttachmentsListWidget(QListWidget):
@@ -112,10 +117,11 @@ class AttachmentsPanel(QWidget):
         # Images are stored in the same folder as the page text file
         page_folder = self.current_page_path.parent
         
-        print(f"[Attachments] current_page_path: {self.current_page_path}")
-        print(f"[Attachments] page_folder: {page_folder}")
-        print(f"[Attachments] page_folder exists: {page_folder.exists()}")
-        print(f"[Attachments] page_folder is_dir: {page_folder.is_dir()}")
+        if _DETAILED_LOGGING:
+            print(f"[Attachments] current_page_path: {self.current_page_path}")
+            print(f"[Attachments] page_folder: {page_folder}")
+            print(f"[Attachments] page_folder exists: {page_folder.exists()}")
+            print(f"[Attachments] page_folder is_dir: {page_folder.is_dir()}")
         
         if not page_folder.exists() or not page_folder.is_dir():
             self.open_folder_button.setEnabled(False)
@@ -131,9 +137,11 @@ class AttachmentsPanel(QWidget):
         # List all files in the folder (excluding the page text file itself)
         try:
             files = sorted(page_folder.iterdir(), key=lambda p: p.name.lower())
-            print(f"[Attachments] Found {len(files)} files in folder")
+            if _DETAILED_LOGGING:
+                print(f"[Attachments] Found {len(files)} files in folder")
             for file_path in files:
-                print(f"[Attachments] Checking file: {file_path}")
+                if _DETAILED_LOGGING:
+                    print(f"[Attachments] Checking file: {file_path}")
                 if file_path.is_file() and file_path != self.current_page_path:
                     item = QListWidgetItem()
                     item.setData(Qt.UserRole, str(file_path))

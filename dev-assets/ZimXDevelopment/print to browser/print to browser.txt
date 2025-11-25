@@ -1,0 +1,11 @@
+# print_to_browser
+Created Tuesday 25 November 2025
+---
+
+This feature should:
+
+* Copy the entire page.txt, page folder and page attachments to a tmp dir converting each page into a .HTML page from a .TXT page.
+  * Write all new links as relative to the root of the folder so they can be navigating via HTML.
+* The tmp dir should be deferred to OS level as to how to create
+  * No cleanup is needed, the OS can clean tmp folders according to its own schedule
+* When complete, launch the main page (PageName.html) using the underlying OS browser. underlying OS browser.

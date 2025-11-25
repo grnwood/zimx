@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from typing import Optional
 from html.parser import HTMLParser
+import os
 
 from PySide6.QtCore import QEvent, QMimeData, Qt, QRegularExpression, Signal, QUrl, QPoint, QTimer
 from PySide6.QtGui import (
@@ -80,6 +81,8 @@ IMAGE_PROP_ORIGINAL = IMAGE_PROP_ALT + 1
 IMAGE_PROP_WIDTH = IMAGE_PROP_ALT + 2
 IMAGE_PROP_NATURAL_WIDTH = IMAGE_PROP_ALT + 3
 IMAGE_PROP_NATURAL_HEIGHT = IMAGE_PROP_ALT + 4
+
+_DETAILED_LOGGING = os.getenv("ZIMX_DETAILED_LOGGING", "0") not in ("0", "false", "False", "", None)
 
 
 def heading_sentinel(level: int) -> str:
@@ -728,27 +731,28 @@ class MarkdownEditor(QTextEdit):
         self._apply_scroll_past_end_margin()
         t5 = time.perf_counter()
         
-        print(f"[TIMING] set_markdown breakdown:")
-        print(f"  normalize_images: {(t1-t0)*1000:.1f}ms")
-        print(f"  to_display: {(t2-t1)*1000:.1f}ms")
-        print(f"  setPlainText: {(t3-t2)*1000:.1f}ms")
-        print(f"  render_images: {(t4-t3)*1000:.1f}ms (lazy - deferred)")
-        print(f"  schedule_outline+margin: {(t5-t4)*1000:.1f}ms")
-        print(f"  TOTAL: {(t5-t0)*1000:.1f}ms")
+        if _DETAILED_LOGGING:
+            print(f"[TIMING] set_markdown breakdown:")
+            print(f"  normalize_images: {(t1-t0)*1000:.1f}ms")
+            print(f"  to_display: {(t2-t1)*1000:.1f}ms")
+            print(f"  setPlainText: {(t3-t2)*1000:.1f}ms")
+            print(f"  render_images: {(t4-t3)*1000:.1f}ms (lazy - deferred)")
+            print(f"  schedule_outline+margin: {(t5-t4)*1000:.1f}ms")
+            print(f"  TOTAL: {(t5-t0)*1000:.1f}ms")
         
-        # Warn about potential performance issues
-        setPlainText_time_ms = (t3-t2)*1000
-        if setPlainText_time_ms > 1000:
-            print(f"[PERF WARNING] setPlainText took {setPlainText_time_ms:.1f}ms - unusually slow!")
-            print("  This may indicate regex backtracking or signal cascade issues.")
-            print("  Try environment variable ZIMX_DISABLE_HIGHLIGHTER_LOAD=1 for testing.")
-        if incremental:
-            print(f"[TIMING] Incremental batches={batches} cumulative_insert={batch_ms_total:.1f}ms avg_batch={(batch_ms_total/max(batches,1)):.1f}ms")
-        # Report highlighter timing
-        if self.highlighter._timing_blocks:
-            avg = (self.highlighter._timing_total / self.highlighter._timing_blocks) * 1000.0
-            total = self.highlighter._timing_total * 1000.0
-            print(f"[TIMING] Highlighter: blocks={self.highlighter._timing_blocks} total={total:.1f}ms avg={avg:.2f}ms")
+            # Warn about potential performance issues
+            setPlainText_time_ms = (t3-t2)*1000
+            if setPlainText_time_ms > 1000:
+                print(f"[PERF WARNING] setPlainText took {setPlainText_time_ms:.1f}ms - unusually slow!")
+                print("  This may indicate regex backtracking or signal cascade issues.")
+                print("  Try environment variable ZIMX_DISABLE_HIGHLIGHTER_LOAD=1 for testing.")
+            if incremental:
+                print(f"[TIMING] Incremental batches={batches} cumulative_insert={batch_ms_total:.1f}ms avg_batch={(batch_ms_total/max(batches,1)):.1f}ms")
+            # Report highlighter timing
+            if self.highlighter._timing_blocks:
+                avg = (self.highlighter._timing_total / self.highlighter._timing_blocks) * 1000.0
+                total = self.highlighter._timing_total * 1000.0
+                print(f"[TIMING] Highlighter: blocks={self.highlighter._timing_blocks} total={total:.1f}ms avg={avg:.2f}ms")
         # Disable timing to avoid overhead for subsequent edits
         self.highlighter.enable_timing(False)
 
@@ -2816,7 +2820,8 @@ class MarkdownEditor(QTextEdit):
         if not matches:
             return
         
-        print(f"[TIMING] Rendering {len(matches)} images...")
+        if _DETAILED_LOGGING:
+            print(f"[TIMING] Rendering {len(matches)} images...")
         cursor = self.textCursor()
         cursor.beginEditBlock()
         try:
