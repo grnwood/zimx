@@ -621,6 +621,7 @@ class MarkdownEditor(QTextEdit):
         self._camel_refresh_timer.setSingleShot(True)
         self._camel_refresh_timer.timeout.connect(self._refresh_camel_links)
         self._last_camel_trigger: Optional[str] = None
+        self._last_camel_cursor_pos: Optional[int] = None
         # Enable mouse tracking for hover cursor changes
         self.viewport().setMouseTracking(True)
         # Enable drag and drop for file attachments
@@ -782,6 +783,8 @@ class MarkdownEditor(QTextEdit):
         storage_text = self._from_display(current_text)
         converted = self._convert_camelcase_links(storage_text)
         if converted == storage_text:
+            self._last_camel_trigger = None
+            self._last_camel_cursor_pos = None
             return
         # Re-render with updated links
         self._display_guard = True
@@ -801,38 +804,36 @@ class MarkdownEditor(QTextEdit):
     def _position_cursor_after_camel(self, cursor: QTextCursor, text: str) -> None:
         """Place cursor after the converted link based on last trigger (space/enter)."""
         trigger = self._last_camel_trigger
+        origin_pos = self._last_camel_cursor_pos
         self._last_camel_trigger = None
+        self._last_camel_cursor_pos = None
         if not trigger:
             return
-        # Find the last display-format link sentinel sequence to place cursor after it
-        sentinel = "\x00"
-        last_link = text.rfind(sentinel)
-        if last_link == -1:
+
+        # Find the last converted link at or before the original cursor position
+        chosen = None
+        for m in WIKI_LINK_DISPLAY_PATTERN.finditer(text):
+            if origin_pos is None or m.start() <= origin_pos:
+                chosen = m
+        if not chosen:
             return
-        # Walk forward: \x00link\x00label\x00
-        start = last_link
-        first_sep = text.find(sentinel, start + 1)
-        if first_sep == -1:
-            return
-        second_sep = text.find(sentinel, first_sep + 1)
-        if second_sep == -1:
-            return
-        end = text.find(sentinel, second_sep + 1)
-        if end == -1:
-            end = second_sep  # label might be empty
-        # Place cursor after label (visible text)
-        pos = end + 1
-        cursor.setPosition(min(pos, len(text)))
+
+        # Position after the closing sentinel of the chosen link
+        target_pos = chosen.end()
+        cursor.setPosition(min(target_pos, len(text)))
+
         if trigger == "space":
-            # Add a space if not already present
-            if pos < len(text) and text[pos] != " ":
+            # Land after the space the user just typed (or insert one if missing)
+            if target_pos < len(text) and text[target_pos] == " ":
+                cursor.setPosition(min(target_pos + 1, len(text)))
+            else:
                 cursor.insertText(" ")
-                cursor.setPosition(cursor.position())
         elif trigger == "enter":
-            # Insert newline if not already at line break
-            if pos < len(text) and text[pos] != "\n":
+            # Land on the next line (or insert a newline if missing)
+            if target_pos < len(text) and text[target_pos] == "\n":
+                cursor.setPosition(min(target_pos + 1, len(text)))
+            else:
                 cursor.insertText("\n")
-                cursor.setPosition(cursor.position())
 
     def set_font_point_size(self, size: int) -> None:
         font = self.font()
@@ -1426,6 +1427,7 @@ class MarkdownEditor(QTextEdit):
         # Only schedule CamelCase conversion when space/enter are released (typing flow)
         if event.key() in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter) and not (event.modifiers() & ~Qt.KeypadModifier):
             self._last_camel_trigger = "enter" if event.key() in (Qt.Key_Return, Qt.Key_Enter) else "space"
+            self._last_camel_cursor_pos = self.textCursor().position()
             self._schedule_camel_refresh()
 
     def contextMenuEvent(self, event):  # type: ignore[override]

@@ -1,0 +1,9 @@
+# ZimXDevelopment
+
+Logbook of all the development efforts on zim.
+
+[:AI_Features|]
+[:Links_and_Navigation|]
+[:Server_Side|]
+[:UI_Editor|]
+
