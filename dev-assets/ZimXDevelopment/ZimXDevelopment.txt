@@ -29,6 +29,8 @@ Logbook of all the development efforts on zim.
 	aka. save cursor position in all files, refactor out the 'history only' logic.
 ( )  still able to get a double folder link somehow? See `/ZimXDevelopment/FolderHiding/FolderHiding/FolderHiding.txt`
 	I *think* this is defining or activating a link in the middle of a task line and activating before save maybe?
+	[:FolderHiding|]
+	[:FolderHiding:FolderHiding|]
 	
 ### Task Panel
 ( )  make strikeouts format more visually (at least on windows) @zimx @tasks
