@@ -39,6 +39,8 @@ class PageEditorWindow(QMainWindow):
         self._font_size = config.load_popup_font_size(14)
 
         self.editor = MarkdownEditor()
+        # Disable context menus in the popup editor to keep right-click actions only in the main window
+        self.editor.setContextMenuPolicy(Qt.NoContextMenu)
         self.editor.set_context(self.vault_root, self._source_path)
         self.editor.set_font_point_size(self._font_size)
         self.editor.linkActivated.connect(self._forward_link_to_main)

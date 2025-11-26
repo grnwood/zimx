@@ -611,6 +611,7 @@ class MarkdownEditor(QTextEdit):
         self._ai_actions_enabled: bool = True
         self._ai_chat_available: bool = False
         self._page_load_logger: Optional[PageLoadLogger] = None
+        self._open_in_window_callback: Optional[Callable[[str], None]] = None
         self.setPlaceholderText("Open a Markdown file to begin editing…")
         self.setAcceptRichText(True)
         self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(" "))
@@ -672,6 +673,10 @@ class MarkdownEditor(QTextEdit):
         """Attach a page load logger for the next render cycle."""
         # The logger itself knows whether logging is enabled.
         self._page_load_logger = logger
+
+    def set_open_in_window_callback(self, callback: Optional[Callable[[str], None]]) -> None:
+        """Provide a handler to open the current page in a separate window (main editor only)."""
+        self._open_in_window_callback = callback
 
     def _mark_page_load(self, label: str) -> None:
         if self._page_load_logger:
@@ -1465,7 +1470,15 @@ class MarkdownEditor(QTextEdit):
             self._schedule_camel_refresh()
 
     def contextMenuEvent(self, event):  # type: ignore[override]
+        menu = None
         # Check if right-clicking on an image
+        if _DETAILED_LOGGING:
+            print(
+                f"[AI Menu Debug] contextMenuEvent path={self._current_path!r} "
+                f"ai_actions_enabled={self._ai_actions_enabled} "
+                f"ai_chat_available={self._ai_chat_available} "
+                f"text_len={len(self.toPlainText())}"
+            )
         image_hit = self._image_at_position(event.pos())
         if image_hit:
             cursor, fmt = image_hit
@@ -1505,9 +1518,21 @@ class MarkdownEditor(QTextEdit):
             copy_action.triggered.connect(lambda: self._copy_link_to_location(link_for_copy))
             insert_date_action = menu.addAction("Insert Date…")
             insert_date_action.triggered.connect(self.insertDateRequested)
-            
-            menu.exec(event.globalPos())
-            return
+
+            # AI entries (mirror the general editor menu)
+            ai_label = "AI: Go To Chat" if self._ai_chat_available else "AI Chat: Start Chat"
+            ai_chat_action = menu.addAction(ai_label)
+            ai_chat_action.triggered.connect(lambda: self.aiChatRequested.emit(self._current_path or ""))
+        if self._ai_actions_enabled:
+            selection = self.textCursor().selectedText()
+            full_text = self.toPlainText()
+            if selection or full_text:
+                if menu is None:
+                    menu = self.createStandardContextMenu()
+                self._populate_ai_actions_menu(menu, selection or full_text)
+            if menu is not None:
+                menu.exec(event.globalPos())
+                return
         
         # Check if right-clicking anywhere in the editor (for Copy Link to Location)
         if self._current_path:
@@ -1537,9 +1562,12 @@ class MarkdownEditor(QTextEdit):
             # Add Open File Location action (delegates to main window)
             open_loc_action = menu.addAction("Open File Location")
             open_loc_action.triggered.connect(lambda: self.openFileLocationRequested.emit(self._current_path))
+            if self._open_in_window_callback:
+                open_popup_action = menu.addAction("Open in Editor Window")
+                open_popup_action.triggered.connect(lambda: self._open_in_window_callback(self._current_path or ""))
             ai_label = "AI: Go To Chat" if self._ai_chat_available else "AI Chat: Start Chat"
             ai_chat_action = menu.addAction(ai_label)
-            ai_chat_action.triggered.connect(lambda: self.aiChatRequested.emit(self._current_path))
+            ai_chat_action.triggered.connect(lambda: self.aiChatRequested.emit(self._current_path or ""))
             if self._ai_actions_enabled:
                 selection = self.textCursor().selectedText()
                 full_text = self.toPlainText()
@@ -3076,6 +3104,8 @@ class MarkdownEditor(QTextEdit):
 
     def _populate_ai_actions_menu(self, parent_menu, text: str) -> None:
         """Build the hierarchical AI Actions menu."""
+        if _DETAILED_LOGGING:
+            print(f"[AI Menu Debug] populate_ai_actions_menu text_len={len(text)}")
         def add_actions(menu, items):
             for title, prompt in items:
                 act = menu.addAction(title)

@@ -259,14 +259,13 @@ class MainWindow(QMainWindow):
         self.editor.editPageSourceRequested.connect(self._view_page_source)
         self.editor.openFileLocationRequested.connect(self._open_tree_file_location)
         self.editor.attachmentDropped.connect(self._on_attachment_dropped)
-        self.editor.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.editor.customContextMenuRequested.connect(self._open_editor_context_menu)
         self.editor.backlinksRequested.connect(
             lambda path="": self._show_link_navigator_for_path(path or self.current_path)
         )
         self.editor.aiChatRequested.connect(lambda path="": self._open_ai_chat_for_path(path or self.current_path, create=True))
         self.editor.aiActionRequested.connect(self._handle_ai_action)
         self.editor.linkActivated.connect(self._open_link_in_context)
+        self.editor.set_open_in_window_callback(self._open_page_editor_window)
         self.font_size = 14
         self.editor.set_font_point_size(self.font_size)
         # Load vi-mode block cursor preference
@@ -1949,15 +1948,6 @@ class MainWindow(QMainWindow):
             window.destroyed.connect(lambda: self._page_windows.remove(window) if window in self._page_windows else None)
         except Exception as exc:
             self._alert(f"Failed to open editor window: {exc}")
-
-    def _open_editor_context_menu(self, pos: QPoint) -> None:
-        """Extend the editor's context menu with single-page window option."""
-        menu = self.editor.createStandardContextMenu(pos)
-        if self.current_path:
-            menu.addSeparator()
-            action = menu.addAction("Open in Editor Window")
-            action.triggered.connect(lambda: self._open_page_editor_window(self.current_path or ""))
-        menu.exec(self.editor.viewport().mapToGlobal(pos))
 
     def _toggle_left_panel(self) -> None:
         """Show/hide the navigation (tree) panel."""
