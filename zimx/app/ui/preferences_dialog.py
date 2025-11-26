@@ -71,6 +71,19 @@ class PreferencesDialog(QDialog):
 
         self._load_default_server_model()
 
+        # Vault behavior
+        vault_label = QLabel("<b>Vault</b>")
+        self.layout.addWidget(vault_label)
+        self.force_read_only_checkbox = QCheckBox("Force read-only mode for this vault")
+        self.force_read_only_checkbox.setToolTip(
+            "Open this vault without taking a lock or allowing writes from this window."
+        )
+        try:
+            self.force_read_only_checkbox.setChecked(config.load_vault_force_read_only())
+        except Exception:
+            self.force_read_only_checkbox.setChecked(False)
+        self.layout.addWidget(self.force_read_only_checkbox)
+
         # Dialog buttons
         btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btn_box.accepted.connect(self.accept)
@@ -199,6 +212,7 @@ class PreferencesDialog(QDialog):
         config.save_enable_ai_chats(self.enable_ai_chats_checkbox.isChecked())
         config.save_default_ai_server(self.default_server_combo.currentText() or None)
         config.save_default_ai_model(self.default_model_combo.currentText() or None)
+        config.save_vault_force_read_only(self.force_read_only_checkbox.isChecked())
         super().accept()
 
     def _warn_restart_required(self) -> None:

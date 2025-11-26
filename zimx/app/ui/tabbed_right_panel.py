@@ -23,6 +23,7 @@ class TabbedRightPanel(QWidget):
     linkActivated = Signal(str)  # page path from Link Navigator
     calendarPageActivated = Signal(str)  # page path from Calendar tab
     aiChatNavigateRequested = Signal(str)  # page path from AI Chat tab
+    openInWindowRequested = Signal(str)  # page path to open in single-page editor
     
     def __init__(self, parent=None, enable_ai_chats: bool = False, ai_chat_font_size: int = 13) -> None:
         super().__init__(parent)
@@ -61,7 +62,9 @@ class TabbedRightPanel(QWidget):
         self.task_panel.taskActivated.connect(self.taskActivated)
         self.calendar_panel.dateActivated.connect(self.dateActivated)
         self.calendar_panel.pageActivated.connect(self.calendarPageActivated)
+        self.calendar_panel.openInWindowRequested.connect(self.openInWindowRequested)
         self.link_panel.pageActivated.connect(self.linkActivated)
+        self.link_panel.openInWindowRequested.connect(self.openInWindowRequested)
         
         # Layout
         from PySide6.QtWidgets import QVBoxLayout

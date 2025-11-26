@@ -520,6 +520,7 @@ class LinkNavigatorPanel(QWidget):
     """Tabbed panel that renders a link graph or raw backlink data."""
 
     pageActivated = Signal(str)
+    openInWindowRequested = Signal(str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:  # type: ignore[override]
         super().__init__(parent)
@@ -656,7 +657,22 @@ class LinkNavigatorPanel(QWidget):
         self.raw_view.setHtml(html)
 
     def _open_context_menu(self, pos) -> None:
+        target_path = None
+        widget = self.sender()
+        if widget is self.graph_view:
+            item = self.graph_view.itemAt(pos)
+            if hasattr(item, "page_path"):
+                target_path = getattr(item, "page_path", None)
+        elif widget is self.raw_view:
+            href = self.raw_view.anchorAt(pos)
+            if href:
+                target_path = href
+
         menu = QMenu(self)
+        if target_path:
+            open_win = menu.addAction("Open in Editor Window")
+            open_win.triggered.connect(lambda: self.openInWindowRequested.emit(target_path))
+            menu.addSeparator()
         if self.mode == "graph":
             toggle = menu.addAction("Show Raw Links")
         else:
@@ -664,7 +680,6 @@ class LinkNavigatorPanel(QWidget):
         toggle.triggered.connect(self._toggle_mode)
         refresh_action = menu.addAction("Refresh")
         refresh_action.triggered.connect(self._refresh_and_reset_zoom)
-        widget = self.sender()
         global_pos = widget.mapToGlobal(pos) if hasattr(widget, "mapToGlobal") else self.mapToGlobal(pos)
         menu.exec(global_pos)
 

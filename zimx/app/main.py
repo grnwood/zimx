@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import argparse
+import os
+import socket
 import sys
 import threading
 import time
-import os
-import socket
 import traceback
 
 import uvicorn
@@ -81,29 +82,40 @@ def _qt_message_handler(mode: QtMsgType, context, message: str) -> None:
         sys.exit(1)
 
 
-def _find_open_port(preferred: int) -> int:
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="ZimX desktop entry point.")
+    parser.add_argument("--vault", help="Path to a vault to open at startup.")
+    parser.add_argument("--port", type=int, help="Preferred API port (0 = auto-select).")
+    parser.add_argument("--host", default=os.getenv("ZIMX_HOST", "127.0.0.1"), help="Host/interface to bind the API server.")
+    return parser.parse_args(argv)
+
+
+def _find_open_port(host: str, preferred: int) -> int:
     """Try preferred port, otherwise fall back to an ephemeral port."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            s.bind(("127.0.0.1", preferred))
+            s.bind((host, preferred))
             return s.getsockname()[1]
         except OSError:
             pass
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
+        s.bind((host, 0))
         return s.getsockname()[1]
 
 
-def _start_api_server() -> tuple[int, uvicorn.Server]:
-    preferred = int(os.getenv("ZIMX_PORT", "8765"))
-    port = _find_open_port(preferred)
+def _start_api_server(host: str, preferred_port: int | None) -> tuple[int, uvicorn.Server]:
+    env_port = os.getenv("ZIMX_PORT")
+    preferred = preferred_port if preferred_port is not None else int(env_port or "8765")
+    # Allow 0 to force ephemeral port selection
+    preferred = 0 if preferred == 0 else preferred
+    port = _find_open_port(host, preferred)
     # Disable uvicorn's logging config when bundled with PyInstaller
     # to avoid "Unable to configure formatter 'default'" errors
     log_config = None if getattr(sys, "frozen", False) else None
     config = uvicorn.Config(
         get_app(),
-        host="127.0.0.1",
+        host=host,
         port=port,
         log_level=os.getenv("UVICORN_LOG_LEVEL", "debug"),
         log_config=log_config,
@@ -130,23 +142,26 @@ def _diag(msg: str) -> None:
 
 
 def main() -> None:
+    args = _parse_args(sys.argv[1:])
     start_ts = time.time()
     _diag("Application starting.")
     config.init_settings()
     # Install custom message handler to suppress harmless Qt warnings
     qInstallMessageHandler(_qt_message_handler)
-    port, _ = _start_api_server()
-    _diag(f"API server started on port {port}.")
+    port, server = _start_api_server(args.host, args.port)
+    _diag(f"API server started on {args.host}:{port}.")
     qt_app = QApplication(sys.argv)
     qt_app.aboutToQuit.connect(lambda: _diag("QApplication aboutToQuit emitted."))
     # Set window/app icon if available (especially needed on Linux)
     _set_app_icon(qt_app)
-    window = MainWindow(api_base=f"http://127.0.0.1:{port}")
+    # Ensure server shutdown when the UI exits
+    qt_app.aboutToQuit.connect(lambda: setattr(server, "should_exit", True))
+    window = MainWindow(api_base=f"http://{args.host}:{port}")
     window.resize(1200, 800)
     windows = getattr(qt_app, "_zimx_windows", [])
     windows.append(window)
     qt_app._zimx_windows = windows
-    vault_hint = _parse_vault_arg(sys.argv[1:])
+    vault_hint = args.vault or _parse_vault_arg(sys.argv[1:])
     try:
         if window.startup(vault_hint=vault_hint):
             window.show()
