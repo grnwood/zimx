@@ -95,12 +95,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 def _maybe_use_minimal_fonts() -> None:
     """Optionally force Qt to see only a small font set to avoid long font scans.
 
-    Enabled by default. Opt out with ZIMX_DISABLE_MINIMAL_FONT_SCAN=1.
-    This writes a tiny fontconfig file under ~/.cache/zimx/fonts-minimal and points
-    FONTCONFIG_FILE/FONTCONFIG_PATH/QT_QPA_FONTDIR to it, copying a single known
-    font if needed.
+    Enable via ZIMX_MINIMAL_FONT_SCAN=1. This writes a tiny fontconfig file under
+    ~/.cache/zimx/fonts-minimal and points FONTCONFIG_FILE/FONTCONFIG_PATH/QT_QPA_FONTDIR
+    to it, copying a single known font if needed.
     """
-    if os.getenv("ZIMX_DISABLE_MINIMAL_FONT_SCAN", "0") not in ("0", "false", "False", "", None):
+    if os.getenv("ZIMX_MINIMAL_FONT_SCAN", "0") in ("0", "false", "False", "", None):
         return
     cache_root = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")) / "zimx" / "fonts-minimal"
     font_dir = cache_root / "fonts"
