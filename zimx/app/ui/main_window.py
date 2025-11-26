@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
+import json
 import os
+import socket
+import subprocess
+import sys
+import time
 
 import httpx
 from PySide6.QtCore import QEvent, QModelIndex, QPoint, Qt, Signal, QTimer, QObject
@@ -56,6 +61,7 @@ from .new_page_dialog import NewPageDialog
 from .path_utils import colon_to_path, path_to_colon, ensure_root_colon_link
 from .date_insert_dialog import DateInsertDialog
 from .open_vault_dialog import OpenVaultDialog
+from .page_editor_window import PageEditorWindow
 
 
 PATH_ROLE = int(Qt.ItemDataRole.UserRole)
@@ -251,6 +257,8 @@ class MainWindow(QMainWindow):
         self.editor.editPageSourceRequested.connect(self._view_page_source)
         self.editor.openFileLocationRequested.connect(self._open_tree_file_location)
         self.editor.attachmentDropped.connect(self._on_attachment_dropped)
+        self.editor.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.editor.customContextMenuRequested.connect(self._open_editor_context_menu)
         self.editor.backlinksRequested.connect(
             lambda path="": self._show_link_navigator_for_path(path or self.current_path)
         )
@@ -284,6 +292,7 @@ class MainWindow(QMainWindow):
         self.right_panel.linkActivated.connect(self._open_link_from_panel)
         self.right_panel.calendarPageActivated.connect(self._open_calendar_page)
         self.right_panel.aiChatNavigateRequested.connect(self._on_ai_chat_navigate)
+        self.right_panel.openInWindowRequested.connect(self._open_page_editor_window)
         try:
             self.right_panel.task_panel.focusGained.connect(self._suspend_vi_for_tasks)
         except Exception:
@@ -291,6 +300,10 @@ class MainWindow(QMainWindow):
         self._inline_editor: Optional[InlineNameEdit] = None
         self._pending_selection: Optional[str] = None
         self._suspend_autosave = False
+        self._vault_lock_path: Optional[Path] = None
+        self._vault_lock_owner: Optional[dict] = None
+        self._read_only: bool = False
+        self._page_windows: list[PageEditorWindow] = []
         self.autosave_timer = QTimer(self)
         self.autosave_timer.setInterval(30_000)
         self.autosave_timer.setSingleShot(True)
@@ -369,7 +382,7 @@ class MainWindow(QMainWindow):
         vault_menu = self.menuBar().addMenu("Vault")
         open_vault_action = QAction("Open Vault", self)
         open_vault_action.setToolTip("Open an existing vault")
-        open_vault_action.triggered.connect(lambda checked=False: self._select_vault())
+        open_vault_action.triggered.connect(lambda checked=False: self._select_vault(spawn_new_process=True))
         vault_menu.addAction(open_vault_action)
         new_vault_action = QAction("New Vault", self)
         new_vault_action.setToolTip("Create a new vault")
@@ -520,10 +533,13 @@ class MainWindow(QMainWindow):
         focus_tasks_shortcut = QShortcut(QKeySequence("Ctrl+\\"), self)
         focus_tasks_shortcut.setContext(Qt.ApplicationShortcut)
         focus_tasks_shortcut.activated.connect(self._focus_tasks_search)
+        focus_tasks_shortcut2 = QShortcut(QKeySequence("Ctrl+Backslash"), self)
+        focus_tasks_shortcut2.setContext(Qt.ApplicationShortcut)
+        focus_tasks_shortcut2.activated.connect(self._focus_tasks_search)
         date_shortcut = QShortcut(QKeySequence("Ctrl+D"), self)
         date_shortcut.activated.connect(self._insert_date)
         open_vault_shortcut = QShortcut(QKeySequence("Ctrl+O"), self)
-        open_vault_shortcut.activated.connect(lambda: self._select_vault())
+        open_vault_shortcut.activated.connect(lambda: self._select_vault(spawn_new_process=True))
         focus_toggle = QShortcut(QKeySequence("Ctrl+Space"), self)
         focus_toggle.activated.connect(self._toggle_focus_between_tree_and_editor)
         new_page_shortcut = QShortcut(QKeySequence("Ctrl+N"), self)
@@ -543,6 +559,8 @@ class MainWindow(QMainWindow):
         nav_pg_up = QShortcut(QKeySequence("Alt+PgUp"), self)
         nav_pg_down = QShortcut(QKeySequence("Alt+PgDown"), self)
         reload_page = QShortcut(QKeySequence("Ctrl+R"), self)
+        toggle_left = QShortcut(QKeySequence("Ctrl+Shift+B"), self)
+        toggle_right = QShortcut(QKeySequence("Ctrl+Shift+N"), self)
         nav_back.activated.connect(self._navigate_history_back)
         nav_forward.activated.connect(self._navigate_history_forward)
         nav_up.activated.connect(self._navigate_hierarchy_up)
@@ -550,18 +568,21 @@ class MainWindow(QMainWindow):
         nav_pg_up.activated.connect(lambda: self._navigate_tree(-1, leaves_only=True))
         nav_pg_down.activated.connect(lambda: self._navigate_tree(1, leaves_only=True))
         reload_page.activated.connect(self._reload_current_page)
+        toggle_left.activated.connect(self._toggle_left_panel)
+        toggle_right.activated.connect(self._toggle_right_panel)
 
     def startup(self, vault_hint: Optional[str] = None) -> bool:
         """Handle initial vault selection before the window is shown."""
         default_vault = vault_hint or config.load_default_vault()
         if default_vault:
-            self._set_vault(default_vault)
-            QTimer.singleShot(100, self._auto_load_initial_file)
-            return True
+            if self._set_vault(default_vault):
+                QTimer.singleShot(100, self._auto_load_initial_file)
+                return True
+            # Fall through to prompt for another vault if lock/bind failed
         return self._select_vault(startup=True)
 
     # --- Vault actions -------------------------------------------------
-    def _select_vault(self, checked: bool | None = None, startup: bool = False) -> bool:  # noqa: ARG002
+    def _select_vault(self, checked: bool | None = None, startup: bool = False, spawn_new_process: bool = False) -> bool:  # noqa: ARG002
         seed_vault = self.vault_root or config.load_last_vault()
         dialog = OpenVaultDialog(self, current_vault=seed_vault)
         if dialog.exec() != QDialog.Accepted:
@@ -569,9 +590,45 @@ class MainWindow(QMainWindow):
         selection = dialog.selected_vault()
         if not selection:
             return False
-        self._set_vault(selection["path"], vault_name=selection.get("name"))
-        QTimer.singleShot(100, self._auto_load_initial_file)
-        return True
+        if spawn_new_process:
+            self._launch_vault_process(selection["path"])
+            return True
+        if self._set_vault(selection["path"], vault_name=selection.get("name")):
+            QTimer.singleShot(100, self._auto_load_initial_file)
+            return True
+        return False
+
+    def _launch_new_window(self) -> None:
+        """Spawn a fresh ZimX process so it gets its own API server and vault."""
+        try:
+            cmd = self._build_launch_command()
+            if self.vault_root:
+                cmd.extend(["--vault", self.vault_root])
+            # Ask the new process to pick an ephemeral port to avoid clashes
+            cmd.extend(["--port", "0"])
+            subprocess.Popen(cmd)
+            self.statusBar().showMessage("Launching new window...", 2000)
+        except Exception as exc:  # pragma: no cover - UI path
+            self._alert(f"Failed to launch new window: {exc}")
+
+    def _launch_vault_process(self, vault_path: str) -> None:
+        """Launch a new ZimX process targeting the given vault."""
+        try:
+            cmd = self._build_launch_command()
+            cmd.extend(["--vault", vault_path, "--port", "0"])
+            subprocess.Popen(cmd)
+            self.statusBar().showMessage(f"Opening {vault_path} in a new window...", 3000)
+        except Exception as exc:
+            self._alert(f"Failed to open vault in new window: {exc}")
+
+    @staticmethod
+    def _build_launch_command() -> list[str]:
+        """Return the command to start a new ZimX instance using the current runtime."""
+        if getattr(sys, "frozen", False):
+            # Packaged app: the executable already bootstraps ZimX
+            return [sys.executable]
+        # Dev/venv: use the same interpreter to launch the module
+        return [sys.executable, "-m", "zimx.app.main"]
 
     def _create_vault(self) -> None:
         target_path = QFileDialog.getExistingDirectory(self, "Select Folder for Vault", str(Path.home()))
@@ -618,15 +675,168 @@ class MainWindow(QMainWindow):
             if not page_file.exists():
                 page_file.write_text(body, encoding="utf-8")
 
-    def _set_vault(self, directory: str, vault_name: Optional[str] = None) -> None:
-        self.right_panel.clear_tasks()
+    def _is_pid_active(self, pid: int, host: str) -> bool:
+        """Best-effort check if a PID is alive on this host."""
+        if host != socket.gethostname():
+            return False
+        try:
+            os.kill(pid, 0)  # Does not terminate; raises if not permitted or missing
+            return True
+        except OSError:
+            return False
+
+    def _ensure_writable(self, action: str, *, interactive: bool = True) -> bool:
+        """Guard write operations when the vault is opened read-only."""
+        if self._read_only:
+            if not interactive:
+                self._alert(f"Vault is read-only because another ZimX window holds the lock.\nCannot {action}.")
+            return False
+        return True
+
+    def _check_and_acquire_vault_lock(self, directory: str, prefer_read_only: bool = False) -> bool:
+        """Create a simple lockfile in the vault; prompt if locked or forced read-only."""
+        self._read_only = False
+        root = Path(directory)
+        lock_path = root / ".zimx" / "zimx.lock"
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        existing: Optional[dict] = None
+        if lock_path.exists():
+            try:
+                existing = json.loads(lock_path.read_text(encoding="utf-8"))
+            except Exception:
+                existing = {"raw": lock_path.read_text(errors="ignore")}
+        if existing:
+            pid = existing.get("pid")
+            host = existing.get("host")
+            active = False
+            if isinstance(pid, int) and isinstance(host, str):
+                active = self._is_pid_active(pid, host)
+            owner_text = f"{host or '?'} (pid {pid})"
+            if active:
+                msg = QMessageBox(self)
+                msg.setWindowTitle("Read-Only Vault")
+                msg.setIcon(QMessageBox.Warning)
+                info = f" (owner: {owner_text})"
+                msg.setText("Database is read only via settings or due to another instance" + info + ".\n\nOpen in read-only mode?")
+                readonly_btn = msg.addButton("Open Read-Only", QMessageBox.AcceptRole)
+                cancel_btn = msg.addButton(QMessageBox.Cancel)
+                msg.setDefaultButton(readonly_btn)
+                msg.exec()
+                if msg.clickedButton() is not readonly_btn:
+                    return False
+                self._read_only = True
+                # Do not take over the lock file
+                self._vault_lock_path = None
+                self._vault_lock_owner = None
+                self._update_dirty_indicator()
+                return True
+            else:
+                # Stale lock; remove it
+                try:
+                    lock_path.unlink()
+                except Exception:
+                    pass
+        if prefer_read_only:
+            # Show the same warning even when forced by settings
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Read-Only Vault")
+            msg.setIcon(QMessageBox.Warning)
+            msg.setText("Database is read only via settings or due to another instance.\n\nOpen in read-only mode?")
+            readonly_btn = msg.addButton("Open Read-Only", QMessageBox.AcceptRole)
+            cancel_btn = msg.addButton(QMessageBox.Cancel)
+            msg.setDefaultButton(readonly_btn)
+            msg.exec()
+            if msg.clickedButton() is not readonly_btn:
+                return False
+            self._read_only = True
+            self._vault_lock_path = None
+            self._vault_lock_owner = None
+            self._update_dirty_indicator()
+            return True
+        owner = {"pid": os.getpid(), "host": socket.gethostname(), "ts": time.time()}
+        try:
+            lock_path.write_text(json.dumps(owner), encoding="utf-8")
+            self._vault_lock_path = lock_path
+            self._vault_lock_owner = owner
+        except Exception:
+            # If we cannot write the lock, continue but warn the user
+            self.statusBar().showMessage("Warning: could not write vault lock.", 5000)
+        self._update_dirty_indicator()
+        return True
+
+    def _release_vault_lock(self, reset_read_only: bool = True) -> None:
+        """Release the lock if we own it."""
+        if not self._vault_lock_path:
+            return
+        path = self._vault_lock_path
+        owner = self._vault_lock_owner or {}
+        if path.exists():
+            try:
+                current = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                current = {}
+            if (
+                current.get("pid") == owner.get("pid")
+                and current.get("host") == owner.get("host")
+            ):
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
+        self._vault_lock_path = None
+        self._vault_lock_owner = None
+        if reset_read_only:
+            self._read_only = False
+        self._update_dirty_indicator()
+
+    def _apply_vault_read_only_pref(self) -> None:
+        """Toggle read-only mode immediately based on the per-vault preference."""
+        if not self.vault_root:
+            return
+        try:
+            desired_read_only = config.load_vault_force_read_only()
+        except Exception:
+            desired_read_only = False
+        if desired_read_only:
+            if not self._read_only:
+                # Drop any lock we hold and switch to read-only
+                self._release_vault_lock(reset_read_only=False)
+                self._read_only = True
+                self._update_dirty_indicator()
+            return
+        # Preference allows writes; try to acquire lock if currently read-only
+        if self._read_only:
+            if self._check_and_acquire_vault_lock(self.vault_root):
+                pass
+            else:
+                # Failed to acquire lock (likely held elsewhere); stay read-only
+                self._read_only = True
+                self._update_dirty_indicator()
+
+    def _set_vault(self, directory: str, vault_name: Optional[str] = None) -> bool:
+        # Release any existing lock before switching vaults
+        self._release_vault_lock()
+        # Close any previous vault DB connection
         config.set_active_vault(None)
+        prefer_read_only = False
+        try:
+            config.set_active_vault(directory)
+            prefer_read_only = config.load_vault_force_read_only()
+        except Exception:
+            prefer_read_only = False
+        if not self._check_and_acquire_vault_lock(directory, prefer_read_only=prefer_read_only):
+            return False
+        self.right_panel.clear_tasks()
         try:
             resp = self.http.post("/api/vault/select", json={"path": directory})
             resp.raise_for_status()
         except httpx.HTTPError as exc:
             self._alert(f"Failed to set vault: {exc}")
-            return
+            self._release_vault_lock()
+            return False
         self.vault_root = resp.json().get("root")
         self.vault_root_name = Path(self.vault_root).name if self.vault_root else None
         index_dir_missing = False
@@ -647,10 +857,20 @@ class MainWindow(QMainWindow):
                     return
                 index_dir_missing = True
         if self.vault_root:
+            # ensure DB connection is set (may already be set above)
             config.set_active_vault(self.vault_root)
             config.save_last_vault(self.vault_root)
             display_name = vault_name or Path(self.vault_root).name
             config.remember_vault(self.vault_root, display_name)
+            try:
+                if config.load_vault_force_read_only():
+                    # Respect per-vault read-only preference; release any lock we took.
+                    self._release_vault_lock(reset_read_only=False)
+                    self._read_only = True
+                    self._update_dirty_indicator()
+                    # Intentionally no warning/toast; this is a user preference.
+            except Exception:
+                pass
             self.font_size = config.load_font_size(self.font_size)
             self.editor.set_font_point_size(self.font_size)
             # Load show_journal setting
@@ -674,6 +894,7 @@ class MainWindow(QMainWindow):
         
         # Restore window geometry and splitter positions
         self._restore_geometry()
+        return True
 
     def _add_bookmark(self) -> None:
         """Add the current page to bookmarks."""
@@ -820,8 +1041,8 @@ class MainWindow(QMainWindow):
             btn.deleteLater()
         self.history_buttons.clear()
         
-        # Get last 10 items from history (most recent last)
-        recent_history = self.page_history[-10:] if len(self.page_history) > 10 else self.page_history[:]
+        # Get last 25 items from history (most recent last)
+        recent_history = self.page_history[-18:] if len(self.page_history) > 18 else self.page_history[:]
         
         # Remove duplicates while preserving order (keep most recent occurrence)
         seen = set()
@@ -842,6 +1063,8 @@ class MainWindow(QMainWindow):
             btn.setStyleSheet("QPushButton { border: 1px solid #555; padding: 2px 6px; border-radius: 3px; }")
             btn.setToolTip(path_to_colon(page_path) or page_path)
             btn.clicked.connect(lambda checked=False, p=page_path: self._open_history_page(p))
+            btn.setContextMenuPolicy(Qt.CustomContextMenu)
+            btn.customContextMenuRequested.connect(lambda pos, p=page_path, b=btn: self._show_history_context_menu(pos, p, b))
             
             # Store button
             self.history_buttons.append(btn)
@@ -853,8 +1076,20 @@ class MainWindow(QMainWindow):
         """Open a page from history and update tree selection."""
         # Path is already in colon format, just open it directly (same as bookmarks)
         self._remember_history_cursor()
-        self._select_tree_path(page_path)
+        try:
+            self._suspend_selection_open = True
+            self._select_tree_path(page_path)
+        finally:
+            self._suspend_selection_open = False
         self._open_file(page_path, add_to_history=False, restore_history_cursor=True)  # Don't add to history again
+
+    def _show_history_context_menu(self, pos: QPoint, page_path: str, button: QWidget) -> None:
+        """Show context menu for a history button."""
+        menu = QMenu(self)
+        open_win = menu.addAction("Open in Editor Window")
+        open_win.triggered.connect(lambda: self._open_page_editor_window(page_path))
+        global_pos = button.mapToGlobal(pos)
+        menu.exec(global_pos)
 
     def _auto_load_initial_file(self) -> None:
         """Auto-load the last opened file or vault home page on startup."""
@@ -901,6 +1136,9 @@ class MainWindow(QMainWindow):
     def _show_bookmark_context_menu(self, pos: QPoint, bookmark_path: str, button: QWidget) -> None:
         """Show context menu for bookmark with Remove option."""
         menu = QMenu(self)
+        open_win = menu.addAction("Open in Editor Window")
+        open_win.triggered.connect(lambda: self._open_page_editor_window(bookmark_path))
+        menu.addSeparator()
         remove_action = menu.addAction("Remove")
         remove_action.triggered.connect(lambda: self._remove_bookmark(bookmark_path))
         
@@ -930,20 +1168,33 @@ class MainWindow(QMainWindow):
             return
         data = resp.json().get("tree", [])
         self.tree_model.removeRows(0, self.tree_model.rowCount())
+
+        # Add synthetic vault root node (fixed at top, opens vault home page) and nest tree under it
+        synthetic_root_item = None
+        if self.vault_root_name:
+            synthetic_root = {
+                "name": self.vault_root_name,
+                "path": "/",  # use root path so delete isn't offered
+                "open_path": f"/{self.vault_root_name}{PAGE_SUFFIX}",
+                "children": [],
+            }
+            synthetic_root_item = self._add_tree_node(self.tree_model.invisibleRootItem(), synthetic_root)
         
         # Check if Journal should be filtered
         show_journal = self.show_journal_button.isChecked()
         
         for node in data:
-            # Hide the root vault node (path == "/") and render only its children
+            # Hide the root vault node (path == "/") and render only its children under synthetic root
             if node.get("path") == "/":
                 for child in node.get("children", []):
                     # Filter out Journal folder if checkbox is unchecked
                     if not show_journal and child.get("name") == "Journal":
                         continue
-                    self._add_tree_node(self.tree_model.invisibleRootItem(), child)
+                    parent_item = synthetic_root_item or self.tree_model.invisibleRootItem()
+                    self._add_tree_node(parent_item, child)
             else:
-                self._add_tree_node(self.tree_model.invisibleRootItem(), node)
+                parent_item = synthetic_root_item or self.tree_model.invisibleRootItem()
+                self._add_tree_node(parent_item, node)
         self.tree_view.expandAll()
         if self._pending_selection:
             self._select_tree_path(self._pending_selection)
@@ -1039,9 +1290,12 @@ class MainWindow(QMainWindow):
             resp = self.http.post("/api/file/read", json={"path": path})
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            self._alert(f"Failed to open {path}: {exc}")
+            print(f"[ZimX] Failed to read page {path}: status={exc.response.status_code if exc.response else 'unknown'} body={exc.response.text if exc.response else ''}", file=sys.stderr)
+            detail = exc.response.text if exc.response else str(exc)
+            self._alert(f"Failed to open {path}: {detail}")
             return
         except httpx.HTTPError as exc:
+            print(f"[ZimX] Failed to read page {path}: {exc}", file=sys.stderr)
             self._alert(f"Failed to open {path}: {exc}")
             return
         content = resp.json().get("content", "")
@@ -1091,6 +1345,8 @@ class MainWindow(QMainWindow):
         # Save the last opened file
         if config.has_active_vault():
             config.save_last_file(path)
+            # Refresh read-only badge if preference or lock state changed mid-session
+            self._update_dirty_indicator()
         
         # Update calendar if this is a journal page
         self._update_calendar_for_journal_page(path)
@@ -1108,6 +1364,12 @@ class MainWindow(QMainWindow):
     def _save_current_file(self, auto: bool = False) -> None:
         if self._suspend_autosave:
             self._debug("Autosave suppressed (suspend flag set).")
+            return
+        if auto and self._read_only:
+            # In read-only mode, silently skip autosaves/background saves
+            return
+        # Autosave should silently skip when read-only; explicit Ctrl+S should warn.
+        if not self._ensure_writable("save changes", interactive=not auto):
             return
         if not self.current_path:
             if not auto:
@@ -1176,6 +1438,13 @@ class MainWindow(QMainWindow):
         message = "Auto-saved" if auto else "Saved"
         display_path = path_to_colon(self.current_path) if self.current_path else ""
         self.statusBar().showMessage(f"{message} {display_path}", 2000 if auto else 4000)
+        # Refresh any popup editors on the same page
+        try:
+            for win in list(getattr(self, "_page_windows", [])):
+                if getattr(win, "_source_path", None) == self.current_path:
+                    win._load_content()
+        except Exception:
+            pass
 
     def _is_editor_dirty(self) -> bool:
         """Return True if the buffer differs from last saved content."""
@@ -1186,6 +1455,8 @@ class MainWindow(QMainWindow):
 
     def _save_dirty_page(self) -> None:
         """Save the current page if there are unsaved edits."""
+        if self._read_only:
+            return
         if self._is_editor_dirty():
             self._save_current_file(auto=True)
 
@@ -1456,6 +1727,8 @@ class MainWindow(QMainWindow):
         if not self.vault_root:
             self._alert("Select a vault before creating pages.")
             return
+        if not self._ensure_writable("create new pages"):
+            return
         
         vi_was_active = self._suspend_vi_mode_for_dialog()
         dlg = NewPageDialog(self)
@@ -1529,6 +1802,8 @@ class MainWindow(QMainWindow):
                 self.editor.set_vi_mode(True)
             self.right_panel.set_ai_enabled(config.load_enable_ai_chats())
             self.editor.set_ai_actions_enabled(config.load_enable_ai_chats())
+            # Apply vault read-only preference immediately
+            self._apply_vault_read_only_pref()
         self._restore_vi_mode_after_dialog(vi_was_active)
 
     def _open_task_from_panel(self, path: str, line: int) -> None:
@@ -1542,6 +1817,7 @@ class MainWindow(QMainWindow):
     def _open_link_from_panel(self, path: str) -> None:
         if not path:
             return
+        path = self._normalize_editor_path(path)
         # Special case: if the path matches the vault root name or is the vault root folder, open the main page
         if self.vault_root_name:
             # Accept /VaultRoot, VaultRoot, /VaultRoot/, or /VaultRoot/VaultRoot.txt as vault root
@@ -1567,8 +1843,9 @@ class MainWindow(QMainWindow):
         """Open a page from the Calendar tab without changing tabs."""
         if not path:
             return
-        self._select_tree_path(path)
-        self._open_file(path)
+        norm = self._normalize_editor_path(path)
+        self._select_tree_path(norm)
+        self._open_file(norm)
         # Keep the Calendar tab active and return focus to its tree
         try:
             self.right_panel.tabs.setCurrentWidget(self.right_panel.calendar_panel)
@@ -1576,8 +1853,67 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def _open_link_in_context(self, link: str) -> None:
-        """Handle link activations from the editor."""
+    def _open_page_editor_window(self, path: str) -> None:
+        """Open a lightweight editor window for a single page (shared server)."""
+        if not path or not self.vault_root:
+            return
+        rel_path = self._normalize_editor_path(path)
+        try:
+            window = PageEditorWindow(
+                api_base=self.api_base,
+                vault_root=self.vault_root,
+                page_path=rel_path,
+                read_only=self._read_only,
+                open_in_main_callback=lambda target, **kw: self._open_link_in_context(target, **kw),
+                parent=self,
+            )
+            window.show()
+            self._page_windows.append(window)
+            window.destroyed.connect(lambda: self._page_windows.remove(window) if window in self._page_windows else None)
+        except Exception as exc:
+            self._alert(f"Failed to open editor window: {exc}")
+
+    def _open_editor_context_menu(self, pos: QPoint) -> None:
+        """Extend the editor's context menu with single-page window option."""
+        menu = self.editor.createStandardContextMenu(pos)
+        if self.current_path:
+            menu.addSeparator()
+            action = menu.addAction("Open in Editor Window")
+            action.triggered.connect(lambda: self._open_page_editor_window(self.current_path or ""))
+        menu.exec(self.editor.viewport().mapToGlobal(pos))
+
+    def _toggle_left_panel(self) -> None:
+        """Show/hide the navigation (tree) panel."""
+        is_visible = self.main_splitter.sizes()[0] > 0
+        if is_visible:
+            self._saved_left_width = self.main_splitter.sizes()[0]
+            self.main_splitter.setSizes([0, sum(self.main_splitter.sizes())])
+        else:
+            width = getattr(self, "_saved_left_width", 240)
+            total = sum(self.main_splitter.sizes())
+            self.main_splitter.setSizes([width, max(1, total - width)])
+
+    def _toggle_right_panel(self) -> None:
+        """Show/hide the right tabbed panel."""
+        is_visible = self.editor_split.sizes()[1] > 0
+        if is_visible:
+            self._saved_right_width = self.editor_split.sizes()[1]
+            self.editor_split.setSizes([sum(self.editor_split.sizes()), 0])
+        else:
+            width = getattr(self, "_saved_right_width", 360)
+            total = sum(self.editor_split.sizes())
+            self.editor_split.setSizes([max(1, total - width), width])
+
+    def _ensure_right_panel_visible(self) -> None:
+        """Ensure the right panel is visible (used before showing link/AI panes)."""
+        sizes = self.editor_split.sizes()
+        if len(sizes) >= 2 and sizes[1] == 0:
+            width = getattr(self, "_saved_right_width", 360)
+            total = sum(sizes)
+            self.editor_split.setSizes([max(1, total - width), width])
+
+    def _open_link_in_context(self, link: str, force: bool = False, refresh_only: bool = False) -> None:
+        """Handle link activations from the editor (main or popup)."""
         if not link:
             return
         if link.startswith(("http://", "https://")):
@@ -1588,8 +1924,17 @@ class MainWindow(QMainWindow):
                 return
             QDesktopServices.openUrl(QUrl(link))
             return
+        # Absolute vault-relative path (starts with /): open directly without CamelCase heuristics
+        if link.startswith("/"):
+            target = self._normalize_editor_path(link)
+            if refresh_only and self.current_path == target:
+                self._open_file(target, add_to_history=False, force=True)
+            elif not refresh_only:
+                self._select_tree_path(target)
+                self._open_file(target, force=force)
+            return
         # Otherwise treat as page link
-        self._open_camel_link(link, focus_target="editor")
+        self._open_camel_link(link, focus_target="editor", refresh_only=refresh_only, force=force)
     
     def _open_journal_date(self, year: int, month: int, day: int) -> None:
         """Open or create journal entry for the selected date."""
@@ -1817,7 +2162,24 @@ class MainWindow(QMainWindow):
             else:
                 self.statusBar().showMessage("")
     
-    def _open_camel_link(self, name: str, focus_target: str | None = None) -> None:
+    def _normalize_editor_path(self, path: str) -> str:
+        """Normalize incoming page refs (folder, colon, bare) to file path with leading slash."""
+        if not path:
+            return path
+        cleaned = path.strip()
+        if cleaned.startswith(":"):
+            cleaned = colon_to_path(cleaned, self.vault_root_name) or cleaned
+        if not cleaned.startswith("/"):
+            cleaned = "/" + cleaned.lstrip("/")
+        rel = Path(cleaned.lstrip("/"))
+        if rel.suffix != PAGE_SUFFIX:
+            # Treat as folder; map to its page file
+            file_path = self._folder_to_file_path(cleaned)
+            if file_path:
+                cleaned = file_path
+        return cleaned
+
+    def _open_camel_link(self, name: str, focus_target: str | None = None, refresh_only: bool = False, force: bool = False) -> None:
         """Open a link - handles both CamelCase (relative), colon notation (absolute), and HTTP URLs."""
         # Handle HTTP/HTTPS links
         if name.startswith("http://") or name.startswith("https://"):
@@ -1866,9 +2228,12 @@ class MainWindow(QMainWindow):
             if target_name.strip() in (":VaultRoot", vault_root_colon):
                 # Open the vault's main page (fake root concept)
                 main_page = f"/{self.vault_root_name}{PAGE_SUFFIX}"
-                self._open_file(main_page)
-                self._scroll_to_anchor_slug(anchor_slug)
-                self._apply_navigation_focus(focus_target)
+                if refresh_only and self.current_path == main_page:
+                    self._open_file(main_page, add_to_history=False, force=True)
+                else:
+                    self._open_file(main_page, force=force)
+                    self._scroll_to_anchor_slug(anchor_slug)
+                    self._apply_navigation_focus(focus_target)
                 return
             # Colon notation is absolute - convert directly to path
             # Prevent duplicate vault root in path (e.g., VaultRoot/VaultRoot.txt)
@@ -1884,18 +2249,25 @@ class MainWindow(QMainWindow):
             folder_path = self._file_path_to_folder(target_file)
             # Check if file already exists before creating
             file_existed = self.vault_root and Path(self.vault_root, target_file.lstrip("/")).exists()
-            if not self._ensure_page_folder(folder_path, allow_existing=True):
-                return
-            # Apply template to newly created page
-            is_new_page = not file_existed
-            if is_new_page:
+            if file_existed:
+                is_new_page = False
+            else:
+                if self._read_only:
+                    self.statusBar().showMessage("Cannot create new pages while vault is read-only.", 5000)
+                    return
+                if not self._ensure_page_folder(folder_path, allow_existing=True):
+                    return
+                is_new_page = True
                 page_name = target_name.split(":")[-1]  # Get last part for page name
                 self._apply_new_page_template(target_file, page_name)
             self._pending_selection = target_file
-            self._populate_vault_tree()
-            self._open_file(target_file, cursor_at_end=is_new_page)
-            self._scroll_to_anchor_slug(anchor_slug)
-            self._apply_navigation_focus(focus_target)
+            if refresh_only and self.current_path == target_file:
+                self._open_file(target_file, add_to_history=False, force=True)
+            else:
+                self._populate_vault_tree()
+                self._open_file(target_file, cursor_at_end=is_new_page, force=force)
+                self._scroll_to_anchor_slug(anchor_slug)
+                self._apply_navigation_focus(focus_target)
         else:
             # CamelCase link is relative to current page
             # Special case: if the link target matches the vault root name, open /VaultRoot.txt
@@ -1916,17 +2288,24 @@ class MainWindow(QMainWindow):
             folder_path = self._file_path_to_folder(target_file)
             # Check if file already exists before creating
             file_existed = self.vault_root and Path(self.vault_root, target_file.lstrip("/")).exists()
-            if not self._ensure_page_folder(folder_path, allow_existing=True):
-                return
-            # Apply template to newly created page
-            is_new_page = not file_existed
-            if is_new_page:
+            if file_existed:
+                is_new_page = False
+            else:
+                if self._read_only:
+                    self.statusBar().showMessage("Cannot create new pages while vault is read-only.", 5000)
+                    return
+                if not self._ensure_page_folder(folder_path, allow_existing=True):
+                    return
+                is_new_page = True
                 self._apply_new_page_template(target_file, target_name)
             self._pending_selection = target_file
-            self._populate_vault_tree()
-            self._open_file(target_file, cursor_at_end=is_new_page)
-            self._scroll_to_anchor_slug(anchor_slug)
-            self._apply_navigation_focus(focus_target)
+            if refresh_only and self.current_path == target_file:
+                self._open_file(target_file, add_to_history=False, force=True)
+            else:
+                self._populate_vault_tree()
+                self._open_file(target_file, cursor_at_end=is_new_page, force=force)
+                self._scroll_to_anchor_slug(anchor_slug)
+                self._apply_navigation_focus(focus_target)
 
     def _adjust_font_size(self, delta: int) -> None:
         new_size = max(6, min(24, self.font_size + delta))
@@ -1965,6 +2344,12 @@ class MainWindow(QMainWindow):
 
     def _focus_tasks_search(self) -> None:
         """Focus the Tasks tab search bar."""
+        # Ensure right panel is visible if hidden
+        sizes = self.editor_split.sizes()
+        if len(sizes) >= 2 and sizes[1] == 0:
+            width = getattr(self, "_saved_right_width", 360)
+            total = sum(sizes)
+            self.editor_split.setSizes([max(1, total - width), width])
         try:
             # Switch to Tasks tab
             self.right_panel.tabs.setCurrentIndex(0)
@@ -2077,6 +2462,8 @@ class MainWindow(QMainWindow):
             self.editor.ensureCursorVisible()
 
     def _ensure_page_folder(self, folder_path: str, allow_existing: bool = False) -> bool:
+        if not self._ensure_writable("create folders/pages"):
+            return False
         payload = {"path": folder_path, "is_dir": True}
         try:
             resp = self.http.post("/api/path/create", json=payload)
@@ -2145,6 +2532,9 @@ class MainWindow(QMainWindow):
                 "New Page",
                 lambda checked=False, p=path, idx=index: self._start_inline_creation(p, global_pos, idx),
             )
+            if path:
+                open_window_action = menu.addAction("Open in Editor Window")
+                open_window_action.triggered.connect(lambda checked=False, p=path: self._open_page_editor_window(p))
             open_path = index.data(OPEN_ROLE)
             if path != "/":
                 delete_action = menu.addAction("Delete")
@@ -2214,6 +2604,7 @@ class MainWindow(QMainWindow):
         """Open the Link Navigator tab for the given page."""
         if not file_path:
             return
+        self._ensure_right_panel_visible()
         if file_path != self.current_path:
             try:
                 self._open_file(file_path)
@@ -2225,6 +2616,7 @@ class MainWindow(QMainWindow):
         """Open the AI Chat tab and sync to the given page."""
         if not file_path or not self.right_panel.ai_chat_panel:
             return
+        self._ensure_right_panel_visible()
         self.right_panel.focus_ai_chat(file_path, create=create)
 
     def _handle_ai_action(self, action: str, prompt: str, text: str) -> None:
@@ -2233,6 +2625,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "AI Chat", "Enable AI Chats in Preferences to use AI actions.")
             return
         target_path = self.current_path
+        self._ensure_right_panel_visible()
         self.right_panel.focus_ai_chat(target_path, create=True)
         self.right_panel.send_ai_action(action, prompt, text)
 
@@ -2295,6 +2688,9 @@ class MainWindow(QMainWindow):
         if not name:
             self._cancel_inline_editor()
             return
+        if not self._ensure_writable("create new pages"):
+            self._cancel_inline_editor()
+            return
         if "/" in name:
             self.statusBar().showMessage("Names cannot contain '/'", 4000)
             return
@@ -2327,6 +2723,8 @@ class MainWindow(QMainWindow):
     def _apply_template_from_path(self, file_path: str, page_name: str, template_path: str) -> None:
         """Apply a specific template file to a newly created page."""
         if not self.vault_root:
+            return
+        if not self._ensure_writable("apply templates or write pages"):
             return
         
         # Load template
@@ -2379,6 +2777,8 @@ class MainWindow(QMainWindow):
     def _delete_path(self, folder_path: str, open_path: Optional[str], global_pos: QPoint) -> None:
         if folder_path == "/":
             self.statusBar().showMessage("Cannot delete the root page.", 4000)
+            return
+        if not self._ensure_writable("delete pages or folders"):
             return
         confirm = QMessageBox(self)
         confirm.setIcon(QMessageBox.Warning)
@@ -2666,6 +3066,8 @@ class MainWindow(QMainWindow):
         """Reindex all pages in the vault."""
         if not self.vault_root or not config.has_active_vault():
             return
+        if not self._ensure_writable("reindex the vault"):
+            return
         
         root = Path(self.vault_root)
         txt_files = sorted(root.rglob(f"*{PAGE_SUFFIX}"))
@@ -2712,6 +3114,8 @@ class MainWindow(QMainWindow):
                 parts.append(colon)
         if self.vault_root_name:
             parts.append(self.vault_root_name)
+        if self._read_only:
+            parts.append("Read-Only")
         suffix = "ZimX Desktop"
         title = " | ".join(parts + [suffix]) if parts else suffix
         self.setWindowTitle(title)
@@ -3092,6 +3496,13 @@ class MainWindow(QMainWindow):
         """Refresh the dirty badge next to the VI indicator."""
         if not hasattr(self, "_dirty_status_label"):
             return
+        if self._read_only:
+            self._dirty_status_label.setText("O/")
+            self._dirty_status_label.setStyleSheet(
+                self._badge_base_style + " background-color: #9e9e9e; color: #f5f5f5; margin-right: 6px; text-decoration: line-through;"
+            )
+            self._dirty_status_label.setToolTip("Read-only: changes cannot be saved in this window")
+            return
         dirty = self._is_editor_dirty()
         if dirty:
             self._dirty_status_label.setText("●")
@@ -3137,6 +3548,11 @@ class MainWindow(QMainWindow):
         self._position_toc_widget()
         self.geometry_save_timer.start()
 
+    def moveEvent(self, event) -> None:  # type: ignore[override]
+        """Persist window position changes (paired with resize)."""
+        super().moveEvent(event)
+        self.geometry_save_timer.start()
+
     def closeEvent(self, event) -> None:  # type: ignore[override]
         # Stop any pending timers
         self.autosave_timer.stop()
@@ -3155,6 +3571,7 @@ class MainWindow(QMainWindow):
         # Close HTTP client and clean up
         self.http.close()
         config.set_active_vault(None)
+        self._release_vault_lock()
         return super().closeEvent(event)
 
     def _describe_index(self, index: QModelIndex) -> str:

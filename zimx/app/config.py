@@ -251,6 +251,73 @@ def save_show_journal(show: bool) -> None:
     conn.commit()
 
 
+def load_popup_editor_geometry() -> Optional[str]:
+    """Return the saved geometry for popup editors, if any."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("popup_editor_geometry",))
+    row = cur.fetchone()
+    return str(row[0]) if row else None
+
+
+def save_popup_editor_geometry(geometry: str) -> None:
+    """Persist geometry for popup editors (base64 of QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("popup_editor_geometry", geometry))
+    conn.commit()
+
+
+def load_popup_font_size(default: int = 14) -> int:
+    """Load preferred font size for popup editors."""
+    conn = _get_conn()
+    if not conn:
+        return default
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("popup_font_size",))
+    row = cur.fetchone()
+    if not row:
+        return default
+    try:
+        return max(8, int(row[0]))
+    except ValueError:
+        return default
+
+
+def save_popup_font_size(size: int) -> None:
+    """Persist preferred font size for popup editors."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("popup_font_size", str(int(size))))
+    conn.commit()
+
+
+def load_vault_force_read_only() -> bool:
+    """Return True if this vault should be opened in read-only mode by default."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("force_read_only",))
+    row = cur.fetchone()
+    if not row:
+        return False
+    return str(row[0]).lower() == "true"
+
+
+def save_vault_force_read_only(force: bool) -> None:
+    """Persist the per-vault read-only preference."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute(
+        "REPLACE INTO kv(key, value) VALUES(?, ?)",
+        ("force_read_only", "true" if force else "false"),
+    )
+    conn.commit()
+
+
 def load_show_future_tasks() -> bool:
     """Load preference for showing tasks that start in the future."""
     conn = _get_conn()

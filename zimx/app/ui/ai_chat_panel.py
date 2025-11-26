@@ -1912,21 +1912,40 @@ class AIChatPanel(QtWidgets.QWidget):
             )
             if confirm != QtWidgets.QMessageBox.Yes:
                 return
-            # Stop any active workers to avoid callbacks during reset
-            try:
-                if self._api_worker:
-                    self._api_worker.finished.disconnect()
-                    self._api_worker.failed.disconnect()
-                    self._api_worker.chunk.disconnect()
-            except Exception:
-                pass
-            try:
-                if self._condense_worker:
-                    self._condense_worker.finished.disconnect()
-                    self._condense_worker.failed.disconnect()
-                    self._condense_worker.chunk.disconnect()
-            except Exception:
-                pass
+            # Stop any active workers to avoid callbacks during reset and to prevent
+            # QThread from being destroyed while running (which would abort the app).
+            def _stop_worker(worker):
+                if not worker:
+                    return
+                try:
+                    worker.finished.disconnect()
+                except Exception:
+                    pass
+                try:
+                    worker.failed.disconnect()
+                except Exception:
+                    pass
+                try:
+                    worker.chunk.disconnect()
+                except Exception:
+                    pass
+                if worker.isRunning():
+                    try:
+                        worker.requestInterruption()
+                    except Exception:
+                        pass
+                    worker.quit()
+                    # Wait for the thread to exit; if it refuses, terminate as a last resort
+                    if not worker.wait(5000):
+                        print("[AIChat][reset] worker did not exit after quit(); terminating", worker)
+                        try:
+                            worker.terminate()
+                        except Exception:
+                            pass
+                        worker.wait(1000)
+
+            _stop_worker(self._api_worker)
+            _stop_worker(self._condense_worker)
             self._api_worker = None
             self._condense_worker = None
 

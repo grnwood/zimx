@@ -5,7 +5,7 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, Signal, QDate
 from PySide6.QtGui import QFont, QTextCharFormat, QKeyEvent
-from PySide6.QtWidgets import QApplication, QCalendarWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QCalendarWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QMenu
 
 from zimx.server.adapters.files import PAGE_SUFFIX
 
@@ -18,6 +18,7 @@ class CalendarPanel(QWidget):
 
     dateActivated = Signal(int, int, int)  # year, month, day
     pageActivated = Signal(str)  # relative path to a page
+    openInWindowRequested = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -36,6 +37,8 @@ class CalendarPanel(QWidget):
         self.journal_tree.itemClicked.connect(self._on_tree_activated)
         self.journal_tree.itemActivated.connect(self._on_tree_activated)
         self.journal_tree.setFocusPolicy(Qt.StrongFocus)
+        self.journal_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.journal_tree.customContextMenuRequested.connect(self._open_context_menu)
 
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
@@ -249,6 +252,23 @@ class CalendarPanel(QWidget):
         if item:
             self.journal_tree.setCurrentItem(item)
             self.journal_tree.scrollToItem(item)
+
+    def _open_context_menu(self, pos) -> None:
+        item = self.journal_tree.itemAt(pos)
+        menu = QMenu(self)
+        if item:
+            path_value = item.data(0, PATH_ROLE)
+            if path_value:
+                rel_path = str(path_value)
+                if not rel_path.startswith("/"):
+                    rel_path = "/" + rel_path
+                open_win = menu.addAction("Open in Editor Window")
+                open_win.triggered.connect(lambda: self.openInWindowRequested.emit(rel_path))
+                menu.addSeparator()
+        refresh = menu.addAction("Refresh")
+        refresh.triggered.connect(self.refresh)
+        global_pos = self.journal_tree.viewport().mapToGlobal(pos)
+        menu.exec(global_pos)
 
     def _find_item_by_path(self, path: str) -> Optional[QTreeWidgetItem]:
         def _walk(item: QTreeWidgetItem) -> Optional[QTreeWidgetItem]:
