@@ -7,9 +7,8 @@ Summary of diagnosing the 6–8s UI stall and the workaround we added.
 - `strace` captured Qt walking hundreds of system fonts (Noto/URW), with repeated open/mmap/munmap calls.
 - You have ~568 system fonts; the stall was the font database scan during Qt startup.
 
-## Workaround added
-- New opt-in env flag `ZIMX_MINIMAL_FONT_SCAN=1` (in `zimx/app/main.py`).
-- When enabled, at startup we:
+## Workaround added (now default)
+- Minimal font mode is now enabled by default. It:
   - Create a tiny fontconfig dir under `~/.cache/zimx/fonts-minimal/`.
   - Copy a single common font into it (Linux: DejaVu/Liberation/Noto; Windows: Segoe UI/Arial/Tahoma).
   - Write a minimal `fonts.conf` pointing only to that dir.
@@ -17,9 +16,10 @@ Summary of diagnosing the 6–8s UI stall and the workaround we added.
 - This prevents Qt from scanning all system fonts and eliminates the startup stall.
 
 ## How to use
-- Run with the flag set:
-  - Linux/macOS: `ZIMX_MINIMAL_FONT_SCAN=1 python -m zimx.app.main`
-  - Windows (PowerShell): `set ZIMX_MINIMAL_FONT_SCAN=1; python -m zimx.app.main`
+- Nothing to set—minimal mode is on by default.
+- To disable it (if you want full system fonts), set `ZIMX_DISABLE_MINIMAL_FONT_SCAN=1` before launch:
+  - Linux/macOS: `ZIMX_DISABLE_MINIMAL_FONT_SCAN=1 python -m zimx.app.main`
+  - Windows (PowerShell): `set ZIMX_DISABLE_MINIMAL_FONT_SCAN=1; python -m zimx.app.main`
 - Keep `ZIMX_DETAILED_PAGE_LOGGING=1` if you want the timing logs.
 
 ## Other tips
