@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QMainWindow, QMessageBox, QToolBar, QLabel
 
 from .markdown_editor import MarkdownEditor
 from .insert_link_dialog import InsertLinkDialog
+from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
 from zimx.app import config
 
 
@@ -119,15 +120,34 @@ class PageEditorWindow(QMainWindow):
         self.addToolBar(Qt.TopToolBarArea, toolbar)
 
     def _load_content(self) -> None:
+        tracer = PageLoadLogger(self._source_path) if PAGE_LOGGING_ENABLED else None
+        if tracer:
+            tracer.mark("api read start")
         try:
             resp = self.http.post("/api/file/read", json={"path": self._source_path})
             resp.raise_for_status()
             content = resp.json().get("content", "")
+            if tracer:
+                try:
+                    content_len = len(content.encode("utf-8"))
+                except Exception:
+                    content_len = len(content or "")
+                tracer.mark(f"api read complete bytes={content_len}")
+            try:
+                self.editor.set_page_load_logger(tracer)
+            except Exception:
+                pass
             self.editor.set_markdown(content)
+            if tracer:
+                tracer.mark("editor content applied")
             self.editor.document().setModified(False)
             self._last_saved_content = content
             self.statusBar().showMessage("Ready")
+            if tracer:
+                tracer.end("ready for edit (popup)")
         except httpx.HTTPError as exc:
+            if tracer:
+                tracer.mark(f"api read failed ({exc})")
             QMessageBox.critical(self, "Error", f"Failed to load page: {exc}")
 
     def _update_title(self) -> None:

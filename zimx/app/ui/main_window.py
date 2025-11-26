@@ -8,9 +8,10 @@ import socket
 import subprocess
 import sys
 import time
+import faulthandler
 
 import httpx
-from PySide6.QtCore import QEvent, QModelIndex, QPoint, Qt, Signal, QTimer, QObject
+from PySide6.QtCore import QEvent, QModelIndex, QPoint, Qt, Signal, QTimer, QObject, QElapsedTimer, QAbstractEventDispatcher
 from PySide6.QtGui import (
     QAction,
     QKeySequence,
@@ -62,6 +63,7 @@ from .path_utils import colon_to_path, path_to_colon, ensure_root_colon_link
 from .date_insert_dialog import DateInsertDialog
 from .open_vault_dialog import OpenVaultDialog
 from .page_editor_window import PageEditorWindow
+from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
 
 
 PATH_ROLE = int(Qt.ItemDataRole.UserRole)
@@ -408,6 +410,7 @@ class MainWindow(QMainWindow):
         self._apply_focus_borders()
         self.statusBar().showMessage("Select a vault to get started")
         self._default_status_stylesheet = self.statusBar().styleSheet()
+        self._setup_eventloop_watchdog()
 
         # Create status badges (Dirty + VI)
         self._badge_base_style = "border: 1px solid #666; padding: 2px 6px; border-radius: 3px;"
@@ -433,6 +436,39 @@ class MainWindow(QMainWindow):
 
         # Startup vault selection is orchestrated by main.py via .startup()
         self.editor.set_ai_actions_enabled(config.load_enable_ai_chats())
+
+    def _setup_eventloop_watchdog(self) -> None:
+        """Log when the Qt event loop appears stalled (high timer drift)."""
+        if not PAGE_LOGGING_ENABLED:
+            return
+        try:
+            self._loop_timer = QElapsedTimer()
+            self._loop_timer.start()
+            self._loop_watchdog = QTimer(self)
+            self._loop_watchdog.setInterval(250)
+            self._loop_watchdog.timeout.connect(self._check_eventloop_drift)
+            self._loop_watchdog.start()
+            dispatcher = QAbstractEventDispatcher.instance()
+            if dispatcher:
+                dispatcher.aboutToBlock.connect(lambda: self._mark_eventloop("aboutToBlock"))
+                dispatcher.awake.connect(lambda: self._mark_eventloop("awake"))
+        except Exception:
+            pass
+
+    def _mark_eventloop(self, phase: str) -> None:
+        if not PAGE_LOGGING_ENABLED or not hasattr(self, "_loop_timer"):
+            return
+        elapsed = self._loop_timer.elapsed()
+        print(f"[PageLoadAndRender] eventloop {phase} dt={elapsed:.1f}ms")
+        self._loop_timer.restart()
+
+    def _check_eventloop_drift(self) -> None:
+        if not PAGE_LOGGING_ENABLED or not hasattr(self, "_loop_timer"):
+            return
+        elapsed = self._loop_timer.elapsed()
+        if elapsed > 500:  # 0.5s threshold suggests the loop was blocked
+            print(f"[PageLoadAndRender] eventloop drift warning dt={elapsed:.1f}ms (loop stall?)")
+            self._loop_timer.restart()
 
     # --- UI wiring -----------------------------------------------------
     def _build_toolbar(self) -> None:
@@ -1264,6 +1300,7 @@ class MainWindow(QMainWindow):
     def _open_file(self, path: str, retry: bool = False, add_to_history: bool = True, force: bool = False, cursor_at_end: bool = False, restore_history_cursor: bool = False) -> None:
         if not path or (path == self.current_path and not force):
             return
+        tracer = PageLoadLogger(path) if PAGE_LOGGING_ENABLED else None
         # Save current page if dirty before switching
         if self.current_path and path != self.current_path:
             self._save_dirty_page()
@@ -1273,6 +1310,8 @@ class MainWindow(QMainWindow):
             self._cleanup_virtual_page_if_unchanged(self.current_path)
         
         self.autosave_timer.stop()
+        if tracer:
+            tracer.mark("api read start")
         
         # Add to page history (unless we're navigating through history)
         if add_to_history and path != self.current_path:
@@ -1292,18 +1331,37 @@ class MainWindow(QMainWindow):
         except httpx.HTTPStatusError as exc:
             print(f"[ZimX] Failed to read page {path}: status={exc.response.status_code if exc.response else 'unknown'} body={exc.response.text if exc.response else ''}", file=sys.stderr)
             detail = exc.response.text if exc.response else str(exc)
+            if tracer:
+                tracer.mark(f"api read failed ({detail})")
             self._alert(f"Failed to open {path}: {detail}")
             return
         except httpx.HTTPError as exc:
             print(f"[ZimX] Failed to read page {path}: {exc}", file=sys.stderr)
+            if tracer:
+                tracer.mark(f"api read failed ({exc})")
             self._alert(f"Failed to open {path}: {exc}")
             return
         content = resp.json().get("content", "")
+        if tracer:
+            try:
+                content_len = len(content.encode("utf-8"))
+            except Exception:
+                content_len = len(content or "")
+            tracer.mark(f"api read complete bytes={content_len}")
         self.editor.set_context(self.vault_root, path)
+        if tracer:
+            tracer.mark("editor context set")
+        # Hand logger to the editor so rendering steps are captured
+        try:
+            self.editor.set_page_load_logger(tracer)
+        except Exception:
+            pass
         self.current_path = path
         self._suspend_autosave = True
         self.editor.set_markdown(content)
         self._suspend_autosave = False
+        if tracer:
+            tracer.mark("editor content applied")
         # Mark buffer clean for dirty tracking
         try:
             self.editor.document().setModified(False)
@@ -1314,8 +1372,12 @@ class MainWindow(QMainWindow):
         updated = indexer.index_page(path, content)
         if updated:
             self.right_panel.refresh_tasks()
+        if tracer:
+            tracer.mark(f"index refresh {'+ tasks' if updated else '(no task changes)'}")
         # Keep Link Navigator in sync when a page is opened or reloaded
         self.right_panel.refresh_links(path)
+        if tracer:
+            tracer.mark("right panel links refreshed")
         move_cursor_to_end = cursor_at_end or self._should_focus_hr_tail(content)
         restored_history_cursor = False
         if restore_history_cursor:
@@ -1360,6 +1422,21 @@ class MainWindow(QMainWindow):
         else:
             self.right_panel.set_current_page(None, None)
             self.editor.set_ai_chat_available(False)
+        if tracer:
+            tracer.end("ready for edit")
+            # Set up a defensive stack dump if the Qt loop does not resume quickly.
+            faulthandler.cancel_dump_traceback_later()
+            faulthandler.dump_traceback_later(5.0, repeat=False)
+            loop_start = time.perf_counter()
+            QTimer.singleShot(
+                0,
+                lambda: (
+                    faulthandler.cancel_dump_traceback_later(),
+                    tracer.mark(
+                        f"qt loop resumed post-open delay={(time.perf_counter() - loop_start)*1000:.1f}ms"
+                    ),
+                ),
+            )
 
     def _save_current_file(self, auto: bool = False) -> None:
         if self._suspend_autosave:

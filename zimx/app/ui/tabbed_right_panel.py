@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from typing import Optional
+import os
+import time
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QTabWidget, QWidget
@@ -12,6 +14,8 @@ from .task_panel import TaskPanel
 from .attachments_panel import AttachmentsPanel
 from .link_navigator_panel import LinkNavigatorPanel
 from .calendar_panel import CalendarPanel
+
+_PAGE_LOGGING = os.getenv("ZIMX_DETAILED_PAGE_LOGGING", "0") not in ("0", "false", "False", "", None)
 
 
 class TabbedRightPanel(QWidget):
@@ -100,10 +104,22 @@ class TabbedRightPanel(QWidget):
     
     def set_current_page(self, page_path, relative_path=None) -> bool:
         """Update panels with the current page."""
+        t0 = time.perf_counter()
         self.attachments_panel.set_page(page_path)
+        t1 = time.perf_counter()
         self.link_panel.set_page(relative_path)
+        t2 = time.perf_counter()
+        if _PAGE_LOGGING:
+            print(
+                f"[PageLoadAndRender] right panel update attachments={(t1-t0)*1000:.1f}ms links={(t2-t1)*1000:.1f}ms"
+            )
         if self.ai_chat_panel:
             self.ai_chat_panel.set_current_page(relative_path)
+        t3 = time.perf_counter()
+        if _PAGE_LOGGING:
+            print(
+                f"[PageLoadAndRender] right panel ai chat {(t3-t2)*1000:.1f}ms"
+            )
         self._update_attachments_tab_label()
         if self.ai_chat_panel and hasattr(self.ai_chat_panel, "has_chat_for_path"):
             return self.ai_chat_panel.has_chat_for_path(relative_path)

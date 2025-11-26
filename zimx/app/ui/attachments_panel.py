@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 import os
+import time
 
 from PySide6.QtCore import Qt, QUrl, QSize, QMimeData
 from PySide6.QtGui import QIcon, QPixmap, QDesktopServices, QDrag
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
 from zimx.app import config
 
 _DETAILED_LOGGING = os.getenv("ZIMX_DETAILED_LOGGING", "0") not in ("0", "false", "False", "", None)
+_PAGE_LOGGING = os.getenv("ZIMX_DETAILED_PAGE_LOGGING", "0") not in ("0", "false", "False", "", None)
 
 
 class AttachmentsListWidget(QListWidget):
@@ -100,16 +102,22 @@ class AttachmentsPanel(QWidget):
     
     def set_page(self, page_path: Optional[Path]) -> None:
         """Set the current page and update the attachments list."""
+        t0 = time.perf_counter()
         self.current_page_path = page_path
         self._refresh_attachments()
+        if _PAGE_LOGGING:
+            print(f"[PageLoadAndRender] attachments set_page elapsed={(time.perf_counter()-t0)*1000:.1f}ms")
     
     def _refresh_attachments(self) -> None:
         """Refresh the list of attachments for the current page."""
+        t0 = time.perf_counter()
         self.attachments_list.clear()
         
         if not self.current_page_path:
             self.open_folder_button.setEnabled(False)
             self.refresh_button.setEnabled(False)
+            if _PAGE_LOGGING:
+                print(f"[PageLoadAndRender] attachments refresh skipped (no page) elapsed={(time.perf_counter()-t0)*1000:.1f}ms")
             return
         
         # Get the folder for this page
@@ -137,6 +145,7 @@ class AttachmentsPanel(QWidget):
         # List all files in the folder (excluding the page text file itself)
         try:
             files = sorted(page_folder.iterdir(), key=lambda p: p.name.lower())
+            t_list = time.perf_counter()
             if _DETAILED_LOGGING:
                 print(f"[Attachments] Found {len(files)} files in folder")
             for file_path in files:
@@ -165,13 +174,21 @@ class AttachmentsPanel(QWidget):
                             item.setIcon(icon)
                     
                     self.attachments_list.addItem(item)
+            if _PAGE_LOGGING:
+                print(
+                    f"[PageLoadAndRender] attachments refresh listed={len(files)} elapsed={(time.perf_counter()-t_list)*1000:.1f}ms total={(time.perf_counter()-t0)*1000:.1f}ms"
+                )
         except (OSError, PermissionError):
             pass
+        else:
+            if _PAGE_LOGGING:
+                print(f"[PageLoadAndRender] attachments refresh total={(time.perf_counter()-t0)*1000:.1f}ms")
     
     def _get_file_icon(self, file_path: Path) -> QIcon:
         """Get an icon for a file - thumbnail for images, OS icon for others."""
         if file_path.suffix.lower() in ['.png', '.jpg', '.jpeg', '.gif', '.bmp']:
             # Create thumbnail for image files
+            load_t0 = time.perf_counter()
             pixmap = QPixmap(str(file_path))
             if not pixmap.isNull():
                 # Scale based on zoom level
@@ -183,6 +200,8 @@ class AttachmentsPanel(QWidget):
                     size = 144
                 
                 scaled = pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                if _PAGE_LOGGING:
+                    print(f"[PageLoadAndRender] attachments thumbnail {file_path.name} load+scale={(time.perf_counter()-load_t0)*1000:.1f}ms")
                 return QIcon(scaled)
         
         # Use OS file icon for non-images or if thumbnail failed

@@ -7,6 +7,8 @@ import sys
 import threading
 import time
 import traceback
+import shutil
+from pathlib import Path
 
 import uvicorn
 from PySide6.QtCore import QtMsgType, qInstallMessageHandler
@@ -90,6 +92,68 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _maybe_use_minimal_fonts() -> None:
+    """Optionally force Qt to see only a small font set to avoid long font scans.
+
+    Enable via ZIMX_MINIMAL_FONT_SCAN=1. This writes a tiny fontconfig file under
+    ~/.cache/zimx/fonts-minimal and points FONTCONFIG_FILE/FONTCONFIG_PATH/QT_QPA_FONTDIR
+    to it, copying a single known font if needed.
+    """
+    if os.getenv("ZIMX_MINIMAL_FONT_SCAN", "0") in ("0", "false", "False", "", None):
+        return
+    cache_root = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")) / "zimx" / "fonts-minimal"
+    font_dir = cache_root / "fonts"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    font_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pick a small, common font without walking the whole tree.
+    if os.name == "nt":
+        win_fonts = Path(os.getenv("WINDIR", "C:\\Windows")) / "Fonts"
+        candidates = [
+            win_fonts / "segoeui.ttf",
+            win_fonts / "arial.ttf",
+            win_fonts / "tahoma.ttf",
+        ]
+    else:
+        candidates = [
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf"),
+            Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
+            Path("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"),
+        ]
+    src = next((p for p in candidates if p.exists()), None)
+    if not src:
+        print("[ZimX] ZIMX_MINIMAL_FONT_SCAN set but no candidate font found; falling back to system fonts.", file=sys.stderr)
+        return
+    dest = font_dir / src.name
+    try:
+        if not dest.exists():
+            shutil.copy2(src, dest)
+    except Exception as exc:
+        print(f"[ZimX] Failed to copy minimal font {src}: {exc}", file=sys.stderr)
+        return
+
+    fonts_conf = cache_root / "fonts.conf"
+    try:
+        fonts_conf.write_text(
+            f"""<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <dir>{font_dir}</dir>
+</fontconfig>
+""",
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        print(f"[ZimX] Failed to write minimal fonts.conf: {exc}", file=sys.stderr)
+        return
+
+    os.environ["FONTCONFIG_FILE"] = str(fonts_conf)
+    os.environ["FONTCONFIG_PATH"] = str(cache_root)
+    os.environ["QT_QPA_FONTDIR"] = str(font_dir)
+    print(f"[ZimX] Minimal font scan enabled; using {dest} via {fonts_conf}", file=sys.stderr)
+
+
 def _find_open_port(host: str, preferred: int) -> int:
     """Try preferred port, otherwise fall back to an ephemeral port."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -145,6 +209,7 @@ def main() -> None:
     args = _parse_args(sys.argv[1:])
     start_ts = time.time()
     _diag("Application starting.")
+    _maybe_use_minimal_fonts()
     config.init_settings()
     # Install custom message handler to suppress harmless Qt warnings
     qInstallMessageHandler(_qt_message_handler)

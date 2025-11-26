@@ -26,6 +26,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QTextEdit, QMenu, QInputDialog, QDialog, QApplication
 from .path_utils import path_to_colon, colon_to_path, ensure_root_colon_link
 from .heading_utils import heading_slug
+from .page_load_logger import PageLoadLogger
 
 
 TAG_PATTERN = QRegularExpression(r"@(\w+)")
@@ -609,6 +610,7 @@ class MarkdownEditor(QTextEdit):
         self._dialog_block_input: bool = False
         self._ai_actions_enabled: bool = True
         self._ai_chat_available: bool = False
+        self._page_load_logger: Optional[PageLoadLogger] = None
         self.setPlaceholderText("Open a Markdown file to begin editing…")
         self.setAcceptRichText(True)
         self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(" "))
@@ -666,16 +668,33 @@ class MarkdownEditor(QTextEdit):
     def current_relative_path(self) -> Optional[str]:
         return self._current_path
 
+    def set_page_load_logger(self, logger: Optional[PageLoadLogger]) -> None:
+        """Attach a page load logger for the next render cycle."""
+        # The logger itself knows whether logging is enabled.
+        self._page_load_logger = logger
+
+    def _mark_page_load(self, label: str) -> None:
+        if self._page_load_logger:
+            self._page_load_logger.mark(label)
+
+    def _complete_page_load_logging(self, label: str) -> None:
+        if self._page_load_logger:
+            self._page_load_logger.end(label)
+            self._page_load_logger = None
+
     def set_markdown(self, content: str) -> None:
         import time
         from os import getenv
         t0 = time.perf_counter()
+        self._mark_page_load("render start")
         
         normalized = self._normalize_markdown_images(content)
         t1 = time.perf_counter()
+        self._mark_page_load("normalize images")
         
         display = self._to_display(normalized)
         t2 = time.perf_counter()
+        self._mark_page_load("convert to display text")
         
         # Enable highlighter timing instrumentation (will be disabled at end)
         self.highlighter.enable_timing(True)
@@ -717,6 +736,7 @@ class MarkdownEditor(QTextEdit):
         else:
             self.setPlainText(display)
             t3 = time.perf_counter()
+        self._mark_page_load("document populated")
         
         # Reconnect the textChanged handlers
         self.textChanged.connect(self._enforce_display_symbols)
@@ -728,14 +748,17 @@ class MarkdownEditor(QTextEdit):
         self.setUpdatesEnabled(True)
         
         # Lazy load images after a short delay to let the UI render first
-        QTimer.singleShot(0, lambda: self._render_images(display))
+        scheduled_at = time.perf_counter()
+        QTimer.singleShot(0, lambda: self._render_images(display, scheduled_at))
         t4 = time.perf_counter()
+        self._mark_page_load("queued image render")
         
         self._display_guard = False
         self._schedule_heading_outline()
         # Ensure scroll-past-end margin is applied after new content
         self._apply_scroll_past_end_margin()
         t5 = time.perf_counter()
+        self._mark_page_load("outline + margin scheduled")
         
         if _DETAILED_LOGGING:
             print(f"[TIMING] set_markdown breakdown:")
@@ -761,6 +784,7 @@ class MarkdownEditor(QTextEdit):
                 print(f"[TIMING] Highlighter: blocks={self.highlighter._timing_blocks} total={total:.1f}ms avg={avg:.2f}ms")
         # Disable timing to avoid overhead for subsequent edits
         self.highlighter.enable_timing(False)
+        self._mark_page_load("editor focus ready")
 
         # Ensure the editor has focus after loading and rendering
         self.setFocus()
@@ -2825,19 +2849,28 @@ class MarkdownEditor(QTextEdit):
         suffix = f"{{width={width_prop}}}" if width_prop else ""
         return f"![{alt}]({original}){suffix}"
 
-    def _render_images(self, display_text: str) -> None:
+    def _render_images(self, display_text: str, scheduled_at: Optional[float] = None) -> None:
         """Replace markdown image patterns in the given display text with inline images.
 
         This operates on the current document by selecting each pattern range
         and inserting a QTextImageFormat created from the resolved path.
         """
         import time
+        delay_ms = (time.perf_counter() - scheduled_at) * 1000.0 if scheduled_at else 0.0
         matches = list(IMAGE_PATTERN.finditer(display_text))
         if not matches:
+            self._mark_page_load(f"render images skipped (0) delay={delay_ms:.1f}ms")
+            QTimer.singleShot(
+                0,
+                lambda: self._complete_page_load_logging(
+                    f"qt idle after images delay={(time.perf_counter() - (scheduled_at or time.perf_counter()))*1000:.1f}ms"
+                ),
+            )
             return
         
         if _DETAILED_LOGGING:
             print(f"[TIMING] Rendering {len(matches)} images...")
+        self._mark_page_load(f"render images start count={len(matches)} delay={delay_ms:.1f}ms")
         cursor = self.textCursor()
         cursor.beginEditBlock()
         try:
@@ -2865,6 +2898,14 @@ class MarkdownEditor(QTextEdit):
                 print(f"  Image {idx+1}/{len(matches)} ({path}): {(t_img_end - t_img_start)*1000:.1f}ms")
         finally:
             cursor.endEditBlock()
+        self._mark_page_load(f"render images done count={len(matches)}")
+        end_at = time.perf_counter()
+        QTimer.singleShot(
+            0,
+            lambda: self._complete_page_load_logging(
+                f"qt idle after images delay={(time.perf_counter() - end_at)*1000:.1f}ms"
+            ),
+        )
 
     def _insert_image_from_path(self, raw_path: str, alt: str = "", width: Optional[int] = None) -> None:
         fmt = self._create_image_format(raw_path, alt, str(width) if width else None)
