@@ -5,7 +5,7 @@ import os
 import time
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QTabWidget, QWidget
+from PySide6.QtWidgets import QTabWidget, QWidget, QMenu
 from PySide6.QtCore import Qt
 from zimx.app import config
 
@@ -28,6 +28,9 @@ class TabbedRightPanel(QWidget):
     calendarPageActivated = Signal(str)  # page path from Calendar tab
     aiChatNavigateRequested = Signal(str)  # page path from AI Chat tab
     openInWindowRequested = Signal(str)  # page path to open in single-page editor
+    openTaskWindowRequested = Signal()
+    openLinkWindowRequested = Signal()
+    openAiWindowRequested = Signal()
     
     def __init__(self, parent=None, enable_ai_chats: bool = False, ai_chat_font_size: int = 13) -> None:
         super().__init__(parent)
@@ -61,6 +64,8 @@ class TabbedRightPanel(QWidget):
         # Set Tasks as default tab (index 0)
         self.tabs.setCurrentIndex(0)
         self.tabs.currentChanged.connect(self._focus_current_tab)
+        self.tabs.tabBar().setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tabs.tabBar().customContextMenuRequested.connect(self._open_tab_context_menu)
         
         # Forward signals
         self.task_panel.taskActivated.connect(self.taskActivated)
@@ -166,6 +171,28 @@ class TabbedRightPanel(QWidget):
                 # Ensure content is fresh whenever the tab gains focus
                 self.link_panel.refresh(page_path)
                 break
+
+    def _open_tab_context_menu(self, pos) -> None:
+        """Offer 'Open in New Window' for select tabs."""
+        bar = self.tabs.tabBar()
+        index = bar.tabAt(pos)
+        if index < 0:
+            return
+        widget = self.tabs.widget(index)
+        menu = QMenu(self)
+        if widget == self.task_panel:
+            action = menu.addAction("Open in New Window")
+            action.triggered.connect(self.openTaskWindowRequested.emit)
+        elif widget == self.link_panel:
+            action = menu.addAction("Open in New Window")
+            action.triggered.connect(self.openLinkWindowRequested.emit)
+        elif widget == self.ai_chat_panel:
+            action = menu.addAction("Open in New Window")
+            action.triggered.connect(self.openAiWindowRequested.emit)
+        else:
+            return
+        global_pos = bar.mapToGlobal(pos)
+        menu.exec(global_pos)
 
     def _focus_current_tab(self) -> None:
         """Ensure the active tab gains focus when selected."""

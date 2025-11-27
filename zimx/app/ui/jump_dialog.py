@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QDialogButtonBox,
+    QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -18,10 +19,19 @@ from .path_utils import path_to_colon
 
 
 class JumpToPageDialog(QDialog):
-    def __init__(self, parent=None) -> None:
+    def __init__(
+        self,
+        parent=None,
+        filter_prefix: str | None = None,
+        filter_label: str | None = None,
+        clear_filter_cb=None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Jump to page")
         self.setModal(True)
+        self._filter_prefix = filter_prefix
+        self._filter_label = filter_label
+        self._clear_filter_cb = clear_filter_cb
         
         # Set up geometry save timer (debounced)
         self.geometry_save_timer = QTimer(self)
@@ -32,6 +42,23 @@ class JumpToPageDialog(QDialog):
         # Make dialog same size as insert link dialog
         self.resize(640, 360)
         layout = QVBoxLayout()
+
+        if self._filter_prefix:
+            self.filter_banner = QLabel()
+            self.filter_banner.setTextFormat(Qt.RichText)
+            self.filter_banner.setTextInteractionFlags(Qt.TextBrowserInteraction)
+            self.filter_banner.setOpenExternalLinks(False)
+            label = self._filter_label or self._filter_prefix
+            self.filter_banner.setText(
+                f"<div style='background:#c62828; color:#ffffff; padding:6px; font-weight:bold;'>"
+                f"Filtered by {label} "
+                f"(<a href='remove' style='color:#ffffff; text-decoration:underline;'>Remove</a>)"
+                f"</div>"
+            )
+            self.filter_banner.linkActivated.connect(self._on_remove_filter)
+            layout.addWidget(self.filter_banner)
+        else:
+            self.filter_banner = None
 
         self.search = QLineEdit()
         self.search.setPlaceholderText("Start typing to filter pages…")
@@ -102,16 +129,23 @@ class JumpToPageDialog(QDialog):
         pages = config.search_pages(term)
         self.list_widget.clear()
         for page in pages:
-            display = page["title"] or page["path"]
-            pretty_path = self._friendly_path(page["path"])
-            item = QListWidgetItem(f"{display} — {pretty_path}")
+            if self._filter_prefix and not page["path"].startswith(self._filter_prefix):
+                continue
+            item = QListWidgetItem(self._display_label(page))
             item.setData(Qt.UserRole, page["path"])
             self.list_widget.addItem(item)
         if self.list_widget.count() > 0:
             self.list_widget.setCurrentRow(0)
 
-    def _friendly_path(self, path: str) -> str:
-        return path_to_colon(path)
+    def _display_label(self, page: dict) -> str:
+        full_path = page.get("path") or ""
+        title = page.get("title") or ""
+        if self._filter_prefix and full_path.startswith(self._filter_prefix):
+            rel = full_path[len(self._filter_prefix) :].lstrip("/")
+            rel_colon = path_to_colon("/" + rel) if rel else path_to_colon(full_path)
+            return rel_colon or rel or title or full_path
+        pretty_path = path_to_colon(full_path)
+        return f"{title} — {pretty_path}" if title else pretty_path
     
     def _restore_geometry(self) -> None:
         """Restore saved dialog geometry."""
@@ -141,6 +175,17 @@ class JumpToPageDialog(QDialog):
         """Handle dialog resize: save geometry with debounce."""
         super().resizeEvent(event)
         self.geometry_save_timer.start()
+
+    def _on_remove_filter(self, link: str) -> None:
+        if self._clear_filter_cb:
+            try:
+                self._clear_filter_cb()
+            except Exception:
+                pass
+        self._filter_prefix = None
+        if self.filter_banner:
+            self.filter_banner.hide()
+        self._refresh()
     
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """Save dialog geometry when closing."""

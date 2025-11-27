@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 import json
 import os
 import socket
@@ -11,7 +11,18 @@ import time
 import faulthandler
 
 import httpx
-from PySide6.QtCore import QEvent, QModelIndex, QPoint, Qt, Signal, QTimer, QObject, QElapsedTimer, QAbstractEventDispatcher
+from PySide6.QtCore import (
+    QEvent,
+    QModelIndex,
+    QPoint,
+    Qt,
+    Signal,
+    QTimer,
+    QObject,
+    QElapsedTimer,
+    QAbstractEventDispatcher,
+    QByteArray,
+)
 from PySide6.QtGui import (
     QAction,
     QKeySequence,
@@ -25,6 +36,7 @@ from PySide6.QtGui import (
     QFont,
     QPen,
     QPalette,
+    QBrush,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -53,6 +65,9 @@ from zimx.server.adapters.files import PAGE_SUFFIX
 
 from .markdown_editor import MarkdownEditor
 from .tabbed_right_panel import TabbedRightPanel
+from .task_panel import TaskPanel
+from .link_navigator_panel import LinkNavigatorPanel
+from .ai_chat_panel import AIChatPanel
 from .jump_dialog import JumpToPageDialog
 from .toc_widget import TableOfContentsWidget
 from .heading_utils import heading_slug
@@ -69,6 +84,7 @@ from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
 PATH_ROLE = int(Qt.ItemDataRole.UserRole)
 TYPE_ROLE = PATH_ROLE + 1
 OPEN_ROLE = TYPE_ROLE + 1
+FILTER_BANNER = "__NAV_FILTER_BANNER__"
 _DETAILED_LOGGING = os.getenv("ZIMX_DETAILED_LOGGING", "0") not in ("0", "false", "False", "", None)
 
 
@@ -100,9 +116,12 @@ class InlineNameEdit(QLineEdit):
 class VaultTreeView(QTreeView):
     enterActivated = Signal()
     arrowNavigated = Signal()
+    escapePressed = Signal()
+    rowClicked = Signal(QModelIndex)
 
     def keyPressEvent(self, event):  # type: ignore[override]
         if event.key() == Qt.Key_Escape and event.modifiers() == Qt.NoModifier:
+            self.escapePressed.emit()
             self.collapseAll()
             event.accept()
             return
@@ -158,6 +177,14 @@ class VaultTreeView(QTreeView):
         recurse(QModelIndex())
         return order
 
+    def mousePressEvent(self, event):  # type: ignore[override]
+        if event.button() == Qt.LeftButton:
+            idx = self.indexAt(event.pos())
+            if idx.isValid():
+                self.rowClicked.emit(idx)
+        self.setFocus(Qt.MouseFocusReason)
+        super().mousePressEvent(event)
+
 
 class MainWindow(QMainWindow):
 
@@ -178,6 +205,9 @@ class MainWindow(QMainWindow):
         self.vault_root: Optional[str] = None
         self.vault_root_name: Optional[str] = None
         self.current_path: Optional[str] = None
+        self._nav_filter_path: Optional[str] = None
+        self._full_tree_data: list[dict] = []
+        self._skip_next_selection_open: bool = False
         
         # Page navigation history
         self.page_history: list[str] = []
@@ -212,6 +242,8 @@ class MainWindow(QMainWindow):
         self.tree_view.selectionModel().currentChanged.connect(self._on_selection_changed)
         self.tree_view.enterActivated.connect(self._focus_editor_from_tree)
         self.tree_view.arrowNavigated.connect(self._mark_tree_arrow_nav)
+        self.tree_view.escapePressed.connect(self._clear_nav_filter)
+        self.tree_view.rowClicked.connect(self._on_tree_row_clicked)
         self.dir_icon = self.style().standardIcon(QStyle.SP_DirIcon)
         self.file_icon = self.style().standardIcon(QStyle.SP_FileIcon)
         self._tree_arrow_focus_pending = False
@@ -266,6 +298,7 @@ class MainWindow(QMainWindow):
         self.editor.aiActionRequested.connect(self._handle_ai_action)
         self.editor.linkActivated.connect(self._open_link_in_context)
         self.editor.set_open_in_window_callback(self._open_page_editor_window)
+        self.editor.set_filter_nav_callback(self._set_nav_filter)
         self.font_size = 14
         self.editor.set_font_point_size(self.font_size)
         # Load vi-mode block cursor preference
@@ -294,6 +327,9 @@ class MainWindow(QMainWindow):
         self.right_panel.calendarPageActivated.connect(self._open_calendar_page)
         self.right_panel.aiChatNavigateRequested.connect(self._on_ai_chat_navigate)
         self.right_panel.openInWindowRequested.connect(self._open_page_editor_window)
+        self.right_panel.openTaskWindowRequested.connect(self._open_task_panel_window)
+        self.right_panel.openLinkWindowRequested.connect(self._open_link_panel_window)
+        self.right_panel.openAiWindowRequested.connect(self._open_ai_chat_window)
         try:
             self.right_panel.task_panel.focusGained.connect(self._suspend_vi_for_tasks)
         except Exception:
@@ -324,6 +360,11 @@ class MainWindow(QMainWindow):
         self.editor_split = QSplitter()
         self.editor_split.addWidget(self.editor)
         self.editor_split.addWidget(self.right_panel)
+        self.editor_split.setChildrenCollapsible(False)
+        self.editor_split.setHandleWidth(8)
+        # Allow the editor to shrink enough so the right panel can expand comfortably
+        self.editor.setMinimumWidth(200)
+        self.right_panel.setMinimumWidth(240)
         self.editor_split.setStretchFactor(0, 4)
         self.editor_split.setStretchFactor(1, 2)
         self.editor_split.splitterMoved.connect(self._on_splitter_moved)
@@ -393,6 +434,16 @@ class MainWindow(QMainWindow):
         view_vault_disk_action.setToolTip("Open the vault folder in your system file manager")
         view_vault_disk_action.triggered.connect(self._open_vault_on_disk)
         vault_menu.addAction(view_vault_disk_action)
+        vault_menu.addSeparator()
+        task_window_action = QAction("Open Task Panel Window", self)
+        task_window_action.triggered.connect(self._open_task_panel_window)
+        vault_menu.addAction(task_window_action)
+        link_window_action = QAction("Open Link Navigator Window", self)
+        link_window_action.triggered.connect(self._open_link_panel_window)
+        vault_menu.addAction(link_window_action)
+        ai_window_action = QAction("Open AI Chat Window", self)
+        ai_window_action.triggered.connect(self._open_ai_chat_window)
+        vault_menu.addAction(ai_window_action)
 
         self._register_shortcuts()
         self._vi_filter_targets: list[QObject] = []
@@ -425,6 +476,9 @@ class MainWindow(QMainWindow):
         self._vi_badge_base_style = self._badge_base_style
         self._vi_status_label.setStyleSheet(self._vi_badge_base_style + " background-color: transparent;")
         self.statusBar().addPermanentWidget(self._vi_status_label, 0)
+
+        self._detached_panels: list[QMainWindow] = []
+        self._detached_link_panels: list[LinkNavigatorPanel] = []
 
         # Keep dirty indicator in sync with edits
         try:
@@ -1191,6 +1245,30 @@ class MainWindow(QMainWindow):
             page_name = Path(path).stem
             self.statusBar().showMessage(f"Removed bookmark: {page_name}", 3000)
 
+    def _set_nav_filter(self, path: str) -> None:
+        """Enable tree filter for the given folder path."""
+        if not path:
+            return
+        self._nav_filter_path = path if path.startswith("/") else f"/{path}"
+        self._populate_vault_tree()
+        self.tree_view.expandAll()
+        self._apply_nav_filter_style()
+
+    def _clear_nav_filter(self) -> None:
+        """Disable tree filter and restore full view."""
+        if not self._nav_filter_path:
+            # Still collapse on escape even if no filter is active
+            self.tree_view.collapseAll()
+            return
+        self._nav_filter_path = None
+        self._populate_vault_tree()
+        self.tree_view.collapseAll()
+        self._apply_nav_filter_style()
+
+    def _apply_nav_filter_style(self) -> None:
+        """Refresh focus borders to reflect filter state."""
+        self._apply_focus_borders()
+
     def _populate_vault_tree(self) -> None:
         self._cancel_inline_editor()
         if not self.vault_root:
@@ -1206,7 +1284,8 @@ class MainWindow(QMainWindow):
 
         # Add synthetic vault root node (fixed at top, opens vault home page) and nest tree under it
         synthetic_root_item = None
-        if self.vault_root_name:
+        add_synthetic_root = self.vault_root_name and not self._nav_filter_path
+        if add_synthetic_root:
             synthetic_root = {
                 "name": self.vault_root_name,
                 "path": "/",  # use root path so delete isn't offered
@@ -1214,11 +1293,26 @@ class MainWindow(QMainWindow):
                 "children": [],
             }
             synthetic_root_item = self._add_tree_node(self.tree_model.invisibleRootItem(), synthetic_root)
+        elif self._nav_filter_path:
+            banner = QStandardItem("Filtered (Remove)")
+            font = banner.font()
+            font.setBold(True)
+            banner.setFont(font)
+            banner.setEditable(False)
+            banner.setForeground(QBrush(QColor("#ffffff")))
+            banner.setBackground(QBrush(QColor("#c62828")))
+            banner.setData(FILTER_BANNER, PATH_ROLE)
+            self.tree_model.invisibleRootItem().appendRow(banner)
         
         # Check if Journal should be filtered
         show_journal = self.show_journal_button.isChecked()
         
-        for node in data:
+        self._full_tree_data = data
+        filtered_data = data
+        if self._nav_filter_path:
+            filtered_data = self._filter_tree_data(data, self._nav_filter_path)
+
+        for node in filtered_data:
             # Hide the root vault node (path == "/") and render only its children under synthetic root
             if node.get("path") == "/":
                 for child in node.get("children", []):
@@ -1236,6 +1330,7 @@ class MainWindow(QMainWindow):
             self._pending_selection = None
         self.right_panel.refresh_tasks()
         self.right_panel.refresh_calendar()
+        self._apply_nav_filter_style()
 
     def _add_tree_node(self, parent: QStandardItem, node: dict) -> None:
         item = QStandardItem(node["name"])
@@ -1259,6 +1354,25 @@ class MainWindow(QMainWindow):
         for child in node.get("children", []):
             self._add_tree_node(item, child)
 
+    def _filter_tree_data(self, nodes: list[dict], prefix: str) -> list[dict]:
+        """Return a pruned copy of the vault tree limited to prefix and its descendants."""
+        result: list[dict] = []
+        for node in nodes:
+            path = node.get("path") or ""
+            children = node.get("children", [])
+            filtered_children = self._filter_tree_data(children, prefix)
+            if prefix == "/":
+                include_as_node = True
+            else:
+                include_as_node = path and path.startswith(prefix)
+            if include_as_node:
+                clone = dict(node)
+                clone["children"] = filtered_children
+                result.append(clone)
+            elif filtered_children:
+                result.extend(filtered_children)
+        return result
+
     def _on_selection_changed(self, current: QModelIndex, previous: QModelIndex) -> None:
         self._debug(
             f"Tree selection changed: current={self._describe_index(current)}, previous={self._describe_index(previous)}"
@@ -1266,6 +1380,9 @@ class MainWindow(QMainWindow):
         restore_tree_focus = self._tree_arrow_focus_pending and self.tree_view.hasFocus()
         # One-shot flag: consume after evaluating
         self._tree_arrow_focus_pending = False
+        if self._skip_next_selection_open:
+            self._skip_next_selection_open = False
+            return
         if previous.isValid():
             prev_target = previous.data(OPEN_ROLE) or previous.data(PATH_ROLE)
             if prev_target and prev_target == self.current_path:
@@ -1280,6 +1397,9 @@ class MainWindow(QMainWindow):
             self._debug("Selection change suppressed (programmatic nav).")
             return
         open_target = current.data(OPEN_ROLE) or current.data(PATH_ROLE)
+        if open_target == FILTER_BANNER:
+            self._clear_nav_filter()
+            return
         self._debug(f"Tree selection target resolved to: {open_target!r}")
         if not open_target:
             self._debug("Tree selection skipped: no open target.")
@@ -1375,6 +1495,7 @@ class MainWindow(QMainWindow):
             tracer.mark(f"index refresh {'+ tasks' if updated else '(no task changes)'}")
         # Keep Link Navigator in sync when a page is opened or reloaded
         self.right_panel.refresh_links(path)
+        self._refresh_detached_link_panels(path)
         if tracer:
             tracer.mark("right panel links refreshed")
         move_cursor_to_end = cursor_at_end or self._should_focus_hr_tail(content)
@@ -1705,7 +1826,14 @@ class MainWindow(QMainWindow):
             return
         
         vi_was_active = self._suspend_vi_mode_for_dialog()
-        dlg = JumpToPageDialog(self)
+        filter_prefix = self._nav_filter_path
+        filter_label = path_to_colon(filter_prefix) if filter_prefix else None
+        dlg = JumpToPageDialog(
+            self,
+            filter_prefix=filter_prefix,
+            filter_label=filter_label,
+            clear_filter_cb=self._clear_nav_filter,
+        )
         result = dlg.exec()
         
         if result == QDialog.Accepted:
@@ -1734,7 +1862,15 @@ class MainWindow(QMainWindow):
             # Qt returns paragraph separators as U+2029 which cause line breaks in links
             selected_text = selected_text.replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ').strip()
         
-        dlg = InsertLinkDialog(self, selected_text=selected_text)
+        filter_prefix = self._nav_filter_path
+        filter_label = path_to_colon(filter_prefix) if filter_prefix else None
+        dlg = InsertLinkDialog(
+            self,
+            selected_text=selected_text,
+            filter_prefix=filter_prefix,
+            filter_label=filter_label,
+            clear_filter_cb=self._clear_nav_filter,
+        )
         self.editor.begin_dialog_block()
         try:
             result = dlg.exec()
@@ -1928,6 +2064,129 @@ class MainWindow(QMainWindow):
             self.right_panel.calendar_panel.journal_tree.setFocus(Qt.OtherFocusReason)
         except Exception:
             pass
+
+    def _refresh_detached_link_panels(self, path: Optional[str]) -> None:
+        """Keep detached Link Navigator windows in sync with the current page."""
+        if not self._detached_link_panels:
+            return
+        if not path or not config.has_active_vault():
+            for panel in list(self._detached_link_panels):
+                panel.set_page(None)
+            return
+        norm = self._normalize_editor_path(path)
+        for panel in list(self._detached_link_panels):
+            try:
+                panel.set_page(norm)
+            except Exception:
+                pass
+
+    # --- Detached panel windows -------------------------------------------------
+
+    def _register_detached_panel(self, window: QMainWindow) -> None:
+        """Keep a reference to detached panels to prevent GC, and remove on close."""
+        self._detached_panels.append(window)
+        window.destroyed.connect(
+            lambda: self._detached_panels.remove(window) if window in self._detached_panels else None
+        )
+
+    def _open_task_panel_window(self) -> None:
+        if not config.has_active_vault():
+            self._alert("Open a vault first.")
+            return
+        panel = TaskPanel()
+        panel.set_vault_root(self.vault_root or "")
+        panel.refresh()
+        panel.taskActivated.connect(self._open_task_from_panel)
+        window = QMainWindow(self)
+        window.setWindowTitle("Tasks")
+        window.setCentralWidget(panel)
+        window.resize(720, 640)
+        self._apply_geometry_persistence(window, "task_panel_window")
+        window.show()
+        self._register_detached_panel(window)
+
+    def _open_link_panel_window(self) -> None:
+        if not config.has_active_vault():
+            self._alert("Open a vault first.")
+            return
+        panel = LinkNavigatorPanel()
+        current = self.current_path
+        if current:
+            panel.set_page(self._normalize_editor_path(current))
+        panel.pageActivated.connect(self._open_link_from_panel)
+        panel.openInWindowRequested.connect(self._open_page_editor_window)
+        window = QMainWindow(self)
+        window.setWindowTitle("Link Navigator")
+        window.setCentralWidget(panel)
+        window.resize(760, 680)
+        self._apply_geometry_persistence(window, "link_navigator_window")
+        window.show()
+        self._register_detached_panel(window)
+        self._detached_link_panels.append(panel)
+        window.destroyed.connect(lambda: self._remove_detached_link_panel(panel))
+
+    def _open_ai_chat_window(self) -> None:
+        if not config.load_enable_ai_chats():
+            self._alert("Enable AI Chat in settings to use this window.")
+            return
+        panel = AIChatPanel(font_size=self.right_panel.get_ai_font_size())
+        if self.vault_root:
+            panel.set_vault_root(self.vault_root)
+        if self.current_path:
+            panel.set_current_page(self._normalize_editor_path(self.current_path))
+        panel.chatNavigateRequested.connect(self._on_ai_chat_navigate)
+        window = QMainWindow(self)
+        window.setWindowTitle("AI Chat")
+        window.setCentralWidget(panel)
+        window.resize(820, 720)
+        self._apply_geometry_persistence(window, "ai_chat_window")
+        window.show()
+        self._register_detached_panel(window)
+
+    def _remove_detached_link_panel(self, panel: LinkNavigatorPanel) -> None:
+        if panel in self._detached_link_panels:
+            self._detached_link_panels.remove(panel)
+
+    def _apply_geometry_persistence(self, window: QMainWindow, key: str) -> None:
+        """Restore and persist window geometry for detached panels."""
+        geom_b64 = config.load_dialog_geometry(key)
+        if geom_b64:
+            try:
+                geometry = QByteArray.fromBase64(geom_b64.encode("ascii"))
+                window.restoreGeometry(geometry)
+            except Exception:
+                pass
+
+        class _GeometrySaver(QObject):
+            def __init__(self, target: QMainWindow, name: str) -> None:
+                super().__init__(target)
+                self._target = target
+                self._name = name
+                self._timer = QTimer(self)
+                self._timer.setSingleShot(True)
+                self._timer.setInterval(200)
+                self._timer.timeout.connect(self._save)
+                target.installEventFilter(self)
+
+            def eventFilter(self, obj, event):
+                if obj is self._target and event.type() in (QEvent.Resize, QEvent.Move, QEvent.Close):
+                    self._timer.start()
+                return super().eventFilter(obj, event)
+
+            def _save(self) -> None:
+                try:
+                    geom = (
+                        self._target.saveGeometry().toBase64().data().decode("ascii")
+                        if hasattr(self._target, "saveGeometry")
+                        else None
+                    )
+                    if geom:
+                        config.save_dialog_geometry(self._name, geom)
+                except Exception:
+                    pass
+
+        saver = _GeometrySaver(window, key)
+        window._geometry_saver = saver  # Keep reference
 
     def _open_page_editor_window(self, path: str) -> None:
         """Open a lightweight editor window for a single page (shared server)."""
@@ -2404,7 +2663,21 @@ class MainWindow(QMainWindow):
             self.editor.setFocus()
 
     def _focus_editor_from_tree(self) -> None:
+        index = self.tree_view.currentIndex()
+        target = index.data(OPEN_ROLE) or index.data(PATH_ROLE) if index.isValid() else None
+        if target and target != self.current_path:
+            self._skip_next_selection_open = True
+            self._open_file(target)
         self._focus_editor()
+
+    def _on_tree_row_clicked(self, index: QModelIndex) -> None:
+        """Open and focus editor when a tree row is clicked."""
+        target = index.data(OPEN_ROLE) or index.data(PATH_ROLE)
+        if target:
+            if target != self.current_path:
+                self._skip_next_selection_open = True
+                self._open_file(target)
+            self._focus_editor()
 
     def _focus_editor(self) -> None:
         self.editor.setFocus()
@@ -2502,9 +2775,13 @@ class MainWindow(QMainWindow):
         editor_has = focused is self.editor or (self.editor and self.editor.isAncestorOf(focused))
         tree_has = focused is self.tree_view or self.tree_view.isAncestorOf(focused)
         right_has = focused is self.right_panel or self.right_panel.isAncestorOf(focused)
-        # Styles: subtle 1px border with accent color; remove when unfocused
+        # Styles: subtle border with accent color; remove when unfocused. Reset any filter tint to default background.
         editor_style = "QTextEdit { border: 1px solid #4A90E2; border-radius:3px; }" if editor_has else "QTextEdit { border: 1px solid transparent; }"
-        tree_style = "QTreeView { border: 1px solid #4A90E2; border-radius:3px; }" if tree_has else "QTreeView { border: 1px solid transparent; }"
+        tree_style = (
+            "QTreeView { border: 1px solid #4A90E2; border-radius:3px; background: palette(base); }"
+            if tree_has
+            else "QTreeView { border: 1px solid transparent; background: palette(base); }"
+        )
         right_style = "QTabWidget::pane { border: 1px solid #4A90E2; border-radius:3px; }" if right_has else ""
         # Preserve existing styles by appending (simple approach)
         self.editor.setStyleSheet(editor_style)
@@ -2599,6 +2876,8 @@ class MainWindow(QMainWindow):
                 "New Page",
                 lambda checked=False, p=path, idx=index: self._start_inline_creation(p, global_pos, idx),
             )
+            filter_action = menu.addAction("Filter to this subtree")
+            filter_action.triggered.connect(lambda checked=False, p=path: self._set_nav_filter(p))
             if path:
                 open_window_action = menu.addAction("Open in Editor Window")
                 open_window_action.triggered.connect(lambda checked=False, p=path: self._open_page_editor_window(p))

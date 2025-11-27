@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -21,11 +22,21 @@ from .path_utils import path_to_colon, normalize_link_target
 class InsertLinkDialog(QDialog):
     """Dialog for searching and inserting page links in colon notation (PageA:PageB:PageC)."""
 
-    def __init__(self, parent=None, selected_text: str = "") -> None:
+    def __init__(
+        self,
+        parent=None,
+        selected_text: str = "",
+        filter_prefix: str | None = None,
+        filter_label: str | None = None,
+        clear_filter_cb=None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Insert Link")
         self.setModal(True)
         self.setWindowModality(Qt.ApplicationModal)
+        self._filter_prefix = filter_prefix
+        self._filter_label = filter_label
+        self._clear_filter_cb = clear_filter_cb
         
         # Set up geometry save timer (debounced)
         self.geometry_save_timer = QTimer(self)
@@ -36,6 +47,23 @@ class InsertLinkDialog(QDialog):
         # Make dialog wider than tall (~80 chars wide)
         self.resize(640, 360)
         layout = QVBoxLayout()
+
+        if self._filter_prefix:
+            self.filter_banner = QLabel()
+            self.filter_banner.setTextFormat(Qt.RichText)
+            self.filter_banner.setTextInteractionFlags(Qt.TextBrowserInteraction)
+            self.filter_banner.setOpenExternalLinks(False)
+            label = self._filter_label or self._filter_prefix
+            self.filter_banner.setText(
+                f"<div style='background:#c62828; color:#ffffff; padding:6px; font-weight:bold;'>"
+                f"Filtered by {label} "
+                f"(<a href='remove' style='color:#ffffff; text-decoration:underline;'>Remove</a>)"
+                f"</div>"
+            )
+            self.filter_banner.linkActivated.connect(self._on_remove_filter)
+            layout.addWidget(self.filter_banner)
+        else:
+            self.filter_banner = None
 
         # Track whether user has manually edited the link name
         self._link_name_manually_edited = False
@@ -263,22 +291,17 @@ class InsertLinkDialog(QDialog):
         self.list_widget.clear()
 
         for page in pages:
+            if self._filter_prefix and not page["path"].startswith(self._filter_prefix):
+                continue
             # Convert filesystem path to colon notation
             colon_path = path_to_colon(page["path"])
             if not colon_path:
                 continue
-            normalized_colon = normalize_link_target(colon_path)
-            display_text = normalized_colon
-
-            # Also show title if it differs from the page name
-            page_name = normalized_colon.split(":")[-1] if ":" in normalized_colon else normalized_colon
-            title = page.get("title", "")
-            if title and title != page_name:
-                display_text = f"{normalized_colon} — {title}"
+            display_text = self._display_label(page, colon_path)
 
             item = QListWidgetItem(display_text)
-            item.setData(Qt.UserRole, normalized_colon)
-            item.setToolTip(normalized_colon)
+            item.setData(Qt.UserRole, normalize_link_target(colon_path))
+            item.setToolTip(display_text)
             self.list_widget.addItem(item)
 
         # Do not auto-select results; user controls selection via keyboard/mouse
@@ -313,6 +336,29 @@ class InsertLinkDialog(QDialog):
         """Handle dialog resize: save geometry with debounce."""
         super().resizeEvent(event)
         self.geometry_save_timer.start()
+
+    def _on_remove_filter(self, link: str) -> None:
+        if self._clear_filter_cb:
+            try:
+                self._clear_filter_cb()
+            except Exception:
+                pass
+        self._filter_prefix = None
+        if self.filter_banner:
+            self.filter_banner.hide()
+        self._refresh()
+
+    def _display_label(self, page: dict, colon_path: str) -> str:
+        title = page.get("title", "")
+        if self._filter_prefix and page.get("path", "").startswith(self._filter_prefix):
+            rel = page["path"][len(self._filter_prefix) :].lstrip("/")
+            rel_colon = normalize_link_target(path_to_colon("/" + rel)) if rel else colon_path
+            return rel_colon or title or colon_path
+        normalized_colon = normalize_link_target(colon_path)
+        page_name = normalized_colon.split(":")[-1] if ":" in normalized_colon else normalized_colon
+        if title and title != page_name:
+            return f"{normalized_colon} — {title}"
+        return normalized_colon
     
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """Save dialog geometry when closing."""

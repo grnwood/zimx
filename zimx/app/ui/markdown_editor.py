@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 from html.parser import HTMLParser
 import os
 
@@ -612,6 +612,7 @@ class MarkdownEditor(QTextEdit):
         self._ai_chat_available: bool = False
         self._page_load_logger: Optional[PageLoadLogger] = None
         self._open_in_window_callback: Optional[Callable[[str], None]] = None
+        self._filter_nav_callback: Optional[Callable[[str], None]] = None
         self.setPlaceholderText("Open a Markdown file to begin editing…")
         self.setAcceptRichText(True)
         self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(" "))
@@ -677,6 +678,10 @@ class MarkdownEditor(QTextEdit):
     def set_open_in_window_callback(self, callback: Optional[Callable[[str], None]]) -> None:
         """Provide a handler to open the current page in a separate window (main editor only)."""
         self._open_in_window_callback = callback
+
+    def set_filter_nav_callback(self, callback: Optional[Callable[[str], None]]) -> None:
+        """Provide a handler to filter the navigation tree by the current page's subtree."""
+        self._filter_nav_callback = callback
 
     def _mark_page_load(self, label: str) -> None:
         if self._page_load_logger:
@@ -1518,6 +1523,9 @@ class MarkdownEditor(QTextEdit):
             copy_action.triggered.connect(lambda: self._copy_link_to_location(link_for_copy))
             insert_date_action = menu.addAction("Insert Date…")
             insert_date_action.triggered.connect(self.insertDateRequested)
+            if self._filter_nav_callback and self._current_path:
+                filter_action = menu.addAction("Filter navigator to this subtree")
+                filter_action.triggered.connect(lambda: self._filter_nav_callback(self._current_path or ""))
 
             # AI entries (mirror the general editor menu)
             ai_label = "AI: Go To Chat" if self._ai_chat_available else "AI Chat: Start Chat"
@@ -1565,6 +1573,9 @@ class MarkdownEditor(QTextEdit):
             if self._open_in_window_callback:
                 open_popup_action = menu.addAction("Open in Editor Window")
                 open_popup_action.triggered.connect(lambda: self._open_in_window_callback(self._current_path or ""))
+            if self._filter_nav_callback and self._current_path:
+                filter_action = menu.addAction("Filter navigator to this subtree")
+                filter_action.triggered.connect(lambda: self._filter_nav_callback(self._current_path or ""))
             ai_label = "AI: Go To Chat" if self._ai_chat_available else "AI Chat: Start Chat"
             ai_chat_action = menu.addAction(ai_label)
             ai_chat_action.triggered.connect(lambda: self.aiChatRequested.emit(self._current_path or ""))
