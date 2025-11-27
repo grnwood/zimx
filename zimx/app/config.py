@@ -515,8 +515,8 @@ def update_page_index(
         conn.execute("DELETE FROM task_tags WHERE task_id LIKE ?", (f"{path}:%",))
         conn.executemany(
             """
-            INSERT INTO tasks(task_id, path, line, text, status, priority, due, starts)
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO tasks(task_id, path, line, text, status, priority, due, starts, parent_id, level, actionable)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 (
@@ -528,6 +528,11 @@ def update_page_index(
                     task.get("priority"),
                     task.get("due"),
                     task.get("start"),
+                    task.get("parent"),
+                    task.get("level"),
+                    1
+                    if task.get("actionable", task.get("status") != "done")
+                    else 0,
                 )
                 for task in tasks
             ),
@@ -617,15 +622,32 @@ def fetch_task_tags() -> list[tuple[str, int]]:
     return [(row[0], row[1]) for row in cur.fetchall()]
 
 
-def fetch_tasks(query: str = "", tags: Sequence[str] = (), include_done: bool = False) -> list[dict]:
+def fetch_tasks(
+    query: str = "",
+    tags: Sequence[str] = (),
+    include_done: bool = False,
+    include_ancestors: bool = False,
+    actionable_only: bool = False,
+) -> list[dict]:
     conn = _get_conn()
     if not conn:
         return []
-    base = """
-        SELECT t.task_id, t.path, t.line, t.text, t.status, t.priority, t.due, t.starts
-        FROM tasks t
-        LEFT JOIN task_tags tt ON tt.task_id = t.task_id
+
+    select_cols = """
+        SELECT
+            t.task_id,
+            t.path,
+            t.line,
+            t.text,
+            t.status,
+            t.priority,
+            t.due,
+            t.starts,
+            t.parent_id,
+            t.level,
+            COALESCE(t.actionable, CASE WHEN t.status = 'done' THEN 0 ELSE 1 END) AS actionable
     """
+    base = f"{select_cols} FROM tasks t LEFT JOIN task_tags tt ON tt.task_id = t.task_id"
     conditions = []
     params: list = []
     if query:
@@ -637,30 +659,80 @@ def fetch_tasks(query: str = "", tags: Sequence[str] = (), include_done: bool = 
         params.extend(tags)
     if not include_done:
         conditions.append("t.status != 'done'")
+    if actionable_only:
+        conditions.append("COALESCE(t.actionable, CASE WHEN t.status = 'done' THEN 0 ELSE 1 END) = 1")
     where = ""
     if conditions:
         where = "WHERE " + " AND ".join(conditions)
-    sql = base + where + " GROUP BY t.task_id ORDER BY COALESCE(t.priority, 0) DESC, COALESCE(t.due, '9999-12-31') ASC"
+    sql = f"{base} {where} GROUP BY t.task_id ORDER BY t.path, COALESCE(t.line, 0), COALESCE(t.level, 0)"
     cur = conn.execute(sql, params)
     rows = cur.fetchall()
-    result = []
+
+    def _row_to_task(row: tuple) -> dict:
+        (
+            task_id,
+            path,
+            line,
+            text,
+            status,
+            priority,
+            due,
+            starts,
+            parent_id,
+            level,
+            actionable,
+        ) = row
+        return {
+            "id": task_id,
+            "path": path,
+            "line": line,
+            "text": text,
+            "status": status,
+            "priority": priority or 0,
+            "due": due,
+            "starts": starts,
+            "parent": parent_id,
+            "level": level or 0,
+            "actionable": bool(actionable),
+            "tags": [],
+        }
+
+    tasks: dict[str, dict] = {}
     for row in rows:
-        task_id, path, line, text, status, priority, due, starts = row
-        tag_rows = conn.execute("SELECT tag FROM task_tags WHERE task_id = ?", (task_id,)).fetchall()
-        result.append(
-            {
-                "id": task_id,
-                "path": path,
-                "line": line,
-                "text": text,
-                "status": status,
-                "priority": priority or 0,
-                "due": due,
-                "starts": starts,
-                "tags": [t[0] for t in tag_rows],
-            }
-        )
-    return result
+        task = _row_to_task(row)
+        tasks[task["id"]] = task
+
+    if include_ancestors:
+        missing_parents = {task["parent"] for task in tasks.values() if task.get("parent")}
+        ancestor_sql_template = f"{select_cols} FROM tasks t WHERE t.task_id IN {{}}"
+        while missing_parents:
+            fetch_ids = [pid for pid in missing_parents if pid and pid not in tasks]
+            if not fetch_ids:
+                break
+            placeholders = ",".join("?" for _ in fetch_ids)
+            ancestor_sql = ancestor_sql_template.format(f"({placeholders})")
+            ancestor_rows = conn.execute(ancestor_sql, fetch_ids).fetchall()
+            for row in ancestor_rows:
+                task = _row_to_task(row)
+                tasks[task["id"]] = task
+                if task.get("parent"):
+                    missing_parents.add(task["parent"])
+            missing_parents = {pid for pid in missing_parents if pid not in tasks}
+
+    if tasks:
+        all_ids = list(tasks.keys())
+        placeholders = ",".join("?" for _ in all_ids)
+        tag_rows = conn.execute(
+            f"SELECT task_id, tag FROM task_tags WHERE task_id IN ({placeholders})", all_ids
+        ).fetchall()
+        for task_id, tag in tag_rows:
+            if task_id in tasks:
+                tasks[task_id]["tags"].append(tag)
+
+    return sorted(
+        tasks.values(),
+        key=lambda t: (t.get("path") or "", t.get("line") or 0, t.get("level") or 0),
+    )
 
 
 def fetch_link_relations(path: str) -> dict[str, list[str]]:
@@ -732,6 +804,17 @@ def _get_conn() -> Optional[sqlite3.Connection]:
     return _ACTIVE_CONN
 
 
+def _ensure_task_columns(conn: sqlite3.Connection) -> None:
+    """Add newly introduced task columns for existing vault databases."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    if "parent_id" not in existing:
+        conn.execute("ALTER TABLE tasks ADD COLUMN parent_id TEXT")
+    if "level" not in existing:
+        conn.execute("ALTER TABLE tasks ADD COLUMN level INTEGER")
+    if "actionable" not in existing:
+        conn.execute("ALTER TABLE tasks ADD COLUMN actionable INTEGER")
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -766,7 +849,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             status TEXT,
             priority INTEGER,
             due TEXT,
-            starts TEXT
+            starts TEXT,
+            parent_id TEXT,
+            level INTEGER,
+            actionable INTEGER
         );
         CREATE TABLE IF NOT EXISTS task_tags (
             task_id TEXT,
@@ -779,4 +865,5 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    _ensure_task_columns(conn)
     conn.commit()

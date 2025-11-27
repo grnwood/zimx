@@ -3,14 +3,14 @@ from __future__ import annotations
 import re
 from pathlib import Path
 import hashlib
-from typing import List, Set, Optional
+from typing import List, Set, Optional, Dict
 
 from zimx.app import config
 from zimx.app.ui.path_utils import colon_to_path, normalize_link_target
 from zimx.server.adapters.files import PAGE_SUFFIX
 
 # Bump this when task parsing logic changes to force re-index even if file hash is unchanged.
-INDEX_SCHEMA_VERSION = "task-parse-v2"
+INDEX_SCHEMA_VERSION = "task-parse-v3"
 
 TAG_PATTERN = re.compile(r"@(\w+)")
 # Markdown-style links: [label](target)
@@ -26,6 +26,14 @@ TASK_PATTERN = re.compile(
 DUE_PATTERN = re.compile(r"<([0-9]{4}-[0-9]{2}-[0-9]{2})")
 START_PATTERN = re.compile(r">([0-9]{4}-[0-9]{2}-[0-9]{2})")
 PRIORITY_PATTERN = re.compile(r"!{1,3}")
+
+
+def _indent_width(indent: str) -> int:
+    """Return a consistent width for mixed tabs/spaces indentation."""
+    width = 0
+    for ch in indent:
+        width += 4 if ch == "\t" else 1
+    return width
 
 
 def index_page(path: str, content: str) -> bool:
@@ -155,36 +163,71 @@ def _normalize_page_link(link: str) -> Optional[str]:
 
 
 def extract_tasks(path: str, content: str) -> List[dict]:
-    results: List[dict] = []
+    tasks: List[dict] = []
+    stack: List[tuple[int, dict]] = []
+
     for line_no, line in enumerate(content.splitlines(), start=1):
         match = TASK_PATTERN.match(line)
         if not match:
             continue
+
+        indent_raw = match.group("indent") or ""
+        indent_len = _indent_width(indent_raw)
+        # Find the nearest parent with a smaller indent
+        while stack and stack[-1][0] >= indent_len:
+            stack.pop()
+        parent = stack[-1][1] if stack else None
+
         body = match.group("body")
         state = match.group("state1") or match.group("state2") or ("x" if match.group("box") == "☑" else " ")
         tags = sorted(set(TAG_PATTERN.findall(body)))
-        due = _first_match(DUE_PATTERN, body)
+        explicit_due = _first_match(DUE_PATTERN, body)
         start = _first_match(START_PATTERN, body)
         pri_matches = PRIORITY_PATTERN.findall(body)
-        priority = min(max((len(m) for m in pri_matches), default=0), 3)
+        explicit_priority = min(max((len(m) for m in pri_matches), default=0), 3)
         clean_text = TAG_PATTERN.sub(" ", body)
         clean_text = DUE_PATTERN.sub(" ", clean_text)
         clean_text = START_PATTERN.sub(" ", clean_text)
         clean_text = PRIORITY_PATTERN.sub(" ", clean_text)
         clean_text = re.sub(r"\s{2,}", " ", clean_text).strip()
-        results.append(
-            {
-                "id": f"{path}:{line_no}",
-                "line": line_no,
-                "text": clean_text,
-                "status": "done" if state.lower() == "x" else "todo",
-                "priority": priority,
-                "due": due,
-                "start": start,
-                "tags": tags,
-            }
-        )
-    return results
+
+        effective_due = explicit_due or (parent.get("due") if parent else None)
+        inherited_priority = parent.get("priority", 0) if parent else 0
+        effective_priority = explicit_priority if explicit_priority > 0 else inherited_priority
+
+        task_id = f"{path}:{line_no}"
+        task = {
+            "id": task_id,
+            "line": line_no,
+            "text": clean_text,
+            "status": "done" if state.lower() == "x" else "todo",
+            "priority": effective_priority,
+            "due": effective_due,
+            "start": start,
+            "tags": tags,
+            "parent": parent["id"] if parent else None,
+            "level": len(stack),
+        }
+        tasks.append(task)
+        stack.append((indent_len, task))
+
+    children: Dict[str, list[dict]] = {}
+    for task in tasks:
+        parent_id = task.get("parent")
+        if parent_id:
+            children.setdefault(parent_id, []).append(task)
+
+    def has_open_descendants(node: dict) -> bool:
+        """Return True if any descendant is still a todo."""
+        for child in children.get(node["id"], []):
+            if child["status"] != "done" or has_open_descendants(child):
+                return True
+        return False
+
+    for task in tasks:
+        task["actionable"] = task["status"] != "done" and not has_open_descendants(task)
+
+    return tasks
 
 
 def _first_match(pattern: re.Pattern[str], text: str) -> str | None:
