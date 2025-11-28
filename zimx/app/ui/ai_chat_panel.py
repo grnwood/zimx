@@ -7,6 +7,7 @@ import sqlite3
 from pathlib import Path
 import html
 import re
+import traceback
 from typing import Dict, List, Optional, Tuple
 
 import httpx
@@ -1901,7 +1902,7 @@ class AIChatPanel(QtWidgets.QWidget):
 
     def _reset_chat_history(self) -> None:
         try:
-            if not self.current_session_id:
+            if not self.current_session_id or not self.store:
                 return
             confirm = QtWidgets.QMessageBox.question(
                 self,
@@ -1944,22 +1945,37 @@ class AIChatPanel(QtWidgets.QWidget):
                             pass
                         worker.wait(1000)
 
-            _stop_worker(self._api_worker)
-            _stop_worker(self._condense_worker)
+            _stop_worker(getattr(self, "_api_worker", None))
+            _stop_worker(getattr(self, "_condense_worker", None))
             self._api_worker = None
             self._condense_worker = None
 
-            self.store.clear_chat(self.current_session_id)
+            try:
+                self.store.clear_chat(self.current_session_id)
+            except Exception as exc:
+                traceback.print_exc()
+                QtWidgets.QMessageBox.critical(self, "Reset Chat", f"Failed to clear chat:\n{exc}")
+                return
+
             # Preserve last model/server for continuity
             if self.current_server:
-                self.store.update_session_last_model(self.current_session_id, self.model_combo.currentText())
-                self.store.update_session_last_server(self.current_session_id, self.current_server.get("name", ""))
+                try:
+                    self.store.update_session_last_model(self.current_session_id, self.model_combo.currentText())
+                    self.store.update_session_last_server(self.current_session_id, self.current_server.get("name", ""))
+                except Exception:
+                    traceback.print_exc()
+
             self._condense_buffer = ""
             self._summary_content = None
-            self._load_chat_messages(self.current_session_id)
+            try:
+                self._load_chat_messages(self.current_session_id)
+            except Exception:
+                traceback.print_exc()
+                QtWidgets.QMessageBox.critical(self, "Reset Chat", "Chat cleared, but failed to reload messages.")
+                return
             self.status_label.setText("Chat history cleared.")
         except BaseException as exc:  # catch SystemExit/KeyboardInterrupt too to keep app alive
-            print(f"[AIChat][reset] error clearing chat: {exc}")
+            traceback.print_exc()
             try:
                 QtWidgets.QMessageBox.critical(self, "Reset Chat", f"Failed to clear chat:\n{exc}")
             except Exception:

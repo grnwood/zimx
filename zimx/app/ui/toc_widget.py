@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtCore import QPoint, Qt, Signal, QPropertyAnimation
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
@@ -29,44 +29,45 @@ class TableOfContentsWidget(QFrame):
         super().__init__(parent)
         self.setObjectName("tocWidget")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        # self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)  # Removed to allow solid background
+        # self.setAutoFillBackground(False)  # Removed to allow solid background
         self.setStyleSheet(
             """
             QFrame#tocWidget {
-                background-color: rgba(20, 20, 20, 0.85);
-                border: 1px solid #444;
+                background-color: #2d2d2d;
+                border: 1px solid #aaa;
                 border-radius: 6px;
+            }
+            QTreeWidget {
+                background: transparent;
             }
             QTreeWidget#tocTree::item {
                 padding: 0px 2px;
+                text-align: right;
             }
             """
         )
         self._collapsed = False
         self._expanded_width = 220
         self._base_path = ""
-        self._headings: list[dict] = []
+        self._headings = []
+        self._idle_opacity = 0.25  # Mostly transparent when not hovered
+        self._hover_opacity = 0.85  # More visible on hover
         self._build_ui()
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+        self._opacity_effect = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self._opacity_effect)
+        self._opacity_effect.setOpacity(self._idle_opacity)
+        self._opacity_anim = QPropertyAnimation(self._opacity_effect, b"opacity", self)
+        self._opacity_anim.setDuration(140)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(4)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(2)
 
-        header_layout = QHBoxLayout()
-        header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.setSpacing(4)
-
-        self.toggle_button = QToolButton()
-        self.toggle_button.setText("ToC")
-        self.toggle_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.toggle_button.setArrowType(Qt.ArrowType.DownArrow)
-        self.toggle_button.setCheckable(True)
-        self.toggle_button.setChecked(True)
-        self.toggle_button.clicked.connect(self._handle_toggle_clicked)
-
-        header_layout.addWidget(self.toggle_button)
-        header_layout.addStretch(1)
-        layout.addLayout(header_layout)
+        # Hide the header toggle to keep the widget unobtrusive
+        self.toggle_button = None
 
         self.tree = QTreeWidget()
         self.tree.setObjectName("tocTree")
@@ -80,7 +81,8 @@ class TableOfContentsWidget(QFrame):
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
         layout.addWidget(self.tree, 1)
 
-        self.setFixedWidth(self._expanded_width)
+        # Remove fixed width to allow auto-sizing
+        self.setMinimumWidth(120)  # Set a reasonable minimum width
 
     # --- Public API -----------------------------------------------------
     def set_headings(self, headings: Iterable[dict]) -> None:
@@ -111,23 +113,24 @@ class TableOfContentsWidget(QFrame):
         self.tree.expandAll()
         self._update_placeholder()
         self._update_geometry()
+        self.adjustSize()  # Ensure widget resizes to fit content
+        # Apply idle opacity on population to keep it translucent when not hovered
+        try:
+            self._opacity_effect.setOpacity(self._idle_opacity)
+        except Exception:
+            pass
 
     def set_base_path(self, colon_path: str) -> None:
         """Set the base colon path for copy-link actions."""
         self._base_path = colon_path or ""
 
     def set_collapsed(self, collapsed: bool) -> None:
-        if self._collapsed == collapsed:
-            return
-        self._collapsed = collapsed
-        self.tree.setVisible(not collapsed)
-        self.setFixedWidth(70 if collapsed else self._expanded_width)
-        self.toggle_button.blockSignals(True)
-        self.toggle_button.setChecked(not collapsed)
-        self.toggle_button.blockSignals(False)
-        self.toggle_button.setArrowType(Qt.ArrowType.RightArrow if collapsed else Qt.ArrowType.DownArrow)
-        self.collapsedChanged.emit(collapsed)
-        self._update_geometry()
+        # Collapse toggle removed; always stay expanded but keep API compatibility.
+        if self._collapsed != collapsed:
+            self._collapsed = False
+            self.tree.setVisible(True)
+            # self.setFixedWidth(self._expanded_width)  # No longer force fixed width
+            self.collapsedChanged.emit(False)
 
     def collapsed(self) -> bool:
         return self._collapsed
@@ -180,3 +183,21 @@ class TableOfContentsWidget(QFrame):
         self.adjustSize()
         self.updateGeometry()
         self.raise_()
+
+    # --- Hover opacity --------------------------------------------------
+    def enterEvent(self, event):  # type: ignore[override]
+        self._fade_to(self._hover_opacity)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):  # type: ignore[override]
+        self._fade_to(self._idle_opacity)
+        super().leaveEvent(event)
+
+    def _fade_to(self, target: float) -> None:
+        try:
+            self._opacity_anim.stop()
+            self._opacity_anim.setStartValue(self._opacity_effect.opacity())
+            self._opacity_anim.setEndValue(target)
+            self._opacity_anim.start()
+        except Exception:
+            self._opacity_effect.setOpacity(target)

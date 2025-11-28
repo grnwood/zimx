@@ -22,6 +22,8 @@ from PySide6.QtCore import (
     QElapsedTimer,
     QAbstractEventDispatcher,
     QByteArray,
+    QUrl,
+    QPropertyAnimation,
 )
 from PySide6.QtGui import (
     QAction,
@@ -37,10 +39,15 @@ from PySide6.QtGui import (
     QPen,
     QPalette,
     QBrush,
+    QDesktopServices,
+    QTextFormat,
 )
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
+    QTextEdit,
+    QListWidget,
+    QListWidgetItem,
     QLineEdit,
     QMenu,
     QMainWindow,
@@ -208,6 +215,12 @@ class MainWindow(QMainWindow):
         self._nav_filter_path: Optional[str] = None
         self._full_tree_data: list[dict] = []
         self._skip_next_selection_open: bool = False
+        self._history_popup: Optional[QWidget] = None
+        self._history_popup_label: Optional[QLabel] = None
+        self._popup_items: list = []
+        self._popup_index: int = -1
+        self._popup_mode: Optional[str] = None  # "history" or "heading"
+        self._history_cursor_positions: dict[str, int] = {}
         
         # Page navigation history
         self.page_history: list[str] = []
@@ -215,10 +228,10 @@ class MainWindow(QMainWindow):
         # Guard to suppress auto-open on tree selection during programmatic navigation
         self._suspend_selection_open: bool = False
         # Remember cursor positions for history navigation
-        self._history_cursor_positions: dict[str, int] = {}
         # Track last-saved content to detect dirty buffers
         self._last_saved_content: Optional[str] = None
         self._vi_suspended_for_tasks: bool = False
+        self._scroll_anim: Optional[QPropertyAnimation] = None
         
         # Track virtual (unsaved) pages
         self.virtual_pages: set[str] = set()
@@ -313,9 +326,11 @@ class MainWindow(QMainWindow):
         )
         self.toc_widget.set_collapsed(config.load_toc_collapsed())
         self.toc_widget.show()
-        self.editor.headingsChanged.connect(self.toc_widget.set_headings)
+        self._toc_headings: list[dict] = []
+        self.editor.headingsChanged.connect(self._on_headings_changed)
         self.editor.viewportResized.connect(self._position_toc_widget)
-        self.editor.verticalScrollBar().valueChanged.connect(self._position_toc_widget)
+        self.editor.verticalScrollBar().valueChanged.connect(lambda *_: (self._update_toc_visibility(), self._position_toc_widget()))
+        self.editor.verticalScrollBar().rangeChanged.connect(lambda *_: (self._update_toc_visibility(), self._position_toc_widget()))
 
         self.right_panel = TabbedRightPanel(
             enable_ai_chats=config.load_enable_ai_chats(), ai_chat_font_size=config.load_ai_chat_font_size()
@@ -424,8 +439,12 @@ class MainWindow(QMainWindow):
         vault_menu = self.menuBar().addMenu("Vault")
         open_vault_action = QAction("Open Vault", self)
         open_vault_action.setToolTip("Open an existing vault")
-        open_vault_action.triggered.connect(lambda checked=False: self._select_vault(spawn_new_process=True))
+        open_vault_action.triggered.connect(lambda checked=False: self._select_vault(spawn_new_process=False))
         vault_menu.addAction(open_vault_action)
+        open_vault_new_win_action = QAction("Open Vault in New Window", self)
+        open_vault_new_win_action.setToolTip("Launch a separate ZimX process for a vault")
+        open_vault_new_win_action.triggered.connect(lambda checked=False: self._select_vault(spawn_new_process=True))
+        vault_menu.addAction(open_vault_new_win_action)
         new_vault_action = QAction("New Vault", self)
         new_vault_action.setToolTip("Create a new vault")
         new_vault_action.triggered.connect(self._create_vault)
@@ -593,16 +612,15 @@ class MainWindow(QMainWindow):
 
     def _open_vault_on_disk(self):
         """Open the vault folder in the system file manager."""
-        import os
-        from PySide6.QtGui import QDesktopServices
-        from PySide6.QtCore import QUrl
-        # vault_root holds absolute path to the vault root directory
         vault_path = self.vault_root
         if not vault_path:
             self.statusBar().showMessage("No vault selected.")
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(vault_path)))
-        self.statusBar().showMessage(f"Opened vault folder: {vault_path}")
+        opened = self._open_in_file_manager(Path(vault_path))
+        if opened:
+            self.statusBar().showMessage(f"Opened vault folder: {vault_path}")
+        else:
+            self._alert(f"Could not open vault folder: {vault_path}")
 
     def _register_shortcuts(self) -> None:
         save_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
@@ -628,9 +646,16 @@ class MainWindow(QMainWindow):
         date_shortcut = QShortcut(QKeySequence("Ctrl+D"), self)
         date_shortcut.activated.connect(self._insert_date)
         open_vault_shortcut = QShortcut(QKeySequence("Ctrl+O"), self)
-        open_vault_shortcut.activated.connect(lambda: self._select_vault(spawn_new_process=True))
-        focus_toggle = QShortcut(QKeySequence("Ctrl+Space"), self)
+        open_vault_shortcut.activated.connect(lambda: self._select_vault(spawn_new_process=False))
+        open_vault_new_win_shortcut = QShortcut(QKeySequence("Ctrl+Shift+O"), self)
+        open_vault_new_win_shortcut.activated.connect(lambda: self._select_vault(spawn_new_process=True))
+        # Focus toggle moved to Ctrl+Shift+Space; Ctrl+Space now toggles vi-mode
+        focus_toggle = QShortcut(QKeySequence("Ctrl+Shift+Space"), self)
         focus_toggle.activated.connect(self._toggle_focus_between_tree_and_editor)
+        # Explicit heading popup shortcut (Ctrl+Shift+Tab)
+        heading_popup = QShortcut(QKeySequence("Ctrl+Shift+Tab"), self)
+        heading_popup.setContext(Qt.ApplicationShortcut)
+        heading_popup.activated.connect(lambda: self._cycle_popup("heading", reverse=False))
         new_page_shortcut = QShortcut(QKeySequence("Ctrl+N"), self)
         new_page_shortcut.activated.connect(self._show_new_page_dialog)
         journal_shortcut = QShortcut(QKeySequence("Alt+D"), self)
@@ -679,10 +704,11 @@ class MainWindow(QMainWindow):
         selection = dialog.selected_vault()
         if not selection:
             return False
-        if spawn_new_process:
+        if spawn_new_process or dialog.selected_vault_new_window():
             self._launch_vault_process(selection["path"])
             return True
         if self._set_vault(selection["path"], vault_name=selection.get("name")):
+            self._restore_recent_history()
             QTimer.singleShot(100, self._auto_load_initial_file)
             return True
         return False
@@ -695,7 +721,7 @@ class MainWindow(QMainWindow):
                 cmd.extend(["--vault", self.vault_root])
             # Ask the new process to pick an ephemeral port to avoid clashes
             cmd.extend(["--port", "0"])
-            subprocess.Popen(cmd)
+            subprocess.Popen(cmd, start_new_session=True)
             self.statusBar().showMessage("Launching new window...", 2000)
         except Exception as exc:  # pragma: no cover - UI path
             self._alert(f"Failed to launch new window: {exc}")
@@ -705,7 +731,7 @@ class MainWindow(QMainWindow):
         try:
             cmd = self._build_launch_command()
             cmd.extend(["--vault", vault_path, "--port", "0"])
-            subprocess.Popen(cmd)
+            subprocess.Popen(cmd, start_new_session=True)
             self.statusBar().showMessage(f"Opening {vault_path} in a new window...", 3000)
         except Exception as exc:
             self._alert(f"Failed to open vault in new window: {exc}")
@@ -906,10 +932,14 @@ class MainWindow(QMainWindow):
                 self._update_dirty_indicator()
 
     def _set_vault(self, directory: str, vault_name: Optional[str] = None) -> bool:
+        # Persist current history before switching away
+        self._persist_recent_history()
         # Release any existing lock before switching vaults
         self._release_vault_lock()
         # Close any previous vault DB connection
         config.set_active_vault(None)
+        # Persist history before clearing
+        self._persist_recent_history()
         prefer_read_only = False
         try:
             config.set_active_vault(directory)
@@ -951,6 +981,8 @@ class MainWindow(QMainWindow):
             config.save_last_vault(self.vault_root)
             display_name = vault_name or Path(self.vault_root).name
             config.remember_vault(self.vault_root, display_name)
+            # Restore recent history (including cursor positions) for this vault
+            self._restore_recent_history()
             try:
                 if config.load_vault_force_read_only():
                     # Respect per-vault read-only preference; release any lock we took.
@@ -1028,6 +1060,8 @@ class MainWindow(QMainWindow):
         config.save_window_geometry(geometry)
         if _DETAILED_LOGGING:
             print(f"[Geometry] Saved window geometry: {len(geometry)} chars")
+        # Persist history on close/resize save
+        self._persist_recent_history()
         
         # Save main splitter state (tree vs editor+right panel)
         splitter_state = self.main_splitter.saveState().toBase64().data().decode('ascii')
@@ -2938,13 +2972,11 @@ class MainWindow(QMainWindow):
         if not self.vault_root:
             return
         
-        from PySide6.QtGui import QDesktopServices
-        from PySide6.QtCore import QUrl
-        
         abs_path = (Path(self.vault_root) / file_path.lstrip("/")).resolve()
         folder_path = abs_path.parent
-        
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder_path)))
+        opened = self._open_in_file_manager(folder_path)
+        if not opened:
+            self._alert(f"Could not open folder: {folder_path}")
 
     def _show_link_navigator_for_path(self, file_path: Optional[str]) -> None:
         """Open the Link Navigator tab for the given page."""
@@ -2995,6 +3027,28 @@ class MainWindow(QMainWindow):
             self._apply_focus_borders()
         except Exception:
             return
+
+    def _open_in_file_manager(self, path: Path) -> bool:
+        """Try to open a file or folder in the OS file manager."""
+        try:
+            if not path.exists():
+                return False
+            url = QUrl.fromLocalFile(str(path))
+            if QDesktopServices.openUrl(url):
+                return True
+            # Fallback per-OS
+            if sys.platform.startswith("darwin"):
+                result = subprocess.run(["open", str(path)], check=False)
+                return result.returncode == 0
+            if sys.platform.startswith("win"):
+                result = subprocess.run(["explorer", str(path)], check=False)
+                return result.returncode == 0
+            # Assume Linux/Unix
+            result = subprocess.run(["xdg-open", str(path)], check=False)
+            return result.returncode == 0
+        except Exception as exc:
+            self._alert(f"Failed to open file manager: {exc}")
+            return False
 
     def _reload_current_page(self) -> None:
         """Reload the current page from disk without altering history."""
@@ -3121,60 +3175,70 @@ class MainWindow(QMainWindow):
             editor.deleteLater()
 
     def _delete_path(self, folder_path: str, open_path: Optional[str], global_pos: QPoint) -> None:
-        if folder_path == "/":
-            self.statusBar().showMessage("Cannot delete the root page.", 4000)
-            return
-        if not self._ensure_writable("delete pages or folders"):
-            return
-        confirm = QMessageBox(self)
-        confirm.setIcon(QMessageBox.Warning)
-        confirm.setWindowTitle("Delete")
-        warning = ""
-        store = None
-        target_folder = folder_path
-        if folder_path.lower().endswith(str(PAGE_SUFFIX)):
-            target_folder = self._file_path_to_folder(folder_path)
         try:
-            if self.right_panel.ai_chat_panel:
-                store = self.right_panel.ai_chat_panel.store  # type: ignore[attr-defined]
-            if store and store.has_chats_under(target_folder):
-                warning = '<br><span style="color:red; font-weight:bold;">WARNING: this will delete any stored AI chats.</span>'
-        except Exception:
+            if folder_path == "/":
+                self.statusBar().showMessage("Cannot delete the root page.", 4000)
+                return
+            if not self._ensure_writable("delete pages or folders"):
+                return
+            confirm = QMessageBox(self)
+            confirm.setIcon(QMessageBox.Warning)
+            confirm.setWindowTitle("Delete")
             warning = ""
-        confirm.setTextFormat(Qt.TextFormat.RichText)
-        confirm.setText(f"Delete {folder_path}? This cannot be undone.{warning}")
-        confirm.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        confirm.setDefaultButton(QMessageBox.No)
-        confirm.adjustSize()
-        confirm.move(global_pos - QPoint(confirm.width() // 2, confirm.height() // 2))
-        result = confirm.exec()
-        if result != QMessageBox.Yes:
-            return
-        try:
-            resp = self.http.post("/api/path/delete", json={"path": folder_path})
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            self._alert(f"Failed to delete {folder_path}: {exc}")
-            return
-        if store:
+            store = None
+            target_folder = folder_path
+            if folder_path.lower().endswith(str(PAGE_SUFFIX)):
+                target_folder = self._file_path_to_folder(folder_path)
             try:
-                store.delete_chats_under(target_folder)  # type: ignore[attr-defined]
+                if self.right_panel.ai_chat_panel:
+                    store = self.right_panel.ai_chat_panel.store  # type: ignore[attr-defined]
+                if store and store.has_chats_under(target_folder):
+                    warning = '<br><span style="color:red; font-weight:bold;">WARNING: this will delete any stored AI chats.</span>'
+            except Exception:
+                warning = ""
+            confirm.setTextFormat(Qt.TextFormat.RichText)
+            confirm.setText(f"Delete {folder_path}? This cannot be undone.{warning}")
+            confirm.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            confirm.setDefaultButton(QMessageBox.No)
+            confirm.adjustSize()
+            confirm.move(global_pos - QPoint(confirm.width() // 2, confirm.height() // 2))
+            result = confirm.exec()
+            if result != QMessageBox.Yes:
+                return
+            try:
+                resp = self.http.post("/api/path/delete", json={"path": folder_path})
+                resp.raise_for_status()
+            except Exception as exc:
+                self._alert(f"Failed to delete {folder_path}: {exc}")
+                return
+            if store:
+                try:
+                    store.delete_chats_under(target_folder)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            
+            # Clean up database: delete all pages under this folder
+            # folder_path is like "/PageA/PageB" (folder) not "/PageA/PageB/PageB.txt" (file)
+            try:
+                config.delete_folder_index(folder_path)
+            except Exception as exc:
+                self._alert(f"Deleted files but failed to update index for {folder_path}: {exc}")
+            
+            # Clear editor if we just deleted the currently open page
+            if self.current_path and open_path and self.current_path == open_path:
+                self.current_path = None
+                self.editor.set_markdown("")
+            
+            self._populate_vault_tree()
+            self.right_panel.refresh_tasks()
+            self.right_panel.refresh_calendar()
+            self.right_panel.refresh_links(self.current_path)
+        except Exception as exc:
+            # Catch-all to keep the UI alive; surface error to the user.
+            try:
+                self._alert(f"Unexpected error while deleting {folder_path}: {exc}")
             except Exception:
                 pass
-        
-        # Clean up database: delete all pages under this folder
-        # folder_path is like "/PageA/PageB" (folder) not "/PageA/PageB/PageB.txt" (file)
-        config.delete_folder_index(folder_path)
-        
-        # Clear editor if we just deleted the currently open page
-        if self.current_path and open_path and self.current_path == open_path:
-            self.current_path = None
-            self.editor.set_markdown("")
-        
-        self._populate_vault_tree()
-        self.right_panel.refresh_tasks()
-        self.right_panel.refresh_calendar()
-        self.right_panel.refresh_links(self.current_path)
 
     def _parent_path(self, index: QModelIndex) -> str:
         parent = index.parent()
@@ -3297,6 +3361,165 @@ class MainWindow(QMainWindow):
         last_line = trimmed.splitlines()[-1]
         return last_line.strip() == "---"
 
+    # --- History persistence & popup ---------------------------------
+
+    def _persist_recent_history(self) -> None:
+        """Persist recent history to the vault DB."""
+        if not config.has_active_vault():
+            return
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for path in self.page_history:
+            if path and path not in seen:
+                seen.add(path)
+                ordered.append(path)
+        config.save_recent_history(ordered[-50:])
+        # Persist cursor positions for the same set
+        positions: dict[str, int] = {}
+        for path in ordered[-50:]:
+            pos = self._history_cursor_positions.get(path)
+            if isinstance(pos, int):
+                positions[path] = pos
+        config.save_recent_history_positions(positions)
+
+    def _restore_recent_history(self) -> None:
+        """Restore recent history from the vault DB."""
+        if not config.has_active_vault():
+            return
+        history = config.load_recent_history()
+        self.page_history = history[:50]
+        self.history_index = len(self.page_history) - 1 if self.page_history else -1
+        positions = config.load_recent_history_positions()
+        # Only keep positions for known history paths
+        self._history_cursor_positions.update({k: v for k, v in positions.items() if k in self.page_history})
+
+    def _recent_history_candidates(self) -> list[str]:
+        """Return MRU list (unique) for popup cycling."""
+        seen: set[str] = set()
+        result: list[str] = []
+        for path in reversed(self.page_history):
+            if path and path not in seen:
+                seen.add(path)
+                result.append(path)
+        return result
+
+    def _heading_popup_candidates(self) -> list[dict]:
+        """Return headings for current page."""
+        return [h for h in self._toc_headings if h]
+
+    def _ensure_history_popup(self) -> None:
+        if self._history_popup is None:
+            popup = QWidget(self, Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+            popup.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            popup.setStyleSheet(
+                "background: rgba(30,30,30,220); border: 1px solid #888; border-radius: 6px; padding: 8px;"
+            )
+            layout = QVBoxLayout(popup)
+            layout.setContentsMargins(12, 8, 12, 8)
+            self._history_popup_label = QLabel(popup)
+            self._history_popup_label.setStyleSheet("color: #f5f5f5; font-weight: bold;")
+            layout.addWidget(self._history_popup_label)
+            self._history_popup_list = QListWidget(popup)
+            self._history_popup_list.setStyleSheet(
+                "QListWidget { background: transparent; color: #f5f5f5; border: none; }"
+                "QListWidget::item { padding: 4px 6px; }"
+                "QListWidget::item:selected { background: rgba(255,255,255,40); }"
+            )
+            layout.addWidget(self._history_popup_list)
+            self._history_popup = popup
+
+    def _show_history_popup(self) -> None:
+        self._ensure_history_popup()
+        if not self._history_popup or not self._history_popup_label or not self._history_popup_list:
+            return
+        self._history_popup_list.clear()
+        if self._popup_mode == "history":
+            for path in self._popup_items:
+                display = path_to_colon(path) or path
+                item = QListWidgetItem(display)
+                self._history_popup_list.addItem(item)
+            label = "Recent pages"
+        elif self._popup_mode == "heading":
+            for heading in self._popup_items:
+                title = heading.get("title") or "(heading)"
+                line = heading.get("line", 1)
+                level = max(1, min(5, int(heading.get("level", 1))))
+                indent = "    " * (level - 1)
+                item = QListWidgetItem(f"{indent}{title}  (line {line})")
+                self._history_popup_list.addItem(item)
+            label = "Headings"
+        else:
+            return
+        if 0 <= self._popup_index < self._history_popup_list.count():
+            self._history_popup_list.setCurrentRow(self._popup_index)
+        self._history_popup_label.setText(label)
+        editor_rect = self.editor.rect()
+        top_left = self.editor.mapToGlobal(editor_rect.topLeft())
+        popup_width = max(self._history_popup.sizeHint().width(), editor_rect.width() // 3)
+        popup_height = self._history_popup.sizeHint().height()
+        x = top_left.x() + editor_rect.width() // 2 - popup_width // 2
+        y = top_left.y() + 24
+        self._history_popup.resize(popup_width, popup_height)
+        self._history_popup.move(x, y)
+        self._history_popup.show()
+        self._history_popup.raise_()
+
+    def _cycle_popup(self, mode: str, reverse: bool = False) -> None:
+        if mode == "history":
+            items = self._recent_history_candidates()
+        elif mode == "heading":
+            items = self._heading_popup_candidates()
+        else:
+            return
+        if not items:
+            return
+        if self._popup_mode != mode:
+            self._popup_items = items
+            self._popup_mode = mode
+            self._popup_index = 0
+        else:
+            self._popup_items = items
+            if self._popup_index < 0 or self._popup_index >= len(items):
+                self._popup_index = 0
+            else:
+                delta = -1 if reverse else 1
+                self._popup_index = (self._popup_index + delta) % len(items)
+        self._show_history_popup()
+
+    def _activate_history_popup_selection(self) -> None:
+        if not self._popup_items or self._popup_index < 0 or not self._popup_mode:
+            self._hide_history_popup()
+            return
+        target = self._popup_items[self._popup_index]
+        mode = self._popup_mode
+        self._hide_history_popup()
+        if mode == "history" and target:
+            self._remember_history_cursor()
+            self._open_file(target, force=True, restore_history_cursor=True)
+        elif mode == "heading" and target:
+            try:
+                pos = int(target.get("position", 0))
+            except Exception:
+                pos = 0
+            if pos <= 0:
+                try:
+                    line = int(target.get("line", 1))
+                except Exception:
+                    line = 1
+                block = self.editor.document().findBlockByNumber(max(0, line - 1))
+                if block.isValid():
+                    pos = block.position()
+            cursor = self.editor.textCursor()
+            cursor.setPosition(max(0, pos))
+            self._animate_or_flash_to_cursor(cursor)
+
+    def _hide_history_popup(self) -> None:
+        self._popup_items = []
+        self._popup_index = -1
+        self._popup_mode = None
+        if self._history_popup:
+            self._history_popup.hide()
+
     def _split_link_anchor(self, target: str) -> tuple[str, Optional[str]]:
         if "#" not in target:
             return target, None
@@ -3318,12 +3541,34 @@ class MainWindow(QMainWindow):
 
         QTimer.singleShot(0, jump)
 
+    def _on_headings_changed(self, headings: list[dict]) -> None:
+        self._toc_headings = list(headings or [])
+        self._update_toc_visibility(force=True)
+
+    def _update_toc_visibility(self, force: bool = False) -> None:
+        """Show/hide/refresh the ToC based on headings and scrollability."""
+        if not self.toc_widget:
+            return
+        scrollbar = self.editor.verticalScrollBar()
+        scrollable = scrollbar and scrollbar.maximum() > 0
+        enough_headings = len(self._toc_headings) > 1
+        should_show = scrollable and enough_headings
+        if not should_show:
+            self.toc_widget.hide()
+            return
+        if not self.toc_widget.isVisible() or force:
+            self.toc_widget.set_headings(self._toc_headings)
+            self.toc_widget.show()
+            try:
+                # Reset to idle opacity when showing
+                self.toc_widget._opacity_effect.setOpacity(self.toc_widget._idle_opacity)
+            except Exception:
+                pass
+
     def _toc_jump_to_position(self, position: int) -> None:
         cursor = self.editor.textCursor()
         cursor.setPosition(max(0, position))
-        self.editor.setFocus()
-        self.editor.setTextCursor(cursor)
-        self.editor.ensureCursorVisible()
+        self._animate_or_flash_to_cursor(cursor)
 
     def _on_toc_collapsed_changed(self, collapsed: bool) -> None:
         config.save_toc_collapsed(collapsed)
@@ -3335,12 +3580,78 @@ class MainWindow(QMainWindow):
         viewport = self.editor.viewport()
         if viewport is None:
             return
+        self._update_toc_visibility()
         margin = 12
         width = self.toc_widget.width()
-        x = max(margin, viewport.width() - width - margin)
+        rect = viewport.rect()
+        x = max(margin, rect.width() - width - margin)
         y = margin
         self.toc_widget.move(x, y)
         self.toc_widget.raise_()
+
+    def _animate_or_flash_to_cursor(self, cursor: QTextCursor) -> None:
+        """Smooth scroll to a heading; flash if already visible."""
+        sb = self.editor.verticalScrollBar()
+        if not sb:
+            self.editor.setTextCursor(cursor)
+            self.editor.ensureCursorVisible()
+            return
+        target_rect = self.editor.cursorRect(cursor)
+        view_height = self.editor.viewport().height()
+        current_val = sb.value()
+        target_val = current_val + target_rect.top() - 10  # small top margin
+        in_view = 0 <= target_rect.top() <= view_height - target_rect.height()
+        if in_view:
+            self.editor.setTextCursor(cursor)
+            self.editor.ensureCursorVisible()
+            self._flash_heading(cursor)
+            return
+        if self._scroll_anim and self._scroll_anim.state() == QPropertyAnimation.Running:
+            self._scroll_anim.stop()
+        target_pos = cursor.position()
+        anim = QPropertyAnimation(sb, b"value", self)
+        anim.setDuration(min(500, abs(target_val - current_val) * 2))
+        anim.setStartValue(current_val)
+        anim.setEndValue(target_val)
+        def _finish_flash() -> None:
+            try:
+                c = QTextCursor(self.editor.document())
+                c.setPosition(target_pos)
+                self.editor.setTextCursor(c)
+                self.editor.ensureCursorVisible()
+                self._flash_heading(c)
+            except Exception:
+                pass
+        anim.finished.connect(_finish_flash)
+        anim.start()
+        self._scroll_anim = anim
+
+    def _flash_heading(self, cursor: QTextCursor) -> None:
+        """Briefly highlight the heading line."""
+        try:
+            sel = QTextEdit.ExtraSelection()
+            sel.cursor = cursor
+            sel.cursor.clearSelection()
+            sel.format.setBackground(QColor("#ffd54f"))
+            sel.format.setProperty(QTextFormat.FullWidthSelection, True)
+            sel.format.setProperty(QTextFormat.UserProperty, 9991)
+            current = self.editor.extraSelections()
+            self.editor.setExtraSelections(current + [sel])
+
+            def clear_flash() -> None:
+                try:
+                    keep = [
+                        s
+                        for s in self.editor.extraSelections()
+                        if s.format.property(QTextFormat.UserProperty) != 9991
+                    ]
+                    self.editor.setExtraSelections(keep)
+                except Exception:
+                    pass
+
+            QTimer.singleShot(220, clear_flash)
+        except Exception:
+            pass
 
     def _navigate_hierarchy_up(self) -> None:
         """Navigate up in page hierarchy (Alt+Up): Move up one level, stop at root."""
@@ -3493,23 +3804,15 @@ class MainWindow(QMainWindow):
         if getattr(self, '_vi_mode_locked', False):
             # Ignore toggle requests while locked for dialog
             return
+        prev_focus = self.focusWidget()
         self._vi_mode_active = not self._vi_mode_active
         self._apply_vi_mode_statusbar_style()
-        # After toggling vi mode off, try to ensure CapsLock is off on Linux
-        if not self._vi_mode_active:
-            import sys
-            if sys.platform.startswith('linux'):
-                try:
-                    import subprocess
-                    # Check if xdotool is available
-                    if subprocess.call(['which', 'xdotool'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0:
-                        # Check if CapsLock is ON
-                        caps_state = subprocess.check_output(['xset', 'q']).decode()
-                        if 'Caps Lock:   on' in caps_state:
-                            # Simulate CapsLock key press to turn it off
-                            subprocess.call(['xdotool', 'key', 'Caps_Lock'])
-                except Exception:
-                    pass
+        # Restore focus to whichever widget had it before toggling (avoid forcing editor focus)
+        try:
+            if prev_focus:
+                prev_focus.setFocus(Qt.OtherFocusReason)
+        except Exception:
+            pass
 
     def _install_vi_mode_filters(self) -> None:
         for target in getattr(self, "_vi_filter_targets", []):
@@ -3523,24 +3826,36 @@ class MainWindow(QMainWindow):
     def eventFilter(self, obj, event):  # type: ignore[override]
         # (Removed overlay repositioning logic; using status bar indicator)
         if event.type() == QEvent.KeyPress:
+            # Ctrl+Tab history popup
+            if event.key() == Qt.Key_Tab and (event.modifiers() & Qt.ControlModifier):
+                # With Shift: cycle headings; without: history
+                if event.modifiers() & Qt.ShiftModifier:
+                    reverse = event.key() == Qt.Key_Backtab
+                    self._cycle_popup("heading", reverse=reverse)
+                else:
+                    self._cycle_popup("history", reverse=event.key() == Qt.Key_Backtab)
+                return True
+            if event.key() == Qt.Key_CapsLock:
+                # Toggle vi-mode via CapsLock (also available via Ctrl+Space)
+                if getattr(self, "_vi_mode_locked", False):
+                    return True
+                self._toggle_vi_mode()
+                return True
             # Allow Esc to exit vi-mode explicitly
             if event.key() == Qt.Key_Escape and self._vi_mode_active:
                 self._vi_mode_active = False
                 self._apply_vi_mode_statusbar_style()
                 return True
-            if event.key() == Qt.Key_CapsLock:
-                # Block vi mode toggle if locked for dialog
-                if getattr(self, '_vi_mode_locked', False):
-                    return True  # Block CapsLock completely while dialog is open
-                # Toggle vi-mode and consume the event to prevent CapsLock from activating
-                # But first check if this is a synthetic event from _neutralize_capslock
-                if getattr(self, '_neutralizing_capslock', False):
-                    return True  # Block it but don't toggle
+            # Toggle vi-mode on Ctrl+Space (without Shift)
+            if (
+                event.key() == Qt.Key_Space
+                and event.modifiers() & Qt.ControlModifier
+                and not (event.modifiers() & Qt.ShiftModifier)
+            ):
+                if getattr(self, "_vi_mode_locked", False):
+                    return True
                 self._toggle_vi_mode()
-                # After Qt processes this, ensure OS CapsLock state is OFF
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(0, self._neutralize_capslock)
-                return True  # Block the event completely
+                return True
             if self._vi_mode_active:
                 # Always let Control-modified shortcuts through (bold/italic/strike/etc.)
                 if event.modifiers() & Qt.ControlModifier:
@@ -3591,47 +3906,11 @@ class MainWindow(QMainWindow):
                                 self._debug(f"Vi-mode: blocking unmapped key {chr(event.key())}")
                             return True
         elif event.type() == QEvent.KeyRelease:
-            # Also consume CapsLock release to fully prevent OS from toggling caps
-            if event.key() == Qt.Key_CapsLock:
+            if event.key() == Qt.Key_Control and self._popup_items:
+                self._activate_history_popup_selection()
                 return True
         return super().eventFilter(obj, event)
 
-    def _neutralize_capslock(self) -> None:
-        """Best-effort attempt to revert CapsLock state AFTER using it as an internal vi-mode toggle.
-
-        Qt does not provide an API to directly change keyboard LED / lock states. We consume
-        the CapsLock key events so the application treats the key purely as a mode toggle.
-        However, the OS will typically still flip the hardware CapsLock state before delivery
-        of the event. Fully preventing the change requires platform or driver level hooks not
-        exposed by Qt.
-
-        We implement a lightweight Windows-only fallback using the Win32 `keybd_event` (via
-        ctypes) to send another CapsLock press/release if the key is left engaged. This will
-        effectively toggle it back off. On Linux (X11/Wayland) there is no portable solution
-        via Qt alone; XKB calls or compositor protocols would require extra native bindings.
-
-        This function fails silently if anything is unsupported; vi-mode still works.
-        """
-        try:
-            import sys
-            # WINDOWS fallback: send synthetic CapsLock to undo state if engaged
-            if sys.platform.startswith('win'):
-                import ctypes
-                user32 = ctypes.windll.user32
-                VK_CAPITAL = 0x14
-                KEYEVENTF_KEYUP = 0x0002
-                state = user32.GetKeyState(VK_CAPITAL) & 0x0001
-                if state:  # CapsLock is ON, send another press to turn OFF
-                    # Set flag to prevent the synthetic CapsLock from toggling vi mode
-                    self._neutralizing_capslock = True
-                    user32.keybd_event(VK_CAPITAL, 0, 0, 0)
-                    user32.keybd_event(VK_CAPITAL, 0, KEYEVENTF_KEYUP, 0)
-                    # Clear flag after a short delay
-                    from PySide6.QtCore import QTimer
-                    QTimer.singleShot(100, lambda: setattr(self, '_neutralizing_capslock', False))
-            # Linux / others: no-op (documented limitation)
-        except Exception:
-            pass
 
     # Removed overlay helpers
 
@@ -3913,6 +4192,7 @@ class MainWindow(QMainWindow):
         # Save current file and geometry
         self._save_current_file(auto=True)
         self._save_geometry()
+        self._persist_recent_history()
         
         # Close HTTP client and clean up
         self.http.close()

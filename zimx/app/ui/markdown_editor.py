@@ -597,6 +597,8 @@ class MarkdownEditor(QTextEdit):
     backlinksRequested = Signal(str)  # Emits current page path when backlinks are requested
     aiChatRequested = Signal(str)  # Emits current page path when AI Chat is requested
     aiActionRequested = Signal(str, str, str)  # title, prompt, text
+    _VI_EXTRA_KEY = QTextFormat.UserProperty + 1
+    _FLASH_EXTRA_KEY = QTextFormat.UserProperty + 2
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -2209,13 +2211,15 @@ class MarkdownEditor(QTextEdit):
 
     def _update_vi_cursor(self) -> None:
         if not self._vi_mode_active or not self._vi_block_cursor_enabled:
-            # Clear any vi-mode selection overlay
-            self.setExtraSelections([])
+            # Clear any vi-mode selection overlay but preserve other selections (e.g., flashes)
+            remaining = [s for s in self.extraSelections() if s.format.property(self._VI_EXTRA_KEY) is None]
+            self.setExtraSelections(remaining)
             return
         cursor = self.textCursor()
         # Don't draw block cursor overlay while there's an active selection
         if cursor.hasSelection():
-            self.setExtraSelections([])
+            remaining = [s for s in self.extraSelections() if s.format.property(self._VI_EXTRA_KEY) is None]
+            self.setExtraSelections(remaining)
             return
         block_cursor = QTextCursor(cursor)
         if not block_cursor.atEnd():
@@ -2227,7 +2231,10 @@ class MarkdownEditor(QTextEdit):
         fmt.setBackground(QColor("#b259ff"))  # purple block
         fmt.setForeground(QColor("#111"))     # dark text for contrast
         fmt.setProperty(QTextFormat.FullWidthSelection, False)
-        self.setExtraSelections([extra])
+        fmt.setProperty(self._VI_EXTRA_KEY, True)
+        existing = [s for s in self.extraSelections() if s.format.property(self._VI_EXTRA_KEY) is None]
+        existing.append(extra)
+        self.setExtraSelections(existing)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         if obj is self.viewport():

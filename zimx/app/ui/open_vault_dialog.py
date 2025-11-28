@@ -139,12 +139,19 @@ class OpenVaultDialog(QDialog):
         self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.button_box.accepted.connect(self._accept_current)
         self.button_box.rejected.connect(self.reject)
+        open_new_btn = self.button_box.addButton("Open in New Window", QDialogButtonBox.ActionRole)
+        open_new_btn.clicked.connect(self._accept_new_window)
         layout.addWidget(self.button_box)
 
         self._refresh_list(select_path=current_vault or self.default_vault)
 
     def selected_vault(self) -> Optional[dict[str, str]]:
         return self._selected
+
+    def selected_vault_new_window(self) -> Optional[dict[str, str]]:
+        if getattr(self, "_open_new_window", False):
+            return self._selected
+        return None
 
     def _refresh_list(self, select_path: Optional[str] = None) -> None:
         self.list_widget.clear()
@@ -223,6 +230,18 @@ class OpenVaultDialog(QDialog):
         if not vault:
             return
         self._selected = {"name": vault.get("name") or Path(vault["path"]).name, "path": vault["path"]}
+        self._open_new_window = False
+        self.accept()
+
+    def _accept_new_window(self) -> None:
+        item = self.list_widget.currentItem()
+        if not item:
+            return
+        vault = item.data(Qt.UserRole)
+        if not vault:
+            return
+        self._selected = {"name": vault.get("name") or Path(vault["path"]).name, "path": vault["path"]}
+        self._open_new_window = True
         self.accept()
 
     def _add_vault(self) -> None:

@@ -361,6 +361,68 @@ def save_last_file(path: str) -> None:
     conn.commit()
 
 
+def load_recent_history() -> list[str]:
+    """Load recent page history."""
+    conn = _get_conn()
+    if not conn:
+        return []
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("recent_history",))
+    row = cur.fetchone()
+    if not row:
+        return []
+    try:
+        data = json.loads(row[0])
+        if isinstance(data, list):
+            return [str(p) for p in data if isinstance(p, str)]
+    except Exception:
+        pass
+    return []
+
+
+def save_recent_history(history: list[str]) -> None:
+    """Persist recent page history (limited to last 50 entries)."""
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        payload = json.dumps(history[:50])
+    except Exception:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("recent_history", payload))
+    conn.commit()
+
+
+def load_recent_history_positions() -> dict[str, int]:
+    """Load saved cursor positions for recent history."""
+    conn = _get_conn()
+    if not conn:
+        return {}
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("recent_history_positions",))
+    row = cur.fetchone()
+    if not row:
+        return {}
+    try:
+        data = json.loads(row[0])
+        if isinstance(data, dict):
+            return {str(k): int(v) for k, v in data.items() if isinstance(k, str) and isinstance(v, int)}
+    except Exception:
+        pass
+    return {}
+
+
+def save_recent_history_positions(positions: dict[str, int]) -> None:
+    """Persist cursor positions for recent history."""
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        payload = json.dumps(positions)
+    except Exception:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("recent_history_positions", payload))
+    conn.commit()
+
+
 def load_window_geometry() -> Optional[str]:
     """Load the saved window geometry (base64 encoded QByteArray)."""
     conn = _get_conn()
