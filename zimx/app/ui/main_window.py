@@ -3398,7 +3398,7 @@ class MainWindow(QMainWindow):
         seen: set[str] = set()
         result: list[str] = []
         for path in reversed(self.page_history):
-            if path and path not in seen:
+            if path and path != self.current_path and path not in seen:
                 seen.add(path)
                 result.append(path)
         return result
@@ -3610,7 +3610,7 @@ class MainWindow(QMainWindow):
             self._scroll_anim.stop()
         target_pos = cursor.position()
         anim = QPropertyAnimation(sb, b"value", self)
-        anim.setDuration(min(500, abs(target_val - current_val) * 2))
+        anim.setDuration(min(100, abs(target_val - current_val)))
         anim.setStartValue(current_val)
         anim.setEndValue(target_val)
         def _finish_flash() -> None:
