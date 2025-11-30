@@ -2167,7 +2167,7 @@ class MainWindow(QMainWindow):
         if not config.load_enable_ai_chats():
             self._alert("Enable AI Chat in settings to use this window.")
             return
-        panel = AIChatPanel(font_size=self.right_panel.get_ai_font_size())
+        panel = AIChatPanel(font_size=self.right_panel.get_ai_font_size(), api_client=self.http)
         if self.vault_root:
             panel.set_vault_root(self.vault_root)
         if self.current_path:

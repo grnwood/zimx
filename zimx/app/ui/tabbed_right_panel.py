@@ -47,6 +47,7 @@ class TabbedRightPanel(QWidget):
         self.ai_chat_panel = None
         self.ai_chat_index = None
         self._ai_chat_font_size = self._clamp_ai_font(ai_chat_font_size)
+        self._http_client = http_client
         
         # Create Tasks tab (now includes calendar)
         self.task_panel = TaskPanel()
@@ -250,7 +251,7 @@ class TabbedRightPanel(QWidget):
     def _add_ai_chat_tab(self) -> None:
         if self.ai_chat_panel:
             return
-        self.ai_chat_panel = AIChatPanel(font_size=self._ai_chat_font_size)
+        self.ai_chat_panel = AIChatPanel(font_size=self._ai_chat_font_size, api_client=self._http_client)
         self.tabs.addTab(self.ai_chat_panel, "AI Chat")
         self.ai_chat_index = self.tabs.indexOf(self.ai_chat_panel)
         self.ai_chat_panel.chatNavigateRequested.connect(self._emit_chat_navigation)

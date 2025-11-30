@@ -1001,13 +1001,17 @@ def upsert_attachment_entry(page_path: str, attachment_path: str, stored_path: s
         conn.close()
 
 
-def delete_attachment_entry(attachment_path: str) -> bool:
-    """Remove an attachment entry from the index."""
+def delete_attachment_entry(attachment_path: str) -> Optional[str]:
+    """Remove an attachment entry from the index and return its page path."""
     conn = _connect_to_vault_db()
     try:
         attachment_key = _normalize_vault_relative_path(attachment_path)
-        cur = conn.execute("DELETE FROM attachments WHERE attachment_path = ?", (attachment_key,))
+        row = conn.execute("SELECT page_path FROM attachments WHERE attachment_path = ?", (attachment_key,)).fetchone()
+        if not row:
+            return None
+        page_path = str(row[0])
+        conn.execute("DELETE FROM attachments WHERE attachment_path = ?", (attachment_key,))
         conn.commit()
-        return cur.rowcount > 0
+        return page_path
     finally:
         conn.close()

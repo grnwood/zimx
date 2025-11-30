@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterable, List, Literal, Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, File as FastAPISingleFile, Form, Request, UploadFile
@@ -14,6 +14,8 @@ from . import indexer
 from .adapters import files, tasks
 from .adapters.files import FileAccessError
 from .state import vault_state
+from .vector import vector_manager
+from zimx.rag.index import RetrievedChunk
 from zimx.app import config
 
 _LOCAL_FILE_OPS_ENABLED = os.getenv("ATTACHMENTS_LOCAL_FILE_OPS", "0") not in (
@@ -64,6 +66,27 @@ class DeletePathPayload(BaseModel):
 
 class AttachmentDeletePayload(BaseModel):
     paths: List[str] = Field(..., description="Vault-relative attachment paths to delete")
+
+
+class VectorAddPayload(BaseModel):
+    page_ref: str
+    text: str
+    kind: Literal["page", "attachment"] = "page"
+    attachment_name: Optional[str] = None
+
+
+class VectorRemovePayload(BaseModel):
+    page_ref: str
+    kind: Literal["page", "attachment"] = "page"
+    attachment_name: Optional[str] = None
+
+
+class VectorQueryPayload(BaseModel):
+    query_text: str
+    kind: Literal["page", "attachment"] = "page"
+    page_refs: Optional[List[str]] = None
+    attachment_names: Optional[List[str]] = None
+    limit: int = 4
 
 
 class ChatPayload(BaseModel):
@@ -250,8 +273,67 @@ def delete_files(request: Request, payload: AttachmentDeletePayload) -> dict:
     return {"ok": True, "deleted": deleted}
 
 
+@app.post("/vector/add")
+def vector_add(payload: VectorAddPayload) -> dict:
+    root = _get_vault_root()
+    if not payload.text.strip():
+        raise HTTPException(status_code=400, detail="Text must not be empty")
+    try:
+        vector_manager.index_text(root, payload.page_ref, payload.text, payload.kind, payload.attachment_name)
+        _log_vector(f"Added vector entry for {payload.page_ref} ({payload.kind})")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@app.post("/vector/remove")
+def vector_remove(payload: VectorRemovePayload) -> dict:
+    root = _get_vault_root()
+    try:
+        vector_manager.delete_text(root, payload.page_ref, payload.kind, payload.attachment_name)
+        _log_vector(f"Removed vector entry for {payload.page_ref} ({payload.kind})")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+def _chunk_to_dict(chunk: RetrievedChunk) -> dict:
+    return {
+        "page_ref": chunk.page_ref,
+        "content": chunk.content,
+        "score": chunk.score,
+        "attachment_name": chunk.attachment_name,
+    }
+
+
+@app.post("/vector/query")
+def vector_query(payload: VectorQueryPayload) -> dict:
+    root = _get_vault_root()
+    try:
+        if payload.kind == "attachment":
+            if not payload.attachment_names:
+                raise HTTPException(status_code=400, detail="Attachment names required for attachment query")
+            chunks = vector_manager.query_attachments(root, payload.query_text, payload.attachment_names, limit=payload.limit)
+        else:
+            chunks = vector_manager.query(root, payload.query_text, page_refs=payload.page_refs, limit=payload.limit)
+        _log_vector(
+            f"Queried {payload.kind} context limit={payload.limit} "
+            f"pages={payload.page_refs or 'any'} "
+            f"attachments={payload.attachment_names or 'any'}"
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"chunks": [_chunk_to_dict(chunk) for chunk in chunks]}
+
+
 def _log_attachment(message: str) -> None:
     print(f"[Attachments] {message}")
+
+
+def _log_vector(message: str) -> None:
+    print(f"[Vector] {message}")
 
 
 def _vault_relative_path(path: str) -> str:
