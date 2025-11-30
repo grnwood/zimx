@@ -219,6 +219,22 @@ class TabbedRightPanel(QWidget):
         if self.ai_chat_panel:
             self.ai_chat_panel.send_action_message(action, prompt, text)
 
+    def send_text_to_chat(self, text: str) -> bool:
+        """Send raw text into the active chat session (prefers the currently open AI tab)."""
+        if not self.ai_chat_panel or self.ai_chat_index is None:
+            return False
+        if not text.strip():
+            return False
+        self.tabs.setCurrentIndex(self.ai_chat_index)
+        self.ai_chat_panel.send_text_message(text.strip())
+        return True
+
+    def focus_ai_chat_input(self) -> None:
+        if not self.ai_chat_panel or self.ai_chat_index is None:
+            return
+        self.tabs.setCurrentIndex(self.ai_chat_index)
+        self.ai_chat_panel.focus_input()
+
     def _emit_chat_navigation(self, path: str) -> None:
         """Forward AI chat navigation requests."""
         self.aiChatNavigateRequested.emit(path)

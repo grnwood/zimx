@@ -308,6 +308,8 @@ class MainWindow(QMainWindow):
             lambda path="": self._show_link_navigator_for_path(path or self.current_path)
         )
         self.editor.aiChatRequested.connect(lambda path="": self._open_ai_chat_for_path(path or self.current_path, create=True))
+        self.editor.aiChatSendRequested.connect(self._send_selection_to_ai_chat)
+        self.editor.aiChatPageFocusRequested.connect(self._focus_ai_chat_for_page)
         self.editor.aiActionRequested.connect(self._handle_ai_action)
         self.editor.linkActivated.connect(self._open_link_in_context)
         self.editor.set_open_in_window_callback(self._open_page_editor_window)
@@ -2997,6 +2999,15 @@ class MainWindow(QMainWindow):
         self._ensure_right_panel_visible()
         self.right_panel.focus_ai_chat(file_path, create=create)
 
+    def _focus_ai_chat_for_page(self, path: str) -> None:
+        """Ensure AI tab shows the requested page and give the input focus."""
+        target_path = path or self.current_path
+        if not target_path or not self.right_panel.ai_chat_panel:
+            return
+        self._ensure_right_panel_visible()
+        self.right_panel.focus_ai_chat(target_path, create=True)
+        self.right_panel.focus_ai_chat_input()
+
     def _handle_ai_action(self, action: str, prompt: str, text: str) -> None:
         """Send selected text to AI chat with the chosen action."""
         if not config.load_enable_ai_chats() or not self.right_panel.ai_chat_panel:
@@ -3006,6 +3017,12 @@ class MainWindow(QMainWindow):
         self._ensure_right_panel_visible()
         self.right_panel.focus_ai_chat(target_path, create=True)
         self.right_panel.send_ai_action(action, prompt, text)
+
+    def _send_selection_to_ai_chat(self, text: str) -> None:
+        if not text.strip():
+            return
+        if not self.right_panel.send_text_to_chat(text):
+            self.statusBar().showMessage("Enable AI chats to send text from the editor.", 4000)
 
     def _on_ai_chat_navigate(self, chat_folder: Optional[str]) -> None:
         """Handle 'Go To Page' from AI chat by focusing the matching page in the editor."""
@@ -3435,7 +3452,7 @@ class MainWindow(QMainWindow):
         self._history_popup_list.clear()
         if self._popup_mode == "history":
             for path in self._popup_items:
-                display = path_to_colon(path) or path
+                display = self._history_leaf_label(path)
                 item = QListWidgetItem(display)
                 self._history_popup_list.addItem(item)
             label = "Recent pages"
@@ -3495,6 +3512,7 @@ class MainWindow(QMainWindow):
         self._hide_history_popup()
         if mode == "history" and target:
             self._remember_history_cursor()
+            self._select_tree_path(target)
             self._open_file(target, force=True, restore_history_cursor=True)
         elif mode == "heading" and target:
             try:
@@ -4209,3 +4227,13 @@ class MainWindow(QMainWindow):
 
     def _debug(self, message: str) -> None:
         print(f"[ZimX] {message}")
+    def _history_leaf_label(self, path: str) -> str:
+        display = path_to_colon(path) or path
+        if ":" in display:
+            parts = [segment for segment in display.split(":") if segment]
+            if parts:
+                tail = parts[-1]
+                return f"...{tail}" if len(parts) > 1 else tail
+        normalized = path.lstrip("/")
+        leaf = Path(normalized).stem or normalized
+        return leaf

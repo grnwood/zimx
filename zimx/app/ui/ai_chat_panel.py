@@ -4,26 +4,144 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 import html
 import re
 import traceback
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import httpx
 from PySide6 import QtCore, QtWidgets
-from PySide6.QtCore import QUrl
-from PySide6.QtGui import QPalette, QTextCursor, QKeyEvent, QDesktopServices, QCursor
+from PySide6.QtCore import QUrl, QSize, Qt
+from PySide6.QtGui import QCursor, QDesktopServices, QFocusEvent, QIcon, QKeyEvent, QPalette, QPixmap, QPainter, QTextCursor
+from PySide6.QtWidgets import QFrame, QLineEdit, QListWidget, QStyle, QLabel
+from PySide6.QtSvg import QSvgRenderer
+from pdfminer.high_level import extract_text as extract_pdf_text
+from docx import Document
+import pytesseract
+from PIL import Image
 from markdown import markdown
 
 # Use zimx_config for global config storage
 from zimx.app import config as zimx_config
+from zimx.ai.manager import AIManager, ContextItem
+from zimx.rag.chroma import ChromaRAG
+from zimx.rag.index import RetrievedChunk
+from .path_utils import path_to_colon
+
+AI_CHAT_COLOR = "\033[34m"
+CHROMA_COLOR = "\033[33m"
+LLM_RESPONSE_COLOR = "\033[32m"
+LOG_RESET = "\033[0m"
+
+def _color_text(text: str, color: str) -> str:
+    return f"{color}{text}{LOG_RESET}"
+
+def _log_ai_chat(message: str) -> None:
+    print(_color_text(message, AI_CHAT_COLOR))
+
+def _log_chroma(message: str) -> None:
+    print(_color_text(message, CHROMA_COLOR))
+
+def _log_llm_response(message: str) -> None:
+    print(_color_text(message, LLM_RESPONSE_COLOR))
 
 # Shared config (aligns with slipstream/ask-server/ask-client.py defaults)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+ASSETS_DIR = PROJECT_ROOT / "assets"
 SERVER_CONFIG_FILE = PROJECT_ROOT / "slipstream" / "server_configs.json"
 DEFAULT_API_URL = os.getenv("PUBLISHED_API", "http://localhost:3000")
 DEFAULT_API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
+
+def _asset_uri(name: str) -> str:
+    path = ASSETS_DIR / name
+    return path.resolve().as_uri()
+
+def _load_icon(name: str, size: QSize = QSize(24, 24)) -> QIcon:
+    path = ASSETS_DIR / name
+    if not path.exists():
+        return QIcon()
+    ext = path.suffix.lower()
+    if ext == ".svg":
+        renderer = QSvgRenderer(str(path))
+        pixmap = QPixmap(size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter)
+        # Make all non-transparent pixels white
+        painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        painter.fillRect(pixmap.rect(), Qt.white)
+        painter.end()
+        return QIcon(pixmap)
+    else:
+        pixmap = QPixmap()
+        if pixmap.load(str(path)):
+            return QIcon(pixmap.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        return QIcon()
+
+def _icon_tag(name: str, tooltip: str, size: int = 10) -> str:
+    """
+    For HTML in QTextBrowser: convert SVG to PNG at runtime and use PNG path.
+    PNGs are cached in /tmp/zimx_icons/.
+    """
+    import tempfile
+    from pathlib import Path
+    from PySide6.QtGui import QPixmap
+    from PySide6.QtSvg import QSvgRenderer
+    from PySide6.QtCore import QSize, Qt
+    import hashlib
+
+    path = ASSETS_DIR / name
+    ext = path.suffix.lower()
+    ICON_SIZE = size
+    if not path.exists():
+        # Fallback: return a blank or placeholder icon
+        return f"<span title='{tooltip}' style='display:inline-block;width:{ICON_SIZE}px;height:{ICON_SIZE}px;vertical-align:middle;margin:0 4px;'></span>"
+    if ext == ".svg":
+        # Cache PNG in /tmp/zimx_icons/
+        cache_dir = Path(tempfile.gettempdir()) / "zimx_icons"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        hashval = hashlib.md5((str(path) + "_white" + str(ICON_SIZE)).encode()).hexdigest()
+        png_path = cache_dir / f"{path.stem}_{hashval}.png"
+        if not png_path.exists() or png_path.stat().st_mtime < path.stat().st_mtime:
+            renderer = QSvgRenderer(str(path))
+            pixmap = QPixmap(QSize(ICON_SIZE, ICON_SIZE))
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            renderer.render(painter)
+            # Make all non-transparent pixels white
+            painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+            painter.fillRect(pixmap.rect(), Qt.white)
+            painter.end()
+            pixmap.save(str(png_path), "PNG")
+        img_uri = png_path.as_uri()
+    else:
+        img_uri = _asset_uri(name) if path.exists() else ""
+    return (
+        f"<img src='{img_uri}' title='{tooltip}' "
+        f"style='width:{ICON_SIZE}px;height:{ICON_SIZE}px;vertical-align:middle;margin:0 4px;'/>"
+    )
+
+
+@dataclass
+class ContextCandidate:
+    page_ref: str
+    label: str
+    attachment_name: Optional[str] = None
+
+
+class ClickableLabel(QtWidgets.QLabel):
+    clicked = QtCore.Signal()
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        self.clicked.emit()
 
 def fetch_and_cache_models(server_config: dict) -> List[str]:
     """Fetch models from the server and cache them in the config file under 'server_models'."""
@@ -70,29 +188,6 @@ def fetch_and_cache_models(server_config: dict) -> List[str]:
     server_models[server["name"]] = cleaned
     zimx_config._update_global_config({"server_models": server_models})
     return cleaned
-
-
-
-import json
-import os
-import sqlite3
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-
-import httpx
-from PySide6 import QtCore, QtWidgets
-from PySide6.QtCore import QUrl
-from PySide6.QtGui import QPalette, QTextCursor, QKeyEvent, QDesktopServices
-from markdown import markdown
-
-# Use zimx_config for global config storage
-from zimx.app import config as zimx_config
-
-# Shared config (aligns with slipstream/ask-server/ask-client.py defaults)
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SERVER_CONFIG_FILE = PROJECT_ROOT / "slipstream" / "server_configs.json"
-DEFAULT_API_URL = os.getenv("PUBLISHED_API", "http://localhost:3000")
-DEFAULT_API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
 
 
 def normalize_base_url(url: str) -> str:
@@ -269,7 +364,8 @@ class AIChatStore:
                 type TEXT DEFAULT 'chat',
                 last_model TEXT,
                 last_server TEXT,
-                system_prompt TEXT
+                system_prompt TEXT,
+                ai_conversation_id INTEGER
             )
             """
         )
@@ -293,13 +389,28 @@ class AIChatStore:
         try:
             cur.execute("PRAGMA table_info(sessions)")
             cols = [row[1] for row in cur.fetchall()]
+            schema_updated = False
             if "last_model" not in cols:
                 cur.execute("ALTER TABLE sessions ADD COLUMN last_model TEXT")
+                schema_updated = True
             if "last_server" not in cols:
                 cur.execute("ALTER TABLE sessions ADD COLUMN last_server TEXT")
+                schema_updated = True
             if "system_prompt" not in cols:
                 cur.execute("ALTER TABLE sessions ADD COLUMN system_prompt TEXT")
+                schema_updated = True
+            if "ai_conversation_id" not in cols:
+                cur.execute("ALTER TABLE sessions ADD COLUMN ai_conversation_id INTEGER")
+                schema_updated = True
+            if schema_updated:
                 conn.commit()
+            if "ai_conversation_id" in cols:
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_sessions_ai_conversation
+                    ON sessions(ai_conversation_id)
+                    """
+                )
         except Exception:
             pass
         conn.close()
@@ -316,7 +427,7 @@ class AIChatStore:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, name, parent_id, path, type, last_model, last_server, system_prompt FROM sessions WHERE id = ?",
+            "SELECT id, name, parent_id, path, type, last_model, last_server, system_prompt, ai_conversation_id FROM sessions WHERE id = ?",
             (session_id,),
         )
         row = cur.fetchone()
@@ -340,7 +451,7 @@ class AIChatStore:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, name, parent_id, path, type, last_model, last_server, system_prompt FROM sessions WHERE path = ? AND type = ?",
+            "SELECT id, name, parent_id, path, type, last_model, last_server, system_prompt, ai_conversation_id FROM sessions WHERE path = ? AND type = ?",
             (path, type_),
         )
         row = cur.fetchone()
@@ -351,7 +462,9 @@ class AIChatStore:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        cur.execute("SELECT id, name, parent_id, path, type, last_model, last_server, system_prompt FROM sessions ORDER BY id")
+        cur.execute(
+            "SELECT id, name, parent_id, path, type, last_model, last_server, system_prompt, ai_conversation_id FROM sessions ORDER BY id"
+        )
         rows = [dict(r) for r in cur.fetchall()]
         conn.close()
         return rows
@@ -447,11 +560,26 @@ class AIChatStore:
         conn.commit()
         conn.close()
 
+    def update_session_ai_conversation(self, session_id: int, conv_id: Optional[int]) -> None:
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute("UPDATE sessions SET ai_conversation_id = ? WHERE id = ?", (conv_id, session_id))
+        conn.commit()
+        conn.close()
+
     def clear_chat(self, session_id: int) -> None:
         """Delete all messages for a chat and reset last-used metadata."""
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
         cur.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+        conn.commit()
+        conn.close()
+
+    def delete_session(self, session_id: int) -> None:
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+        cur.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         conn.commit()
         conn.close()
 
@@ -808,6 +936,19 @@ class AIChatPanel(QtWidgets.QWidget):
                 if modifiers & QtCore.Qt.AltModifier:
                     self.input_edit.insertPlainText("\n")
                     return True
+            if key_event.key() in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down) and not (
+                key_event.modifiers() & ~(QtCore.Qt.KeypadModifier)
+            ):
+                cursor = self.input_edit.textCursor()
+                doc = self.input_edit.document()
+                if key_event.key() == QtCore.Qt.Key_Up and cursor.position() == 0:
+                    if self._navigate_chat_history(-1):
+                        return True
+                if key_event.key() == QtCore.Qt.Key_Down and cursor.position() >= doc.characterCount() - 1:
+                    if self._navigate_chat_history(1):
+                        return True
+            if key_event.key() == QtCore.Qt.Key_Space and not (key_event.modifiers() & ~QtCore.Qt.KeypadModifier):
+                QtCore.QTimer.singleShot(0, self._maybe_open_context_picker)
         return super().eventFilter(obj, event)
 
     def __init__(self, parent=None, font_size=13):
@@ -821,6 +962,23 @@ class AIChatPanel(QtWidgets.QWidget):
         self._condense_worker = None
         self.current_session_id = None
         self.current_page_path = None
+        self.ai_manager: Optional[AIManager] = None
+        self._current_ai_conversation_id: Optional[int] = None
+        self._context_items: list[ContextItem] = []
+        self._page_candidates: List[ContextCandidate] = []
+        self._tree_candidates: List[ContextCandidate] = []
+        self._attachment_candidates: List[ContextCandidate] = []
+        self._context_overlay = ContextOverlay(self)
+        self._context_overlay.selected.connect(self._handle_context_overlay_selected)
+        self._context_popup = ContextListPopup(self)
+        self._context_popup.activated.connect(self._open_context_item)
+        self._context_popup.deleted.connect(self._context_popup_delete_handler)
+        self._context_popup_position: Optional[QtCore.QPoint] = None
+        self._context_popup_width: Optional[int] = None
+        self._chroma: Optional[ChromaRAG] = None
+        self._chat_history: List[str] = []
+        self._chat_history_index: Optional[int] = None
+        self._unsent_buffer: str = ""
         self._building_tree = False
         self._current_chat_path = None
         self.system_prompts = []
@@ -852,8 +1010,8 @@ class AIChatPanel(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(6)
-
         toggle_row = QtWidgets.QHBoxLayout()
+        toggle_row.setSpacing(6)
         self.toggle_chats_btn = QtWidgets.QPushButton("Show Chats")
         self.toggle_chats_btn.setCheckable(True)
         self.toggle_chats_btn.setChecked(False)
@@ -869,29 +1027,17 @@ class AIChatPanel(QtWidgets.QWidget):
         toggle_row.addWidget(self.prompt_btn)
         toggle_row.addStretch()
         layout.addLayout(toggle_row)
-
-        # Chat name display
-        self.chat_name_label = QtWidgets.QLabel("Chat Name: —")
-        self.chat_name_label.setTextFormat(QtCore.Qt.TextFormat.RichText)
-        self.chat_name_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.LinksAccessibleByMouse)
-        self.chat_name_label.setOpenExternalLinks(False)
-        self.chat_name_label.linkActivated.connect(lambda href: self.chatNavigateRequested.emit(href))
-        layout.addWidget(self.chat_name_label)
-
-        # Server/model controls (at top)
         self.server_config_widget = QtWidgets.QWidget()
         self.server_config_widget.setVisible(False)
         cfg_layout = QtWidgets.QVBoxLayout(self.server_config_widget)
         cfg_layout.setContentsMargins(0, 0, 0, 0)
         cfg_layout.setSpacing(4)
-
         server_row = QtWidgets.QHBoxLayout()
         server_row.addWidget(QtWidgets.QLabel("Server:"))
         self.server_combo = QtWidgets.QComboBox()
         self.server_combo.currentIndexChanged.connect(self._on_server_selected)
         server_row.addWidget(self.server_combo, 1)
         cfg_layout.addLayout(server_row)
-
         model_row = QtWidgets.QHBoxLayout()
         model_row.addWidget(QtWidgets.QLabel("Model:"))
         self.model_combo = QtWidgets.QComboBox()
@@ -901,13 +1047,29 @@ class AIChatPanel(QtWidgets.QWidget):
         refresh_models_btn.clicked.connect(self._refresh_models_from_server)
         model_row.addWidget(refresh_models_btn)
         cfg_layout.addLayout(model_row)
-
         layout.addWidget(self.server_config_widget)
-
+        self.context_bar = QtWidgets.QWidget()
+        context_layout = QtWidgets.QHBoxLayout(self.context_bar)
+        context_layout.setContentsMargins(4, 2, 4, 2)
+        context_layout.setSpacing(6)
+        self.context_icon_label = QtWidgets.QLabel("🗂️")
+        context_layout.addWidget(self.context_icon_label)
+        self.context_summary_label = ClickableLabel("Context: —")
+        self.context_summary_label.setStyleSheet("color: #007acc; text-decoration: underline;")
+        self.context_summary_label.clicked.connect(self._show_context_popup)
+        context_layout.addWidget(self.context_summary_label, 1)
+        context_layout.addStretch()
+        label_hint = QtWidgets.QLabel("(click to edit)")
+        label_hint.setStyleSheet("color:#999; font-size:10px;")
+        context_layout.addWidget(label_hint)
+        self.load_page_chat_btn = QtWidgets.QToolButton()
+        self.load_page_chat_btn.setText("Load current page chat")
+        self.load_page_chat_btn.setToolTip("Open the chat linked to the current page")
+        self.load_page_chat_btn.clicked.connect(self._load_current_page_chat)
+        self.load_page_chat_btn.setVisible(False)
+        context_layout.addWidget(self.load_page_chat_btn)
+        layout.addWidget(self.context_bar)
         self.splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        layout.addWidget(self.splitter, 1)
-
-        # Left: chat tree
         left_container = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout(left_container)
         left_layout.setContentsMargins(4, 4, 4, 4)
@@ -928,16 +1090,12 @@ class AIChatPanel(QtWidgets.QWidget):
         self.chat_tree_container = left_container
         self.splitter.addWidget(left_container)
 
-        # Right: chat UI
         right_container = QtWidgets.QWidget()
         right_layout = QtWidgets.QVBoxLayout(right_container)
         right_layout.setContentsMargins(4, 4, 4, 4)
         right_layout.setSpacing(6)
-
         chat_split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         right_layout.addWidget(chat_split, 1)
-
-        # Chat display
         self.chat_view = QtWidgets.QTextBrowser()
         self.chat_view.setOpenExternalLinks(False)
         self.chat_view.setOpenLinks(False)
@@ -948,8 +1106,6 @@ class AIChatPanel(QtWidgets.QWidget):
         self.chat_view.setStyleSheet("QTextBrowser { padding: 6px; }")
         self._apply_font_size()
         chat_split.addWidget(self.chat_view)
-
-        # Input area
         input_container = QtWidgets.QWidget()
         input_layout = QtWidgets.QVBoxLayout(input_container)
         input_layout.setContentsMargins(0, 0, 0, 0)
@@ -958,17 +1114,20 @@ class AIChatPanel(QtWidgets.QWidget):
         self.input_edit.setPlaceholderText("Ask anything…")
         self.input_edit.installEventFilter(self)
         input_layout.addWidget(self.input_edit, 1)
-
         btn_row = QtWidgets.QHBoxLayout()
         btn_row.addStretch()
         self.condense_btn = QtWidgets.QToolButton()
-        self.condense_btn.setText("⤢")
         self.condense_btn.setToolTip("Condense Chat")
+        condense_icon = _load_icon("condense.svg", QSize(10, 10))
+        self.condense_btn.setIcon(condense_icon)
+        self.condense_btn.setIconSize(QSize(10, 10))
         self.condense_btn.clicked.connect(self._condense_chat)
         self.condense_btn.setFixedWidth(28)
         self.send_btn = QtWidgets.QToolButton()
-        self.send_btn.setText("➤")
         self.send_btn.setToolTip("Send message (Ctrl+Enter)")
+        send_icon = _load_icon("send-message.svg", QSize(10, 10))
+        self.send_btn.setIcon(send_icon)
+        self.send_btn.setIconSize(QSize(10, 10))
         self.send_btn.clicked.connect(self._send_message)
         self.send_btn.setFixedWidth(28)
         self.reset_btn = QtWidgets.QToolButton()
@@ -980,20 +1139,56 @@ class AIChatPanel(QtWidgets.QWidget):
         btn_row.addWidget(self.reset_btn)
         btn_row.addWidget(self.send_btn)
         input_layout.addLayout(btn_row)
-
         chat_split.addWidget(input_container)
         chat_split.setStretchFactor(0, 3)
         chat_split.setStretchFactor(1, 1)
-
         self.status_label = QtWidgets.QLabel()
         right_layout.addWidget(self.status_label)
         self.model_status_label = QtWidgets.QLabel()
         right_layout.addWidget(self.model_status_label)
-
         self.splitter.addWidget(right_container)
+        layout.addWidget(self.splitter, 1)
         self._toggle_chat_list(False)
-        self._update_chat_name_label()
+        self._update_context_summary()
         self._apply_font_size()
+
+    def _reset_chat_history(self) -> None:
+        print("[AIChat][reset] Starting chat reset.")
+        if not self.current_session_id or not self.store:
+            print("[AIChat][reset] No current_session_id or store; aborting.")
+            return
+
+        session_id = self.current_session_id
+        if self._context_items:
+            for item in list(self._context_items):
+                self._delete_context_source(item)
+        if self.ai_manager and self._current_ai_conversation_id:
+            try:
+                self.ai_manager.clear_context_items(self._current_ai_conversation_id)
+            except Exception:
+                import traceback
+                traceback.print_exc()
+        self._context_items = []
+        self._current_ai_conversation_id = None
+        self._update_context_summary()
+        self.messages = []
+        self.chat_view.clear()
+        self._context_overlay.hide()
+        self._context_popup.hide()
+        try:
+            self.store.delete_session(session_id)
+        except Exception as exc:
+            print(f"[AIChat][reset] Failed to delete session {session_id}: {exc}")
+        self.current_session_id = None
+        self._condense_buffer = ""
+        self._summary_content = None
+        self._context_popup_position = None
+        self._context_popup_width = None
+        self._load_chat_tree()
+        if self._ensure_active_chat() and self.current_session_id:
+            self._load_chat_messages(self.current_session_id)
+        self.status_label.setText("Chat history cleared.")
+        print("[AIChat][reset] Finished _reset_chat_history")
 
     def _load_condense_prompt(self) -> str:
         """Load the condense prompt from file or fall back to a default."""
@@ -1064,9 +1259,9 @@ class AIChatPanel(QtWidgets.QWidget):
             f"<style>body {{ background:{base_color}; color:{text_color}; }}"
             f".bubble {{ position:relative; border-radius:6px; padding:6px 8px 12px; margin-bottom:8px; }}"
             f".bubble:hover {{ background:rgba(0,0,0,0.05); }}"
-            f".actions {{ text-align:right; font-size:12px; display:none; margin-top:6px; }}"
+            f".actions {{ text-align:left; font-size:12px; display:none; margin-top:6px; margin-left:0; }}"
             f".bubble:hover .actions {{ display:block; }}"
-            f".actions a {{ margin-left:12px; text-decoration:none; color:{accent}; }}"
+            f".actions a {{ margin-right:12px; margin-left:0; text-decoration:none; color:{accent}; }}"
             f".user {{ background:rgba(80,120,200,0.10); }}"
             f".assistant {{ background:rgba(60,200,140,0.10); }}"
             f".summary {{ border:1px solid #e88; }}"
@@ -1081,9 +1276,9 @@ class AIChatPanel(QtWidgets.QWidget):
                 safe = html.escape(content).replace("\n", "<br>")
                 rendered = f"<p>{safe}</p>"
             actions = [
-                f"<a href='action:copy:{msg_id}' title='Copy message'>📋</a>",
-                f"<a href='action:goto:{msg_id}' title='Go to start'>⬆</a>",
-                f"<a href='action:delete:{msg_id}' title='Delete message'>🗑</a>",
+                f"<a href='action:copy:{msg_id}'>{_icon_tag('copy.svg','Copy message', 20)}</a>",
+                f"<a href='action:goto:{msg_id}'>{_icon_tag('go-to-top.svg','Go to start', 20)}</a>",
+                f"<a href='action:delete:{msg_id}'>{_icon_tag('icons8-trash.svg','Delete message', 20)}</a>",
             ]
             parts.append(
                 f"<div class='bubble {cls}' id='{msg_id}'><a name='{msg_id}' href='msg:{msg_id}'></a>"
@@ -1114,6 +1309,556 @@ class AIChatPanel(QtWidgets.QWidget):
         cursor = self.chat_view.textCursor()
         cursor.movePosition(QTextCursor.End)
         self.chat_view.setTextCursor(cursor)
+
+    def _refresh_context_items(self) -> None:
+        if not self.ai_manager or not self._current_ai_conversation_id:
+            self._context_items = []
+            self._update_context_summary()
+            return
+        try:
+            self._context_items = self.ai_manager.list_context_items(self._current_ai_conversation_id)
+        except Exception:
+            self._context_items = []
+        self._update_context_summary()
+
+    def _ensure_page_context_added(self) -> None:
+        if not self.ai_manager or not self._current_ai_conversation_id or not self.current_page_path:
+            return
+        if any(item.kind == "page" and item.page_ref == self.current_page_path for item in self._context_items):
+            return
+        try:
+            self.ai_manager.add_context_page(self._current_ai_conversation_id, self.current_page_path)
+            self._index_context_item("@", ContextCandidate(page_ref=self.current_page_path, label=self.current_page_path))
+        except Exception:
+            return
+        self._refresh_context_items()
+
+    def _bind_ai_conversation(self) -> None:
+        if not self.ai_manager or not self.current_session_id:
+            self._current_ai_conversation_id = None
+            self._refresh_context_items()
+            return
+        session = self.store.get_session_by_id(self.current_session_id)
+        if not session:
+            self._current_ai_conversation_id = None
+            self._refresh_context_items()
+            return
+        conv_id = session.get("ai_conversation_id")
+        conv = self.ai_manager.get_conversation(conv_id) if conv_id else None
+        if not conv:
+            title = session.get("name") or "Chat"
+            if self.current_page_path:
+                conv = self.ai_manager.get_or_create_page_chat(self.current_page_path, title=title)
+            else:
+                conv = self.ai_manager.create_global_chat(title=title)
+            conv_id = conv.id
+            try:
+                self.store.update_session_ai_conversation(self.current_session_id, conv_id)
+            except Exception:
+                pass
+        self._current_ai_conversation_id = conv_id
+        self._refresh_context_items()
+        self._ensure_page_context_added()
+
+    def _update_context_summary(self) -> None:
+        if len(self._context_items) == 1 and self._context_items[0].kind == "page":
+            item = self._context_items[0]
+            self.context_summary_label.setText(f"Context: {self._page_label(item.page_ref)}")
+            self.context_summary_label.setToolTip(self._context_item_label(item))
+            return
+        counts = Counter(item.kind for item in self._context_items)
+        if not counts:
+            self.context_summary_label.setText("Context: —")
+            self.context_summary_label.setToolTip("No context selected yet.")
+            return
+        parts: List[str] = []
+        page_count = counts.get("page", 0)
+        tree_count = counts.get("page-tree", 0)
+        attachment_count = counts.get("attachment", 0)
+        if page_count:
+            suffix = "s" if page_count != 1 else ""
+            parts.append(f"{page_count} page{suffix}")
+        if tree_count:
+            suffix = "s" if tree_count != 1 else ""
+            parts.append(f"{tree_count} tree{suffix}")
+        if attachment_count:
+            suffix = "s" if attachment_count != 1 else ""
+            parts.append(f"{attachment_count} attachment{suffix}")
+        summary = "Context: " + " • ".join(parts)
+        self.context_summary_label.setText(summary)
+        tooltip = "\n".join(self._context_item_label(item) for item in self._context_items)
+        self.context_summary_label.setToolTip(tooltip)
+
+    def _page_label(self, page_ref: str) -> str:
+        normalized = page_ref.lstrip("/")
+        if ":" in normalized and "/" not in normalized:
+            parts = [segment for segment in normalized.split(":") if segment]
+            if parts:
+                tail = parts[-1]
+                return f"...{tail}" if len(parts) > 1 else tail
+        candidate = Path(normalized)
+        return candidate.stem or normalized
+
+    def _context_item_label(self, item: ContextItem) -> str:
+        if item.kind == "page":
+            return f"Page: {self._page_label(item.page_ref)}"
+        if item.kind == "page-tree":
+            return f"Tree: {item.page_ref}"
+        if item.kind == "attachment":
+            if item.attachment_name:
+                return f"Attachment: {self._page_label(item.page_ref)} • {item.attachment_name}"
+            return f"Attachment: {item.page_ref}"
+        return item.page_ref
+
+    def _show_context_popup(self) -> None:
+        if not self._context_items:
+            QtWidgets.QMessageBox.information(self, "Context", "No context items are configured yet.")
+            return
+        target = getattr(self, "chat_view", self)
+        offset = QtCore.QPoint(0, 6)
+        point = target.mapToGlobal(QtCore.QPoint(0, 0)) + offset
+        width_hint = target.width() or self.width() or 480
+        width_hint = max(480, width_hint)
+        self._context_popup_position = point
+        self._context_popup.show_for(self._context_items, point, width_hint=width_hint)
+        self._context_popup_width = self._context_popup.width()
+
+    def _open_context_item(self, item: ContextItem) -> None:
+        if item.page_ref:
+            self.chatNavigateRequested.emit(item.page_ref)
+
+    def _detect_context_trigger(self) -> Optional[str]:
+        text = self.input_edit.toPlainText()
+        cursor = self.input_edit.textCursor()
+        pos = cursor.position()
+        if pos < 2:
+            return None
+        snippet = text[pos - 2 : pos]
+        if snippet in ("@ ", "# ", "! "):
+            return snippet[0]
+        return None
+
+    def _maybe_open_context_picker(self) -> None:
+        trigger = self._detect_context_trigger()
+        if not trigger:
+            return
+        if not self._ensure_active_chat():
+            QtWidgets.QMessageBox.information(self, "Context", "Open or create a chat before adding context.")
+            return
+        if not self.ai_manager:
+            return
+        candidates = self._candidates_for_trigger(trigger)
+        if not candidates:
+            QtWidgets.QMessageBox.information(self, "Context", "No context items are available.")
+            return
+        cursor_rect = self.input_edit.cursorRect()
+        point = self.input_edit.mapToGlobal(cursor_rect.bottomLeft())
+        self._context_overlay.show_for(trigger, list(candidates), point)
+
+    def _candidates_for_trigger(self, trigger: str) -> List[ContextCandidate]:
+        if trigger == "@":
+            return self._page_candidates
+        if trigger == "#":
+            return self._tree_candidates
+        if trigger == "!":
+            return self._attachment_candidates_for_trigger()
+        return []
+
+    def _attachment_candidates_for_trigger(self) -> List[ContextCandidate]:
+        if not self.vault_root:
+            return []
+        pages = self._attachment_context_pages()
+        seen: set[tuple[str, str]] = set()
+        candidates: list[ContextCandidate] = []
+        for page_ref in sorted(pages):
+            for attachment in self._attachments_in_page(page_ref):
+                key = (page_ref, attachment.name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                display = f"{page_ref} · {attachment.name}"
+                candidates.append(
+                    ContextCandidate(
+                        page_ref=page_ref,
+                        label=display,
+                        attachment_name=attachment.name,
+                    )
+                )
+        return candidates
+
+    def _attachment_context_pages(self) -> set[str]:
+        pages: set[str] = set()
+        if self.current_page_path:
+            pages.add(self.current_page_path)
+        for item in self._context_items:
+            if item.kind == "page" and item.page_ref:
+                pages.add(item.page_ref)
+            elif item.kind == "page-tree" and item.page_ref:
+                pages.update(self._pages_under_tree(item.page_ref))
+        return pages
+
+    def _pages_under_tree(self, tree_ref: str) -> set[str]:
+        if not self.vault_root:
+            return set()
+        root = Path(self.vault_root)
+        rel = tree_ref.lstrip("/")
+        folder = root / rel
+        if not folder.exists():
+            return set()
+        result: set[str] = set()
+        for txt in sorted(folder.rglob("*.txt")):
+            if ".zimx" in txt.parts:
+                continue
+            result.add("/" + txt.relative_to(root).as_posix())
+        return result
+
+    def _attachments_in_page(self, page_ref: str) -> list[Path]:
+        if not self.vault_root:
+            return []
+        root = Path(self.vault_root)
+        candidate_file = root / page_ref.lstrip("/")
+        if candidate_file.is_dir():
+            folder = candidate_file
+        elif candidate_file.exists():
+            folder = candidate_file.parent
+        else:
+            # Try with .txt suffix
+            candidate_with_txt = candidate_file.with_suffix(".txt")
+            folder = candidate_with_txt.parent if candidate_with_txt.exists() else candidate_file.parent
+        attachments: list[Path] = []
+        for entry in sorted(folder.iterdir()):
+            if not entry.is_file():
+                continue
+            if entry.name.startswith("."):
+                continue
+            if entry.suffix.lower() == ".txt":
+                continue
+            if ".zimx" in entry.parts:
+                continue
+            attachments.append(entry)
+        return attachments
+
+    def _rag_context_pages(self) -> List[str]:
+        pages: Set[str] = set()
+        if self.current_page_path:
+            pages.add(self.current_page_path)
+        for item in self._context_items:
+            if item.kind == "page" and item.page_ref:
+                pages.add(item.page_ref)
+            elif item.kind == "page-tree" and item.page_ref:
+                pages.update(self._pages_under_tree(item.page_ref))
+            elif item.kind == "attachment" and item.page_ref:
+                pages.add(item.page_ref)
+        return sorted(pages)
+
+    def _rag_context_chunks(self, query: str) -> List[RetrievedChunk]:
+        if not self._chroma:
+            return []
+        pages = self._rag_context_pages()
+        if not pages:
+            return []
+        attachment_labels = [
+            f"{item.page_ref}/{item.attachment_name}"
+            for item in self._context_items
+            if item.kind == "attachment" and item.attachment_name
+        ]
+        _log_chroma(
+            f"[Chroma] querying for query={query!r} "
+            f"pages={pages} attachments={attachment_labels or 'none'}"
+        )
+        try:
+            limit = 4
+            attachment_names = [label.split("/")[-1] for label in attachment_labels]
+            deduped: list[RetrievedChunk] = []
+            seen: Set[tuple[str, Optional[str]]] = set()
+            if attachment_names:
+                attachment_chunks = self._chroma.query_attachments(query, attachment_names, limit=limit)
+                for chunk in attachment_chunks:
+                    key = (chunk.page_ref, chunk.attachment_name)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    deduped.append(chunk)
+                    if len(deduped) >= limit:
+                        break
+            if len(deduped) < limit:
+                general_chunks = self._chroma.query(query, page_refs=pages, limit=limit * 2)
+                for chunk in general_chunks:
+                    key = (chunk.page_ref, chunk.attachment_name)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    deduped.append(chunk)
+                    if len(deduped) >= limit:
+                        break
+            if deduped:
+                _log_chroma(f"[Chroma] Retrieved {len(deduped)} context chunks for query.")
+                for chunk in deduped:
+                    score = f"{chunk.score:.3f}" if chunk.score is not None else "n/a"
+                    attachment = chunk.attachment_name or "page"
+                    _log_chroma(f"[AIChat-RAG] chunk {chunk.page_ref} ({attachment}) score={score}")
+            return deduped
+        except Exception as exc:
+            _log_chroma(f"[Chroma] Failed to query context: {exc}")
+            return []
+
+    def _build_context_prompt(self, query: str) -> Optional[str]:
+        chunks = self._rag_context_chunks(query)
+        if not chunks:
+            return None
+        lines: List[str] = ["Vault context relevant to the query:"]
+        for chunk in chunks:
+            snippet = re.sub(r"\s+", " ", chunk.content.strip())
+            if len(snippet) > 2000:
+                snippet = snippet[:2000].rstrip() + "…"
+            label = chunk.page_ref
+            if chunk.attachment_name:
+                label += f" ({chunk.attachment_name})"
+            lines.append(f"{label}: {snippet}")
+        prompt_text = "\n".join(lines)
+        _log_chroma(f"[Chroma] rag retrieved:\n{prompt_text}")
+        return "\n".join(lines)
+
+    def _record_chat_history(self, content: str) -> None:
+        if not content:
+            return
+        if self._chat_history and self._chat_history[-1] == content:
+            self._chat_history_index = None
+            self._unsent_buffer = ""
+            return
+        self._chat_history.append(content)
+        if len(self._chat_history) > 10:
+            self._chat_history.pop(0)
+        self._chat_history_index = None
+        self._unsent_buffer = ""
+
+    def _navigate_chat_history(self, direction: int) -> bool:
+        if not self._chat_history:
+            return False
+        if direction < 0:
+            if self._chat_history_index is None:
+                self._unsent_buffer = self.input_edit.toPlainText()
+                self._chat_history_index = len(self._chat_history) - 1
+            elif self._chat_history_index > 0:
+                self._chat_history_index -= 1
+        else:
+            if self._chat_history_index is None:
+                return False
+            if self._chat_history_index < len(self._chat_history) - 1:
+                self._chat_history_index += 1
+            else:
+                self._chat_history_index = None
+                self.input_edit.setPlainText(self._unsent_buffer)
+                self.input_edit.moveCursor(QTextCursor.End)
+                return True
+        if 0 <= self._chat_history_index < len(self._chat_history):
+            self.input_edit.setPlainText(self._chat_history[self._chat_history_index])
+            self.input_edit.moveCursor(QTextCursor.End)
+            return True
+        return False
+
+    def _apply_context_selection(self, trigger: str, candidate: ContextCandidate) -> None:
+        self._remove_trigger_sequence(trigger)
+        self._add_context_item(trigger, candidate)
+
+    def _remove_trigger_sequence(self, trigger: str) -> None:
+        cursor = self.input_edit.textCursor()
+        pos = cursor.position()
+        seq = f"{trigger} "
+        if pos >= len(seq):
+            text = self.input_edit.toPlainText()
+            if text[pos - len(seq) : pos] == seq:
+                cursor.setPosition(pos - len(seq))
+                cursor.setPosition(pos, QTextCursor.KeepAnchor)
+                cursor.removeSelectedText()
+                self.input_edit.setTextCursor(cursor)
+
+    def _add_context_item(self, trigger: str, candidate: ContextCandidate) -> None:
+        if not self._ensure_context_conversation():
+            return
+        conv_id = self._current_ai_conversation_id
+        if not conv_id or not self.ai_manager:
+            return
+        same = self._context_items
+        kind = {"@": "page", "#": "page-tree"}.get(trigger, "attachment")
+        already = any(
+            item for item in same
+            if item.kind == kind
+            and item.page_ref == candidate.page_ref
+            and (kind != "attachment" or item.attachment_name == candidate.attachment_name)
+        )
+        if already:
+            return
+        try:
+            if trigger == "@":
+                self.ai_manager.add_context_page(conv_id, candidate.page_ref)
+            elif trigger == "#":
+                self.ai_manager.add_context_page_tree(conv_id, candidate.page_ref)
+            else:
+                name = candidate.attachment_name or ""
+                self.ai_manager.add_context_attachment(conv_id, candidate.page_ref, name)
+            self._index_context_item(trigger, candidate)
+        except Exception:
+            pass
+        self._refresh_context_items()
+
+    def _ensure_context_conversation(self) -> bool:
+        if not self.ai_manager or not self.current_session_id:
+            return False
+        if not self._current_ai_conversation_id:
+            self._bind_ai_conversation()
+        return bool(self._current_ai_conversation_id)
+
+    def _handle_context_overlay_selected(self, candidate: ContextCandidate) -> None:
+        trigger = self._context_overlay.current_trigger()
+        if not trigger:
+            return
+        self._apply_context_selection(trigger, candidate)
+
+    def _delete_context_item(self, item: ContextItem) -> None:
+        if not self.ai_manager:
+            return
+        try:
+            self.ai_manager.delete_context_item(item.id)
+            self._delete_context_source(item)
+        except Exception:
+            pass
+        self._refresh_context_items()
+        if self._context_popup.isVisible() and self._context_popup_position:
+            self._context_popup.show_for(
+                self._context_items,
+                self._context_popup_position,
+                width_hint=self._context_popup_width,
+            )
+            self._context_popup_width = self._context_popup.width()
+
+    def _context_popup_delete_handler(self, item: ContextItem) -> None:
+        self._context_popup.remove_item(item)
+        self._delete_context_item(item)
+
+    def _index_context_item(self, trigger: str, candidate: ContextCandidate) -> None:
+        if not self._chroma:
+            _log_chroma(f"[Chroma] Skipping indexing for context {candidate.page_ref} ({trigger}) — client unavailable.")
+            return
+        kind = {"@": "page", "#": "page-tree"}.get(trigger, "attachment")
+        _log_chroma(f"[Chroma] Indexing {kind} context for {candidate.page_ref}")
+        if trigger == "@":
+            text = self._read_page_text(candidate.page_ref)
+            self._chroma.index_text(candidate.page_ref, text, kind="page")
+        elif trigger == "#":
+            for page in self._pages_under_tree(candidate.page_ref):
+                text = self._read_page_text(page)
+                self._chroma.index_text(page, text, kind="page")
+        else:
+            if not candidate.attachment_name:
+                return
+            text = self._extract_attachment_text(candidate.page_ref, candidate.attachment_name)
+            if not text.strip():
+                return
+            attachment_path = self._attachment_path(candidate.page_ref, candidate.attachment_name)
+            _log_chroma(
+                f"[Chroma] Indexing attachment {candidate.attachment_name or '<unnamed>'} "
+                f"for {candidate.page_ref} "
+                f"({attachment_path or 'path unavailable'})"
+            )
+            self._chroma.index_text(candidate.page_ref, text, kind="attachment", attachment=candidate.attachment_name)
+
+    def _delete_context_source(self, item: ContextItem) -> None:
+        if not self._chroma:
+            _log_chroma(f"[Chroma] Skipping delete for context {item.page_ref} ({item.kind}) — client unavailable.")
+            return
+        if item.kind == "page" and item.page_ref:
+            _log_chroma(f"[Chroma] Removing page context {item.page_ref}")
+            self._chroma.delete_text(item.page_ref, kind="page")
+        elif item.kind == "page-tree" and item.page_ref:
+            pages = list(self._pages_under_tree(item.page_ref))
+            _log_chroma(f"[Chroma] Removing tree context {item.page_ref} ({len(pages)} pages)")
+            for page in pages:
+                self._chroma.delete_text(page, kind="page")
+        elif item.kind == "attachment" and item.page_ref and item.attachment_name:
+            _log_chroma(f"[Chroma] Removing attachment context {item.page_ref} ({item.attachment_name})")
+            self._chroma.delete_text(item.page_ref, kind="attachment", attachment=item.attachment_name)
+
+    def _read_page_text(self, page_ref: str) -> str:
+        if not self.vault_root:
+            return ""
+        page_path = Path(self.vault_root) / page_ref.lstrip("/")
+        if not page_path.exists():
+            candidate = page_path.with_suffix(".txt")
+            if candidate.exists():
+                page_path = candidate
+            else:
+                return ""
+        try:
+            return page_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return ""
+
+    def _extract_attachment_text(self, page_ref: str, attachment_name: str) -> str:
+        path = self._attachment_path(page_ref, attachment_name)
+        if not path or not path.exists():
+            return ""
+        suffix = path.suffix.lower()
+        try:
+            _log_chroma(f"[Chroma] Extracting text from attachment {path}")
+            if suffix == ".pdf":
+                return extract_pdf_text(str(path))
+            if suffix == ".docx":
+                doc = Document(str(path))
+                return "\n".join(p.text for p in doc.paragraphs if p.text)
+            if suffix in (".png", ".jpg", ".jpeg", ".bmp", ".tiff"):
+                img = Image.open(path)
+                return pytesseract.image_to_string(img)
+            return path.read_text(encoding="utf-8", errors="ignore")
+        except Exception as exc:
+            _log_chroma(f"[Chroma] Failed to extract {path}: {exc}")
+            return ""
+
+    def _attachment_path(self, page_ref: str, attachment_name: str) -> Optional[Path]:
+        if not self.vault_root:
+            return None
+        base = Path(self.vault_root) / page_ref.lstrip("/")
+        if base.is_dir():
+            folder = base
+        else:
+            folder = base.parent
+        candidate = folder / attachment_name
+        return candidate if candidate.exists() else None
+
+    def _reload_context_index(self) -> None:
+        self._page_candidates = []
+        self._tree_candidates = []
+        self._attachment_candidates = []
+        if not self.vault_root:
+            return
+        root = Path(self.vault_root)
+        seen: set[str] = set()
+        for page_file in sorted(root.rglob("*.txt")):
+            if ".zimx" in page_file.parts:
+                continue
+            rel_page = "/" + page_file.relative_to(root).as_posix()
+            self._page_candidates.append(ContextCandidate(page_ref=rel_page, label=rel_page))
+            folder = page_file.parent
+            if folder == root:
+                folder_rel = "/"
+            else:
+                folder_rel = "/" + folder.relative_to(root).as_posix()
+            if folder_rel not in seen:
+                seen.add(folder_rel)
+                self._tree_candidates.append(ContextCandidate(page_ref=folder_rel, label=folder_rel))
+            for attachment in sorted(folder.iterdir()):
+                if not attachment.is_file():
+                    continue
+                if attachment.suffix.lower() == ".txt":
+                    continue
+                if attachment.name.startswith("."):
+                    continue
+                if ".zimx" in attachment.parts:
+                    continue
+                display = f"{rel_page} · {attachment.name}"
+                self._attachment_candidates.append(
+                    ContextCandidate(page_ref=rel_page, label=display, attachment_name=attachment.name)
+                )
 
     def _is_plain_markdown(self, rendered_html: str) -> bool:
         """Heuristic: detect if the markdown output is just a <p> block without rich tags."""
@@ -1429,7 +2174,7 @@ class AIChatPanel(QtWidgets.QWidget):
             self.current_system_prompt = session.get("system_prompt")
         else:
             self._update_model_status()
-        self._update_chat_name_label()
+        self._bind_ai_conversation()
 
     def _apply_session_defaults(self, session: Dict) -> None:
         """Apply stored server/model defaults to UI for a chat session."""
@@ -1607,6 +2352,19 @@ class AIChatPanel(QtWidgets.QWidget):
         self.input_edit.clear()
         self._start_send(content)
 
+    def send_text_message(self, text: str) -> None:
+        """Send arbitrary text as the next user message in the active chat."""
+        content = (text or "").strip()
+        if not content:
+            return
+        if not self.current_session_id and not self._ensure_active_chat():
+            return
+        self._start_send(content)
+
+    def focus_input(self) -> None:
+        if hasattr(self, "input_edit"):
+            self.input_edit.setFocus(QtCore.Qt.FocusReason.ShortcutFocusReason)
+
     def send_action_message(self, action: str, prompt: str, text: str) -> None:
         """Send a structured action message into the chat."""
         content = f"[{action}] {prompt}\n\n{text}"
@@ -1655,6 +2413,8 @@ class AIChatPanel(QtWidgets.QWidget):
         content = (content or "").strip()
         if not content:
             return
+        self._record_chat_history(content)
+        _log_ai_chat(f"[AIChat]: prompt: {content}")
         if not self.current_server:
             QtWidgets.QMessageBox.critical(self, "Server", "Please configure a server before sending.")
             return
@@ -1670,6 +2430,9 @@ class AIChatPanel(QtWidgets.QWidget):
         try:
             blocks = [{"role": role, "content": text} for role, text in self.messages[:-1]]
             merged_systems: List[str] = []
+            context_prompt = self._build_context_prompt(content)
+            if context_prompt:
+                merged_systems.append(context_prompt)
             if self.current_system_prompt:
                 merged_systems.append(self.current_system_prompt)
             if extra_system:
@@ -1683,6 +2446,7 @@ class AIChatPanel(QtWidgets.QWidget):
             self._api_worker.start()
             self.send_btn.setEnabled(False)
             self.status_label.setText("Waiting for response…")
+            self.status_label.setStyleSheet("color: #00d800; font-weight: bold;")
         except Exception as exc:
             self.messages.pop()  # remove assistant placeholder
             QtWidgets.QMessageBox.critical(self, "Send failed", str(exc))
@@ -1705,9 +2469,11 @@ class AIChatPanel(QtWidgets.QWidget):
                 self.store.update_session_last_server(self.current_session_id, self.current_server.get("name", ""))
         self._render_messages()
         self.status_label.setText("Response received.")
+        self.status_label.setStyleSheet("")
         self._update_model_status()
         self.send_btn.setEnabled(True)
         self._api_worker = None
+        _log_llm_response(f"[AIChat][stream complete] response_len={len(full)}")
 
     def _handle_condense_chunk(self, chunk: str) -> None:
         self._condense_buffer += chunk
@@ -1801,11 +2567,8 @@ class AIChatPanel(QtWidgets.QWidget):
         if not self.current_session_id or not self._summary_content:
             return
         summary_text = self._summary_content
-        try:
-            self.store.clear_chat(self.current_session_id)
-            self.store.save_message(self.current_session_id, "assistant", summary_text)
-        except Exception:
-            pass
+        self.store.clear_chat(self.current_session_id)
+        self.store.save_message(self.current_session_id, "assistant", summary_text)
         self.messages = [("assistant", summary_text)]
         self._condense_buffer = ""
         self._summary_content = None
@@ -1835,29 +2598,7 @@ class AIChatPanel(QtWidgets.QWidget):
             session = self.store.get_session_by_id(self.current_session_id)
             if session:
                 self._current_chat_path = session.get("path")
-        self._update_chat_name_label()
-
-    def _update_chat_name_label(self) -> None:
-        if not self.current_session_id:
-            self.chat_name_label.setText("Chat context: —")
-            return
-        session = self.store.get_session_by_id(self.current_session_id)
-        if not session:
-            self.chat_name_label.setText("Chat context: —")
-            return
-        name = session.get("name") or "Chat"
-        path = session.get("path") or ""
-        display = path.replace("/", ":").lstrip(":") if path else name
-        if path:
-            self.chat_name_label.setText(f'Chat context: <a href="{path}">{display}</a>')
-        else:
-            self.chat_name_label.setText(f"Chat context: {display}")
-        # Show prompt preview
-        prompt_preview = (session.get("system_prompt") or "").strip()
-        if prompt_preview:
-            self.chat_name_label.setToolTip(prompt_preview[:500])
-        else:
-            self.chat_name_label.setToolTip("No system prompt set.")
+        self._update_load_current_page_button()
 
     def set_font_size(self, size: int) -> None:
         """Apply font size to chat view and input."""
@@ -1900,88 +2641,6 @@ class AIChatPanel(QtWidgets.QWidget):
         self._load_chat_messages(chat["id"])
         self.status_label.setText(f"Created chat '{chat['name']}'")
 
-    def _reset_chat_history(self) -> None:
-        try:
-            if not self.current_session_id or not self.store:
-                return
-            confirm = QtWidgets.QMessageBox.question(
-                self,
-                "Clear Chat",
-                "Are you sure you want to clear this chat history?",
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                QtWidgets.QMessageBox.No,
-            )
-            if confirm != QtWidgets.QMessageBox.Yes:
-                return
-            # Stop any active workers to avoid callbacks during reset and to prevent
-            # QThread from being destroyed while running (which would abort the app).
-            def _stop_worker(worker):
-                if not worker:
-                    return
-                try:
-                    worker.finished.disconnect()
-                except Exception:
-                    pass
-                try:
-                    worker.failed.disconnect()
-                except Exception:
-                    pass
-                try:
-                    worker.chunk.disconnect()
-                except Exception:
-                    pass
-                if worker.isRunning():
-                    try:
-                        worker.requestInterruption()
-                    except Exception:
-                        pass
-                    worker.quit()
-                    # Wait for the thread to exit; if it refuses, terminate as a last resort
-                    if not worker.wait(5000):
-                        print("[AIChat][reset] worker did not exit after quit(); terminating", worker)
-                        try:
-                            worker.terminate()
-                        except Exception:
-                            pass
-                        worker.wait(1000)
-
-            _stop_worker(getattr(self, "_api_worker", None))
-            _stop_worker(getattr(self, "_condense_worker", None))
-            self._api_worker = None
-            self._condense_worker = None
-
-            try:
-                self.store.clear_chat(self.current_session_id)
-            except Exception as exc:
-                traceback.print_exc()
-                QtWidgets.QMessageBox.critical(self, "Reset Chat", f"Failed to clear chat:\n{exc}")
-                return
-
-            # Preserve last model/server for continuity
-            if self.current_server:
-                try:
-                    self.store.update_session_last_model(self.current_session_id, self.model_combo.currentText())
-                    self.store.update_session_last_server(self.current_session_id, self.current_server.get("name", ""))
-                except Exception:
-                    traceback.print_exc()
-
-            self._condense_buffer = ""
-            self._summary_content = None
-            try:
-                self._load_chat_messages(self.current_session_id)
-            except Exception:
-                traceback.print_exc()
-                QtWidgets.QMessageBox.critical(self, "Reset Chat", "Chat cleared, but failed to reload messages.")
-                return
-            self.status_label.setText("Chat history cleared.")
-        except BaseException as exc:  # catch SystemExit/KeyboardInterrupt too to keep app alive
-            traceback.print_exc()
-            try:
-                QtWidgets.QMessageBox.critical(self, "Reset Chat", f"Failed to clear chat:\n{exc}")
-            except Exception:
-                pass
-            return
-
     def _load_system_prompts(self):
         self.system_prompts = []
         base = self.vault_root or str(Path.home())
@@ -2023,19 +2682,9 @@ class AIChatPanel(QtWidgets.QWidget):
             self._save_system_prompts()
 
     def set_current_page(self, rel_path: Optional[str]) -> None:
-        """Link chats to the currently open page without creating new chats."""
+        """Track the currently open page when the editor changes without auto-switching chats."""
         self.current_page_path = rel_path
-        if not rel_path:
-            return
-        folder_path = self.store._normalize_folder_path("/" + Path(rel_path.lstrip("/")).parent.as_posix())
-        chat = self.store.get_session_by_path(folder_path, "chat")
-        if chat:
-            self.current_session_id = chat["id"]
-            self._load_chat_tree(select_id=chat["id"])
-            self._load_chat_messages(chat["id"])
-        else:
-            self._update_model_status()
-        self._update_chat_name_label()
+        self._update_load_current_page_button()
 
     def open_chat_for_page(self, rel_path: Optional[str]) -> None:
         """Explicitly open (and create if needed) chat for the given page."""
@@ -2046,19 +2695,283 @@ class AIChatPanel(QtWidgets.QWidget):
             self._load_chat_tree(select_id=chat["id"])
             self._load_chat_messages(chat["id"])
         self._update_model_status()
-        self._update_chat_name_label()
+        self._update_load_current_page_button()
+
+    def _load_current_page_chat(self) -> None:
+        if not self.current_page_path:
+            return
+        self.open_chat_for_page(self.current_page_path)
+
+    def _page_has_existing_chat(self, rel_path: Optional[str]) -> bool:
+        if not rel_path:
+            return False
+        folder_path = "/" + Path(rel_path.lstrip("/")).parent.as_posix()
+        existing = self.store.get_session_by_path(folder_path, "chat")
+        return bool(existing)
+
+    def _update_load_current_page_button(self) -> None:
+        path = self.current_page_path
+        show = bool(path and path != self._current_chat_path and self._page_has_existing_chat(path))
+        self.load_page_chat_btn.setVisible(show)
+        if path and show:
+            display = self._page_label(path)
+            self.load_page_chat_btn.setText(f"Load chat for {display}")
 
     def set_vault_root(self, vault_root: Optional[str]) -> None:
         """Switch backing store to the current vault's .zimx folder."""
         self.vault_root = vault_root
+        if vault_root:
+            try:
+                self.ai_manager = AIManager()
+            except Exception:
+                self.ai_manager = None
+        else:
+            self.ai_manager = None
+        self._current_ai_conversation_id = None
+        self._context_items = []
+        self._update_context_summary()
+        self._reload_context_index()
         self.store = AIChatStore(vault_root=vault_root)
         self.current_session_id = None
         self.messages = []
         self.chat_view.clear()
+        if vault_root:
+            try:
+                self._chroma = ChromaRAG(vault_root)
+            except Exception as exc:
+                _log_chroma(f"[Chroma] Failed to initialize: {exc}")
+                self._chroma = None
+        else:
+            self._chroma = None
         self._load_system_prompts()
         self._load_chat_tree()
         self._select_default_chat()
-        self._update_chat_name_label()
+        self._update_load_current_page_button()
+
+class ContextOverlay(QtWidgets.QFrame):
+    selected = QtCore.Signal(ContextCandidate)
+
+    def __init__(self, parent=None):
+        super().__init__(parent, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint)
+        self.setFrameShape(QtWidgets.QFrame.Box)
+        self.setFrameShadow(QtWidgets.QFrame.Plain)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("Filter context…")
+        self.filter_edit.textChanged.connect(self._filter_items)
+        layout.addWidget(self.filter_edit)
+        self.list_widget = QListWidget()
+        self.list_widget.itemActivated.connect(self._on_item_activated)
+        layout.addWidget(self.list_widget)
+        self._candidates: list[ContextCandidate] = []
+        self._trigger: Optional[str] = None
+
+    def show_for(self, trigger: str, candidates: list[ContextCandidate], position: QtCore.QPoint) -> None:
+        self._trigger = trigger
+        self._candidates = candidates
+        self.filter_edit.clear()
+        self._filter_items()
+        self.adjustSize()
+        parent = self.parentWidget()
+        if parent:
+            width = max(520, parent.width() - 16)
+            self.setFixedWidth(width)
+            self.list_widget.setFixedWidth(width - 16)
+        self.move(position)
+        super().show()
+        self.filter_edit.setFocus(QtCore.Qt.FocusReason.ShortcutFocusReason)
+
+    def current_trigger(self) -> Optional[str]:
+        return self._trigger
+
+    def _filter_items(self) -> None:
+        pattern = self.filter_edit.text().strip().lower()
+        self.list_widget.clear()
+        for candidate in self._candidates:
+            searchable = f"{candidate.label} {candidate.page_ref}".lower()
+            if pattern and pattern not in searchable:
+                continue
+            display = self._candidate_display_label(candidate)
+            item = QtWidgets.QListWidgetItem(display)
+            item.setData(QtCore.Qt.UserRole, candidate)
+            self.list_widget.addItem(item)
+        if self.list_widget.count():
+            self.list_widget.setCurrentRow(0)
+
+    def _on_item_activated(self, item: QtWidgets.QListWidgetItem) -> None:
+        candidate = item.data(QtCore.Qt.UserRole)
+        if isinstance(candidate, ContextCandidate):
+            self.selected.emit(candidate)
+            self.hide()
+
+    def focusOutEvent(self, event: QFocusEvent) -> None:
+        super().focusOutEvent(event)
+        self.hide()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.key() == QtCore.Qt.Key_Escape:
+            self.hide()
+            return
+        if event.key() in (QtCore.Qt.Key_Down, QtCore.Qt.Key_J) and (
+            event.key() != QtCore.Qt.Key_J or event.modifiers() & QtCore.Qt.ShiftModifier
+        ):
+            self._move_selection(1)
+            return
+        if event.key() in (QtCore.Qt.Key_Up, QtCore.Qt.Key_K) and (
+            event.key() != QtCore.Qt.Key_K or event.modifiers() & QtCore.Qt.ShiftModifier
+        ):
+            self._move_selection(-1)
+            return
+        if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            current = self.list_widget.currentItem()
+            if current:
+                candidate = current.data(QtCore.Qt.UserRole)
+                if isinstance(candidate, ContextCandidate):
+                    self.selected.emit(candidate)
+                    self.hide()
+                    return
+        super().keyPressEvent(event)
+
+    def _move_selection(self, delta: int) -> None:
+        count = self.list_widget.count()
+        if not count:
+            return
+        current = self.list_widget.currentRow()
+        next_row = (current + delta) % count
+        self.list_widget.setCurrentRow(next_row)
+
+    def _candidate_display_label(self, candidate: ContextCandidate) -> str:
+        return self._label(candidate.page_ref, candidate.attachment_name)
+
+    def _label(self, page_ref: str, attachment: Optional[str]) -> str:
+        colon = path_to_colon(page_ref) or page_ref
+        parts = [segment for segment in colon.split(":") if segment]
+        leaf = parts[-1] if parts else Path(page_ref.lstrip("/")).stem or page_ref
+        parent = ":".join(parts[:-1]) if len(parts) > 1 else ""
+        if attachment:
+            return f"{attachment} ({leaf})"
+        if parent:
+            return f"{leaf} ({parent})"
+        return leaf
+
+
+class ContextListPopup(QtWidgets.QFrame):
+    activated = QtCore.Signal(ContextItem)
+    deleted = QtCore.Signal(ContextItem)
+
+    def __init__(self, parent=None):
+        super().__init__(parent, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint)
+        self.setFrameShape(QtWidgets.QFrame.Box)
+        self.setFrameShadow(QtWidgets.QFrame.Plain)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(2)
+        header = QtWidgets.QWidget()
+        header_layout = QtWidgets.QHBoxLayout(header)
+        header_layout.setContentsMargins(2, 2, 2, 2)
+        header_layout.addWidget(QtWidgets.QLabel("Action"))
+        header_layout.addWidget(QtWidgets.QLabel("Name"), 1)
+        header_layout.addWidget(QtWidgets.QLabel("Type"))
+        layout.addWidget(header)
+        self.table = QtWidgets.QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Action", "Name", "Type"])
+        self.table.verticalHeader().setVisible(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.table.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.table.cellActivated.connect(self._handle_cell_activated)
+        layout.addWidget(self.table)
+
+    def show_for(self, items: list[ContextItem], position: QtCore.QPoint, width_hint: Optional[int] = None) -> None:
+        self.table.setRowCount(0)
+        for item in items:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            delete_btn = QtWidgets.QToolButton()
+            delete_btn.setText("✕")
+            delete_btn.setAutoRaise(True)
+            delete_btn.clicked.connect(lambda checked=False, tgt=item: self.deleted.emit(tgt))
+            self.table.setCellWidget(row, 0, delete_btn)
+            name_item = QtWidgets.QTableWidgetItem(self._context_label(item))
+            name_item.setData(QtCore.Qt.UserRole, item)
+            self.table.setItem(row, 1, name_item)
+            self.table.setItem(row, 2, QtWidgets.QTableWidgetItem(self._kind_label(item.kind)))
+            self.table.setRowHeight(row, 28)
+        if self.table.rowCount():
+            self.table.setCurrentCell(0, 1)
+        self.adjustSize()
+        parent = self.parentWidget()
+        width = width_hint
+        if width is None and parent:
+            if hasattr(parent, "chat_view"):
+                width = parent.chat_view.width()
+            else:
+                width = parent.width()
+        if width is None or width <= 0:
+            width = 480
+        if parent:
+            width = min(width, parent.width())
+        self.setFixedWidth(width)
+        self.move(position)
+        super().show()
+
+    def _context_label(self, item: ContextItem) -> str:
+        if item.kind == "attachment" and item.attachment_name:
+            return f"{item.page_ref}/{item.attachment_name}"
+        return item.page_ref
+
+    def _kind_label(self, kind: str) -> str:
+        return {"page": "Page", "page-tree": "Tree", "attachment": "File"}.get(kind, kind.title())
+
+    def _handle_cell_activated(self, row: int, column: int) -> None:
+        data = self.table.item(row, 1)
+        if data:
+            ctx = data.data(QtCore.Qt.UserRole)
+            if isinstance(ctx, ContextItem):
+                self.activated.emit(ctx)
+
+    def focusOutEvent(self, event: QFocusEvent) -> None:
+        super().focusOutEvent(event)
+        self.hide()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.key() == QtCore.Qt.Key_Escape:
+            self.hide()
+            return
+        if event.key() in (QtCore.Qt.Key_Down, QtCore.Qt.Key_J) and (
+            event.key() != QtCore.Qt.Key_J or event.modifiers() & QtCore.Qt.ShiftModifier
+        ):
+            self._move_selection(1)
+            return
+        if event.key() in (QtCore.Qt.Key_Up, QtCore.Qt.Key_K) and (
+            event.key() != QtCore.Qt.Key_K or event.modifiers() & QtCore.Qt.ShiftModifier
+        ):
+            self._move_selection(-1)
+            return
+        super().keyPressEvent(event)
+
+    def _move_selection(self, delta: int) -> None:
+        count = self.table.rowCount()
+        if not count:
+            return
+        current = self.table.currentRow()
+        next_row = (current + delta) % count if current >= 0 else 0
+        self.table.setCurrentCell(next_row, 1)
+
+    def remove_item(self, target: ContextItem) -> None:
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 1)
+            if item and item.data(QtCore.Qt.UserRole) == target:
+                self.table.removeRow(row)
+                return
+
 class SystemPromptDialog(QtWidgets.QDialog):
     def __init__(self, parent=None, prompts: Optional[List[Dict[str, str]]] = None, current_prompt: Optional[str] = None):
         super().__init__(parent)

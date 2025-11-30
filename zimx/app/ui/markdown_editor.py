@@ -21,7 +21,10 @@ from PySide6.QtGui import (
     QPainter,
     QPen,
     QKeyEvent,
+    QKeySequence,
     QTextDocument,
+    QShortcut,
+    QAction,
 )
 from PySide6.QtWidgets import QTextEdit, QMenu, QInputDialog, QDialog, QApplication
 from .path_utils import path_to_colon, colon_to_path, ensure_root_colon_link
@@ -596,6 +599,8 @@ class MarkdownEditor(QTextEdit):
     attachmentDropped = Signal(str)  # Emits filename when a file is dropped into the editor
     backlinksRequested = Signal(str)  # Emits current page path when backlinks are requested
     aiChatRequested = Signal(str)  # Emits current page path when AI Chat is requested
+    aiChatSendRequested = Signal(str)  # Send selected/whole text to the open chat
+    aiChatPageFocusRequested = Signal(str)  # Request the chat tab focused on this page
     aiActionRequested = Signal(str, str, str)  # title, prompt, text
     _VI_EXTRA_KEY = QTextFormat.UserProperty + 1
     _FLASH_EXTRA_KEY = QTextFormat.UserProperty + 2
@@ -643,6 +648,10 @@ class MarkdownEditor(QTextEdit):
         self.setAcceptDrops(True)
         # Configure scroll-past-end margin initially
         QTimer.singleShot(0, self._apply_scroll_past_end_margin)
+        self._ai_send_shortcut = QShortcut(QKeySequence("Ctrl+Shift+J"), self)
+        self._ai_send_shortcut.activated.connect(self._emit_ai_chat_send)
+        self._ai_focus_shortcut = QShortcut(QKeySequence("Ctrl+Shift+K"), self)
+        self._ai_focus_shortcut.activated.connect(self._emit_ai_chat_focus)
 
     def paintEvent(self, event):  # type: ignore[override]
         """Custom paint to draw horizontal rules as visual lines."""
@@ -1501,6 +1510,8 @@ class MarkdownEditor(QTextEdit):
             menu.addSeparator()
             custom_action = menu.addAction("Custom…")
             custom_action.triggered.connect(lambda checked=False, name=image_name: self._prompt_image_width_by_name(name))
+            # Add AI Chat actions at the top level
+            self._add_ai_chat_context_actions(menu)
             menu.exec(event.globalPos())
             return
         
@@ -1529,16 +1540,16 @@ class MarkdownEditor(QTextEdit):
                 filter_action = menu.addAction("Filter navigator to this subtree")
                 filter_action.triggered.connect(lambda: self._filter_nav_callback(self._current_path or ""))
 
-            # AI entries (mirror the general editor menu)
-            ai_label = "AI: Go To Chat" if self._ai_chat_available else "AI Chat: Start Chat"
-            ai_chat_action = menu.addAction(ai_label)
-            ai_chat_action.triggered.connect(lambda: self.aiChatRequested.emit(self._current_path or ""))
+            # AI Chat actions at the top level
+            self._add_ai_chat_context_actions(menu)
         if self._ai_actions_enabled:
             selection = self.textCursor().selectedText()
             full_text = self.toPlainText()
             if selection or full_text:
                 if menu is None:
                     menu = self.createStandardContextMenu()
+                # Add AI Chat actions at the top level if not already present
+                self._add_ai_chat_context_actions(menu)
                 self._populate_ai_actions_menu(menu, selection or full_text)
             if menu is not None:
                 menu.exec(event.globalPos())
@@ -1578,9 +1589,8 @@ class MarkdownEditor(QTextEdit):
             if self._filter_nav_callback and self._current_path:
                 filter_action = menu.addAction("Filter navigator to this subtree")
                 filter_action.triggered.connect(lambda: self._filter_nav_callback(self._current_path or ""))
-            ai_label = "AI: Go To Chat" if self._ai_chat_available else "AI Chat: Start Chat"
-            ai_chat_action = menu.addAction(ai_label)
-            ai_chat_action.triggered.connect(lambda: self.aiChatRequested.emit(self._current_path or ""))
+            # Add AI Chat actions at the top level
+            self._add_ai_chat_context_actions(menu)
             if self._ai_actions_enabled:
                 selection = self.textCursor().selectedText()
                 full_text = self.toPlainText()
@@ -1589,8 +1599,36 @@ class MarkdownEditor(QTextEdit):
             
             menu.exec(event.globalPos())
             return
-        
+       
         super().contextMenuEvent(event)
+
+    def _ai_chat_payload_text(self) -> str:
+        cursor = self.textCursor()
+        selected = cursor.selection().toPlainText()
+        text = selected if selected.strip() else self.toPlainText()
+        normalized = text.replace("\u2029", "\n").strip()
+        return normalized
+
+    def _emit_ai_chat_send(self) -> None:
+        payload = self._ai_chat_payload_text()
+        if not payload:
+            return
+        self.aiChatSendRequested.emit(payload)
+
+    def _emit_ai_chat_focus(self) -> None:
+        if not self._current_path:
+            return
+        self.aiChatPageFocusRequested.emit(self._current_path)
+
+    def _add_ai_chat_context_actions(self, menu: QMenu) -> None:
+        send_action = QAction("AI Chat: Send to Open Chat\tCtrl+Shift+J", self)
+        send_action.triggered.connect(self._emit_ai_chat_send)
+        start_action = QAction("AI Chat: Start Chat with this Page\tCtrl+Shift+K", self)
+        start_action.setEnabled(bool(self._current_path))
+        start_action.triggered.connect(self._emit_ai_chat_focus)
+        first = menu.actions()[0] if menu.actions() else None
+        menu.insertAction(first, start_action)
+        menu.insertAction(first, send_action)
     
     def dragEnterEvent(self, event):  # type: ignore[override]
         """Accept drag events with file URLs."""
