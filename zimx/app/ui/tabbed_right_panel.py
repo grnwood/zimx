@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import Optional
+import httpx
 import os
 import time
+from typing import Optional
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QTabWidget, QWidget, QMenu
@@ -32,7 +33,13 @@ class TabbedRightPanel(QWidget):
     openLinkWindowRequested = Signal()
     openAiWindowRequested = Signal()
     
-    def __init__(self, parent=None, enable_ai_chats: bool = False, ai_chat_font_size: int = 13) -> None:
+    def __init__(
+        self,
+        parent=None,
+        enable_ai_chats: bool = False,
+        ai_chat_font_size: int = 13,
+        http_client: Optional[httpx.Client] = None,
+    ) -> None:
         super().__init__(parent)
         
         # Create tab widget
@@ -50,7 +57,7 @@ class TabbedRightPanel(QWidget):
         self.tabs.addTab(self.calendar_panel, "Calendar")
         
         # Create Attachments tab
-        self.attachments_panel = AttachmentsPanel()
+        self.attachments_panel = AttachmentsPanel(api_client=http_client)
         self.tabs.addTab(self.attachments_panel, "Attachments")
 
         # Create Link Navigator tab
@@ -96,6 +103,7 @@ class TabbedRightPanel(QWidget):
         if vault_root:
             self.task_panel.set_vault_root(vault_root)
             self.calendar_panel.set_vault_root(vault_root)
+        self.attachments_panel.set_vault_root(vault_root)
         if self.ai_chat_panel:
             self.ai_chat_panel.set_vault_root(vault_root)
     

@@ -44,6 +44,7 @@ def _resource_candidates(rel_path: str) -> list[str]:
     # Package-relative (developer mode)
     pkg_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     candidates.append(os.path.join(pkg_root, rel_path))
+    candidates.append(os.path.join(pkg_root, "zimx", rel_path))
     return candidates
 
 

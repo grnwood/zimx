@@ -866,6 +866,19 @@ def _get_conn() -> Optional[sqlite3.Connection]:
     return _ACTIVE_CONN
 
 
+def _vault_db_path() -> Optional[Path]:
+    if _ACTIVE_ROOT is None:
+        return None
+    return _ACTIVE_ROOT / ".zimx" / "settings.db"
+
+
+def _connect_to_vault_db() -> sqlite3.Connection:
+    db_path = _vault_db_path()
+    if not db_path or not db_path.exists():
+        raise RuntimeError("Vault database is not initialized.")
+    return sqlite3.connect(db_path, check_same_thread=False)
+
+
 def _ensure_task_columns(conn: sqlite3.Connection) -> None:
     """Add newly introduced task columns for existing vault databases."""
     existing = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
@@ -925,7 +938,76 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             path TEXT PRIMARY KEY,
             position INTEGER
         );
+        CREATE TABLE IF NOT EXISTS attachments (
+            attachment_path TEXT PRIMARY KEY,
+            page_path TEXT NOT NULL,
+            stored_path TEXT NOT NULL,
+            updated REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_attachments_page ON attachments(page_path);
         """
     )
     _ensure_task_columns(conn)
     conn.commit()
+
+
+def _normalize_vault_relative_path(path: str) -> str:
+    """Return a vault-relative path with a leading slash."""
+    cleaned = path.strip().replace("\\", "/")
+    cleaned = cleaned.lstrip("/")
+    return f"/{cleaned}" if cleaned else "/"
+
+
+def list_page_attachments(page_path: str) -> list[dict]:
+    """Return index rows for attachments belonging to a page."""
+    db_path = _vault_db_path()
+    if not db_path:
+        return []
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    try:
+        page_key = _normalize_vault_relative_path(page_path)
+        rows = conn.execute(
+            "SELECT attachment_path, stored_path, updated FROM attachments WHERE page_path = ? ORDER BY attachment_path",
+            (page_key,),
+        ).fetchall()
+        return [
+            {"attachment_path": row[0], "stored_path": row[1], "updated": row[2]}
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
+def upsert_attachment_entry(page_path: str, attachment_path: str, stored_path: str, updated: float | None = None) -> None:
+    """Insert or update an attachment index entry."""
+    conn = _connect_to_vault_db()
+    page_key = _normalize_vault_relative_path(page_path)
+    attachment_key = _normalize_vault_relative_path(attachment_path)
+    timestamp = updated if updated is not None else time.time()
+    try:
+        conn.execute(
+            """
+            INSERT INTO attachments (attachment_path, page_path, stored_path, updated)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(attachment_path) DO UPDATE SET
+                page_path = excluded.page_path,
+                stored_path = excluded.stored_path,
+                updated = excluded.updated
+            """,
+            (attachment_key, page_key, stored_path, timestamp),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_attachment_entry(attachment_path: str) -> bool:
+    """Remove an attachment entry from the index."""
+    conn = _connect_to_vault_db()
+    try:
+        attachment_key = _normalize_vault_relative_path(attachment_path)
+        cur = conn.execute("DELETE FROM attachments WHERE attachment_path = ?", (attachment_key,))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()

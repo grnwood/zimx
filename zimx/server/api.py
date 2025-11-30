@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import List, Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, File as FastAPISingleFile, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -13,6 +14,26 @@ from . import indexer
 from .adapters import files, tasks
 from .adapters.files import FileAccessError
 from .state import vault_state
+from zimx.app import config
+
+_LOCAL_FILE_OPS_ENABLED = os.getenv("ATTACHMENTS_LOCAL_FILE_OPS", "0") not in (
+    "0",
+    "false",
+    "False",
+    "",
+    None,
+)
+
+_LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def _should_use_local_file_ops(request: Request) -> bool:
+    if not _LOCAL_FILE_OPS_ENABLED:
+        return False
+    client = request.client
+    if not client:
+        return False
+    return client.host in _LOCAL_HOSTS
 
 
 class FilePathPayload(BaseModel):
@@ -39,6 +60,10 @@ class CreatePathPayload(BaseModel):
 
 class DeletePathPayload(BaseModel):
     path: str
+
+
+class AttachmentDeletePayload(BaseModel):
+    paths: List[str] = Field(..., description="Vault-relative attachment paths to delete")
 
 
 class ChatPayload(BaseModel):
@@ -178,6 +203,107 @@ def delete_path(payload: DeletePathPayload) -> dict:
     except FileAccessError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True}
+
+
+@app.post("/files/attach")
+def attach_files(
+    request: Request,
+    page_path: str = Form(...),
+    files: List[UploadFile] = FastAPISingleFile(...),
+) -> dict:
+    root = _get_vault_root()
+    normalized_page = _vault_relative_path(page_path)
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded")
+    stored_paths: list[str] = []
+    use_local_ops = _should_use_local_file_ops(request)
+    for upload in files:
+        stored_paths.append(_store_attachment(root, normalized_page, upload, use_local_ops))
+    _log_attachment(f"Attached {len(stored_paths)} file(s) for {normalized_page}")
+    return {"ok": True, "page": normalized_page, "attachments": stored_paths}
+
+
+@app.get("/files/")
+def list_files(page_path: str) -> dict:
+    _get_vault_root()
+    normalized_page = _vault_relative_path(page_path)
+    attachments = config.list_page_attachments(normalized_page)
+    _log_attachment(f"Listed {len(attachments)} attachment(s) for {normalized_page}")
+    return {"attachments": attachments}
+
+
+@app.post("/files/delete")
+def delete_files(request: Request, payload: AttachmentDeletePayload) -> dict:
+    root = _get_vault_root()
+    deleted: list[str] = []
+    use_local_ops = _should_use_local_file_ops(request)
+    seen: set[str] = set()
+    for path in payload.paths:
+        normalized = _vault_relative_path(path)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        _remove_attachment_copy(root, normalized, use_local_ops)
+        if config.delete_attachment_entry(normalized):
+            deleted.append(normalized)
+    _log_attachment(f"Deleted {len(deleted)} attachment(s)")
+    return {"ok": True, "deleted": deleted}
+
+
+def _log_attachment(message: str) -> None:
+    print(f"[Attachments] {message}")
+
+
+def _vault_relative_path(path: str) -> str:
+    cleaned = path.strip().replace("\\", "/").lstrip("/")
+    return f"/{cleaned}" if cleaned else "/"
+
+
+def _get_vault_root() -> Path:
+    try:
+        return vault_state.get_root()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _store_attachment(root: Path, page_path: str, upload: UploadFile, use_local_ops: bool) -> str:
+    filename = Path(upload.filename).name
+    if not filename:
+        raise HTTPException(status_code=400, detail="Attachment filename is required")
+    page_parts = Path(page_path.lstrip("/"))
+    attachment_rel = page_parts.parent / filename
+    attachment_normalized = f"/{attachment_rel.as_posix()}" if attachment_rel.as_posix() else f"/{filename}"
+    dest_path = root / attachment_rel
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    log_msg = f"receive file {attachment_normalized} to vault {dest_path}"
+    if use_local_ops and dest_path.exists():
+        log_msg += " (server==client)"
+    else:
+        try:
+            upload.file.seek(0)
+            with dest_path.open("wb") as dest:
+                shutil.copyfileobj(upload.file, dest)
+        except OSError as exc:
+            _log_attachment(f"Failed to persist {attachment_normalized}: {exc}")
+            raise HTTPException(status_code=500, detail=f"Failed to persist attachment: {exc}") from exc
+    _log_attachment(log_msg)
+    config.upsert_attachment_entry(page_path, attachment_normalized, str(dest_path))
+    return attachment_normalized
+
+
+def _remove_attachment_copy(root: Path, attachment_path: str, use_local_ops: bool) -> None:
+    target = root / attachment_path.lstrip("/")
+    if not target.exists():
+        _log_attachment(f"delete file {attachment_path} missing at {target}")
+        return
+    try:
+        target.unlink()
+        msg = f"delete file {attachment_path} from vault {target}"
+        if use_local_ops:
+            msg += " (server==client)"
+        _log_attachment(msg)
+    except OSError as exc:
+        _log_attachment(f"Failed to delete file {attachment_path}: {exc}")
 
 
 # Function to render the link

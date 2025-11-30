@@ -335,7 +335,9 @@ class MainWindow(QMainWindow):
         self.editor.verticalScrollBar().rangeChanged.connect(lambda *_: (self._update_toc_visibility(), self._position_toc_widget()))
 
         self.right_panel = TabbedRightPanel(
-            enable_ai_chats=config.load_enable_ai_chats(), ai_chat_font_size=config.load_ai_chat_font_size()
+            enable_ai_chats=config.load_enable_ai_chats(),
+            ai_chat_font_size=config.load_ai_chat_font_size(),
+            http_client=self.http,
         )
         self.right_panel.refresh_tasks()
         self.right_panel.taskActivated.connect(self._open_task_from_panel)

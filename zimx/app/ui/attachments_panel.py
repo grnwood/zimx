@@ -1,23 +1,29 @@
 from __future__ import annotations
 
+import contextlib
+import itertools
+import os
+import shutil
+import time
 from pathlib import Path
 from typing import Optional
-import os
-import time
+
+import httpx
 
 from PySide6.QtCore import Qt, QUrl, QSize, QMimeData
 from PySide6.QtGui import QIcon, QPixmap, QDesktopServices, QDrag
 from PySide6.QtWidgets import (
+    QApplication,
+    QStyle,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
     QListWidget,
     QListWidgetItem,
     QToolButton,
+    QFileDialog,
     QFileIconProvider,
 )
-
-from zimx.app import config
 
 _DETAILED_LOGGING = os.getenv("ZIMX_DETAILED_LOGGING", "0") not in ("0", "false", "False", "", None)
 _PAGE_LOGGING = os.getenv("ZIMX_DETAILED_PAGE_LOGGING", "0") not in ("0", "false", "False", "", None)
@@ -45,9 +51,12 @@ class AttachmentsListWidget(QListWidget):
 
 class AttachmentsPanel(QWidget):
     """Panel showing attachments (files) in the current page's folder."""
-    
-    def __init__(self, parent=None) -> None:
+
+    def __init__(self, parent=None, api_client: Optional[httpx.Client] = None) -> None:
         super().__init__(parent)
+        self.vault_root: Optional[Path] = None
+        self._page_attachment_cache: dict[str, set[str]] = {}
+        self._http_client = api_client
         
         self.current_page_path: Optional[Path] = None
         self.zoom_level = 0  # 0=list, 1=small icons, 2=medium icons, 3=large icons
@@ -57,15 +66,36 @@ class AttachmentsPanel(QWidget):
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(5, 5, 5, 5)
         
+        self.add_button = QToolButton()
+        self.add_button.setText("+")
+        self.add_button.setToolTip("Add attachments")
+        self.add_button.clicked.connect(self._add_attachments)
+        self.add_button.setEnabled(False)
+        toolbar.addWidget(self.add_button)
+
+        self.remove_button = QToolButton()
+        self.remove_button.setText("−")
+        self.remove_button.setToolTip("Remove selected attachments")
+        self.remove_button.clicked.connect(self._remove_selected_attachments)
+        self.remove_button.setEnabled(False)
+        toolbar.addWidget(self.remove_button)
+
         self.open_folder_button = QToolButton()
-        self.open_folder_button.setText("📁")  # Folder icon
+        folder_icon = None
+        style = QApplication.instance().style() if QApplication.instance() else None
+        if style:
+            folder_icon = style.standardIcon(QStyle.SP_DirIcon)
+        if folder_icon:
+            self.open_folder_button.setIcon(folder_icon)
+        else:
+            self.open_folder_button.setText("📁")
         self.open_folder_button.setToolTip("Open folder in file manager")
         self.open_folder_button.clicked.connect(self._open_folder)
         self.open_folder_button.setEnabled(False)
         toolbar.addWidget(self.open_folder_button)
         
         self.refresh_button = QToolButton()
-        self.refresh_button.setText("🔄")  # Refresh icon
+        self.refresh_button.setText("↺")  # Refresh icon
         self.refresh_button.setToolTip("Refresh attachments list")
         self.refresh_button.clicked.connect(self._refresh_attachments)
         self.refresh_button.setEnabled(False)
@@ -92,6 +122,7 @@ class AttachmentsPanel(QWidget):
         self.attachments_list.itemDoubleClicked.connect(self._open_attachment)
         self.attachments_list.setDragEnabled(True)
         self.attachments_list.setDragDropMode(QListWidget.DragOnly)
+        self.attachments_list.itemSelectionChanged.connect(self._update_remove_button_state)
         
         # Layout
         layout = QVBoxLayout()
@@ -107,6 +138,16 @@ class AttachmentsPanel(QWidget):
         self._refresh_attachments()
         if _PAGE_LOGGING:
             print(f"[PageLoadAndRender] attachments set_page elapsed={(time.perf_counter()-t0)*1000:.1f}ms")
+    
+    def focusInEvent(self, event) -> None:
+        """Refresh attachments whenever the panel gains focus."""
+        super().focusInEvent(event)
+        self._refresh_attachments()
+
+    def set_vault_root(self, vault_root: Optional[str]) -> None:
+        """Track the active vault root so attachments can be normalized."""
+        self.vault_root = Path(vault_root) if vault_root else None
+        self._page_attachment_cache.clear()
     
     def _refresh_attachments(self) -> None:
         """Refresh the list of attachments for the current page."""
@@ -134,15 +175,18 @@ class AttachmentsPanel(QWidget):
         if not page_folder.exists() or not page_folder.is_dir():
             self.open_folder_button.setEnabled(False)
             self.refresh_button.setEnabled(False)
+            self.add_button.setEnabled(False)
             return
         
         self.open_folder_button.setEnabled(True)
         self.refresh_button.setEnabled(True)
+        self.add_button.setEnabled(True)
         
         # Update view mode based on zoom level
         self._update_view_mode()
         
         # List all files in the folder (excluding the page text file itself)
+        attachments: list[Path] = []
         try:
             files = sorted(page_folder.iterdir(), key=lambda p: p.name.lower())
             t_list = time.perf_counter()
@@ -152,27 +196,16 @@ class AttachmentsPanel(QWidget):
                 if _DETAILED_LOGGING:
                     print(f"[Attachments] Checking file: {file_path}")
                 if file_path.is_file() and file_path != self.current_page_path:
+                    attachments.append(file_path)
                     item = QListWidgetItem()
                     item.setData(Qt.UserRole, str(file_path))
-                    
+
                     # Set icon based on view mode
-                    if self.zoom_level == 0:
-                        # List view with emoji icons
-                        if file_path.suffix.lower() in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg']:
-                            item.setText(f"🖼️ {file_path.name}")
-                        elif file_path.suffix.lower() in ['.pdf']:
-                            item.setText(f"📄 {file_path.name}")
-                        elif file_path.suffix.lower() in ['.txt', '.md']:
-                            item.setText(f"📝 {file_path.name}")
-                        else:
-                            item.setText(f"📎 {file_path.name}")
-                    else:
-                        # Icon view
-                        item.setText(file_path.name)
-                        icon = self._get_file_icon(file_path)
-                        if icon:
-                            item.setIcon(icon)
-                    
+                    item.setText(file_path.name if self.zoom_level > 0 else file_path.name)
+                    icon = self._get_file_icon(file_path)
+                    if icon:
+                        item.setIcon(icon)
+
                     self.attachments_list.addItem(item)
             if _PAGE_LOGGING:
                 print(
@@ -183,6 +216,146 @@ class AttachmentsPanel(QWidget):
         else:
             if _PAGE_LOGGING:
                 print(f"[PageLoadAndRender] attachments refresh total={(time.perf_counter()-t0)*1000:.1f}ms")
+            self._sync_with_server(attachments)
+        self._update_remove_button_state()
+
+    def _add_attachments(self) -> None:
+        """Prompt user to add attachments via the OS file picker."""
+        if not self.current_page_path:
+            return
+        page_folder = self.current_page_path.parent
+        if not page_folder.exists():
+            page_folder.mkdir(parents=True, exist_ok=True)
+        options = QFileDialog.Options()
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Add Attachments",
+            str(page_folder),
+            options=options,
+        )
+        if not files:
+            return
+        for file_path in files:
+            src = Path(file_path)
+            if not src.exists():
+                continue
+            dest = self._unique_destination(page_folder, src.name)
+            try:
+                shutil.copy2(src, dest)
+            except OSError as exc:
+                print(f"[Attachments] Failed to copy {src}: {exc}")
+        self._refresh_attachments()
+
+    def _unique_destination(self, folder: Path, name: str) -> Path:
+        base = Path(name)
+        candidate = folder / name
+        if not candidate.exists():
+            return candidate
+        for idx in itertools.count(1):
+            candidate = folder / f"{base.stem} ({idx}){base.suffix}"
+            if not candidate.exists():
+                return candidate
+
+    def _remove_selected_attachments(self) -> None:
+        selected = self.attachments_list.selectedItems()
+        if not selected or not self.current_page_path:
+            return
+        to_delete: set[str] = set()
+        for item in selected:
+            file_path_str = item.data(Qt.UserRole)
+            if not file_path_str:
+                continue
+            path = Path(file_path_str)
+            try:
+                if path.exists():
+                    path.unlink()
+            except OSError as exc:
+                print(f"[Attachments] Failed to delete {path}: {exc}")
+            rel = self._attachment_relative_path(path)
+            if rel:
+                to_delete.add(rel)
+        if to_delete:
+            self._delete_removed_attachments(to_delete)
+        self._refresh_attachments()
+
+    def _current_page_key(self) -> Optional[str]:
+        if not self.current_page_path or not self.vault_root:
+            return None
+        try:
+            rel = self.current_page_path.relative_to(self.vault_root)
+        except ValueError:
+            return None
+        return f"/{rel.as_posix()}"
+
+    def _attachment_relative_path(self, path: Path) -> Optional[str]:
+        if not self.vault_root:
+            return None
+        try:
+            rel = path.relative_to(self.vault_root)
+        except ValueError:
+            return None
+        return f"/{rel.as_posix()}"
+
+    def _sync_with_server(self, attachments: list[Path]) -> None:
+        page_key = self._current_page_key()
+        if not page_key or not self._http_client:
+            return
+        current_map: dict[str, Path] = {}
+        for attachment in attachments:
+            rel = self._attachment_relative_path(attachment)
+            if rel:
+                current_map[rel] = attachment
+        known = self._page_attachment_cache.setdefault(page_key, set())
+        added = set(current_map.keys()) - known
+        removed = set(known) - set(current_map.keys())
+        if added and self._upload_new_attachments(page_key, added, current_map):
+            known.update(added)
+        if removed and self._delete_removed_attachments(removed):
+            known.difference_update(removed)
+
+    def _update_remove_button_state(self) -> None:
+        enabled = bool(self.attachments_list.selectedItems())
+        self.remove_button.setEnabled(enabled)
+
+    def _upload_new_attachments(
+        self,
+        page_key: str,
+        added: set[str],
+        mapping: dict[str, Path],
+    ) -> bool:
+        with contextlib.ExitStack() as stack:
+            multipart = []
+            for rel_path in sorted(added):
+                file_path = mapping.get(rel_path)
+                if not file_path or not file_path.exists():
+                    continue
+                stream = stack.enter_context(open(file_path, "rb"))
+                multipart.append(("files", (file_path.name, stream, "application/octet-stream")))
+            if not multipart:
+                return False
+            try:
+                resp = self._http_client.post("/files/attach", data={"page_path": page_key}, files=multipart)
+                resp.raise_for_status()
+                print(f"[Attachments] uploaded {len(multipart)} attachment(s) for {page_key}")
+                return True
+            except httpx.HTTPError as exc:
+                print(f"[Attachments] failed to upload attachments for {page_key}: {exc}")
+                return False
+
+    def _delete_removed_attachments(self, removed: set[str]) -> bool:
+        if not removed:
+            return True
+        if not self._http_client:
+            print(f"[Attachments] skipped server delete for {len(removed)} file(s) (no API client)")
+            return True
+        try:
+            resp = self._http_client.post("/files/delete", json={"paths": sorted(removed)})
+            resp.raise_for_status()
+            print(f"[Attachments] deleted {len(removed)} attachment(s) for panel")
+            return True
+        except httpx.HTTPError as exc:
+            print(f"[Attachments] failed to delete attachments on server: {exc}")
+            return False
     
     def _get_file_icon(self, file_path: Path) -> QIcon:
         """Get an icon for a file - thumbnail for images, OS icon for others."""
