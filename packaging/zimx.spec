@@ -30,13 +30,13 @@ hidden = collect_submodules('PySide6') + [
 
 ZIMX_VERSION = os.getenv('ZIMX_VERSION','0.1.0')
 
-# Data files: templates + optional icon.png for in‑app use
+# Data files: templates + bundled assets
 _datas = [
     (os.path.join(ROOT, 'zimx', 'templates'), 'zimx/templates'),
 ]
-_icon_png = os.path.join(ROOT, 'assets', 'icon.png')
-if os.path.exists(_icon_png):
-    _datas.append((_icon_png, 'assets'))
+_assets_dir = os.path.join(ROOT, 'zimx', 'assets')
+if os.path.exists(_assets_dir):
+    _datas.append((_assets_dir, 'assets'))
 
 datas = _datas
 
@@ -62,7 +62,7 @@ a = Analysis(
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 # Onedir bundle: exe + COLLECT for folder distribution (faster startup)
-_icon_ico = os.path.join(ROOT, 'assets', 'icon.ico')
+_icon_ico = os.path.join(_assets_dir, 'icon.ico')
 exe = EXE(
     pyz,
     a.scripts,
@@ -87,4 +87,3 @@ coll = COLLECT(
     upx=True,
     name='ZimX'
 )
-

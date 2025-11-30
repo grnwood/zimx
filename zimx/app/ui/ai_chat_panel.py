@@ -4,8 +4,10 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 import html
 import re
@@ -55,13 +57,49 @@ SERVER_CONFIG_FILE = PROJECT_ROOT / "slipstream" / "server_configs.json"
 DEFAULT_API_URL = os.getenv("PUBLISHED_API", "http://localhost:3000")
 DEFAULT_API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
 
+@lru_cache(maxsize=1)
+def _get_asset_directory() -> Path:
+    """Return the first available assets directory from likely candidate locations."""
+    rel_paths = (Path("assets"), Path("zimx") / "assets")
+    candidates: list[Path] = []
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        base_path = Path(base)
+        candidates.extend(base_path / rel for rel in rel_paths)
+        candidates.extend(base_path / "_internal" / rel for rel in rel_paths)
+    try:
+        exe_dir = Path(sys.argv[0]).resolve().parent
+    except Exception:
+        exe_dir = None
+    if exe_dir:
+        candidates.extend(exe_dir / rel for rel in rel_paths)
+        candidates.extend(exe_dir / "_internal" / rel for rel in rel_paths)
+    candidates.append(ASSETS_DIR)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return ASSETS_DIR
+
+
+def _resolve_asset_path(name: str) -> Optional[Path]:
+    """Return a usable Path to an asset, or None if it does not exist."""
+    asset_dir = _get_asset_directory()
+    path = asset_dir / name
+    return path if path.exists() else None
+
+
 def _asset_uri(name: str) -> str:
-    path = ASSETS_DIR / name
-    return path.resolve().as_uri()
+    path = _resolve_asset_path(name)
+    if not path:
+        return ""
+    try:
+        return path.resolve().as_uri()
+    except Exception:
+        return ""
 
 def _load_icon(name: str, size: QSize = QSize(24, 24)) -> QIcon:
-    path = ASSETS_DIR / name
-    if not path.exists():
+    path = _resolve_asset_path(name)
+    if not path:
         return QIcon()
     ext = path.suffix.lower()
     if ext == ".svg":
@@ -93,20 +131,20 @@ def _icon_tag(name: str, tooltip: str, size: int = 10) -> str:
     from PySide6.QtCore import QSize, Qt
     import hashlib
 
-    path = ASSETS_DIR / name
-    ext = path.suffix.lower()
+    asset_path = _resolve_asset_path(name)
+    ext = asset_path.suffix.lower() if asset_path else ""
     ICON_SIZE = size
-    if not path.exists():
+    if not asset_path:
         # Fallback: return a blank or placeholder icon
         return f"<span title='{tooltip}' style='display:inline-block;width:{ICON_SIZE}px;height:{ICON_SIZE}px;vertical-align:middle;margin:0 4px;'></span>"
     if ext == ".svg":
         # Cache PNG in /tmp/zimx_icons/
         cache_dir = Path(tempfile.gettempdir()) / "zimx_icons"
         cache_dir.mkdir(parents=True, exist_ok=True)
-        hashval = hashlib.md5((str(path) + "_white" + str(ICON_SIZE)).encode()).hexdigest()
-        png_path = cache_dir / f"{path.stem}_{hashval}.png"
-        if not png_path.exists() or png_path.stat().st_mtime < path.stat().st_mtime:
-            renderer = QSvgRenderer(str(path))
+        hashval = hashlib.md5((str(asset_path) + "_white" + str(ICON_SIZE)).encode()).hexdigest()
+        png_path = cache_dir / f"{asset_path.stem}_{hashval}.png"
+        if not png_path.exists() or png_path.stat().st_mtime < asset_path.stat().st_mtime:
+            renderer = QSvgRenderer(str(asset_path))
             pixmap = QPixmap(QSize(ICON_SIZE, ICON_SIZE))
             pixmap.fill(Qt.transparent)
             painter = QPainter(pixmap)
@@ -118,7 +156,7 @@ def _icon_tag(name: str, tooltip: str, size: int = 10) -> str:
             pixmap.save(str(png_path), "PNG")
         img_uri = png_path.as_uri()
     else:
-        img_uri = _asset_uri(name) if path.exists() else ""
+        img_uri = _asset_uri(name)
     return (
         f"<img src='{img_uri}' title='{tooltip}' "
         f"style='width:{ICON_SIZE}px;height:{ICON_SIZE}px;vertical-align:middle;margin:0 4px;'/>"
