@@ -206,6 +206,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, api_base: str) -> None:
         super().__init__()
+        self._vi_debug =  True
         self.setWindowTitle("ZimX Desktop")
         self.api_base = api_base.rstrip("/")
         self.http = httpx.Client(base_url=self.api_base, timeout=10.0)
@@ -373,9 +374,7 @@ class MainWindow(QMainWindow):
 
         # Vi-mode state
         self._vi_mode_active = False
-        # Optional vi debug logging (set True to enable noisy logs)
-        self._vi_debug = False
-
+       
         self.editor_split = QSplitter()
         self.editor_split.addWidget(self.editor)
         self.editor_split.addWidget(self.right_panel)
