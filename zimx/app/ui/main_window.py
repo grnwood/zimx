@@ -3966,6 +3966,16 @@ class MainWindow(QMainWindow):
         mods = event.modifiers()
         shift = bool(mods & Qt.ShiftModifier)
         alt = bool(mods & Qt.AltModifier)
+        if self._vi_debug:
+            mods_val = mods
+            try:
+                mods_val = int(mods)  # type: ignore[arg-type]
+            except Exception:
+                try:
+                    mods_val = int(getattr(mods, "value", mods))  # type: ignore[arg-type]
+                except Exception:
+                    pass
+            self._debug(f"Vi-mode key event: key={key} text='{text}' shift={shift} alt={alt} mods={mods_val}")
         # AltGr on Windows sends Ctrl+Alt; if this produced ";" / ":" we should still map End.
         altgr_semicolon = text in (";", ":") and bool(mods & Qt.ControlModifier) and bool(mods & Qt.AltModifier)
 
