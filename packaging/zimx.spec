@@ -36,6 +36,7 @@ hidden = (
         'starlette',
         'chromadb.api.rust',
         'python_multipart',
+        'multipart',
     ]
     + collect_submodules('chromadb')
     + collect_submodules('onnxruntime')
