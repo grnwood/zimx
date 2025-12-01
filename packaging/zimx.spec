@@ -40,6 +40,7 @@ hidden = (
     + collect_submodules('chromadb')
     + collect_submodules('onnxruntime')
     + collect_submodules('tokenizers')
+    + collect_submodules('docx')
 )
 
 ZIMX_VERSION = os.getenv('ZIMX_VERSION','0.1.0')
