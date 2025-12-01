@@ -34,10 +34,9 @@ hidden = (
         'jinja2',
         'anyio',
         'starlette',
-        'chromadb.api.rust',
-        'python_multipart',
-        'multipart',
+        'chromadb.api.rust'
     ]
+    + collect_submodules('multipart')
     + collect_submodules('chromadb')
     + collect_submodules('onnxruntime')
     + collect_submodules('tokenizers')
