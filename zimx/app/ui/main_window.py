@@ -3925,9 +3925,9 @@ class MainWindow(QMainWindow):
                 if target:
                     mapping = self._translate_vi_key_event(event)
                     if mapping:
+                        key_name = chr(event.key()) if Qt.Key_A <= event.key() <= Qt.Key_Z else f"Key_{event.key()}"
                         if self._vi_debug:
-                            key_name = chr(event.key()) if Qt.Key_A <= event.key() <= Qt.Key_Z else f"Key_{event.key()}"
-                            self._debug(f"Vi-mode: {key_name} -> {mapping[0]} with mods {mapping[1]}")
+                           self._debug(f"Vi-mode: {key_name} -> {mapping[0]} with mods {mapping[1]}")
                         self._dispatch_vi_navigation(target, mapping)
                         return True
                     # Block unmapped letter keys ONLY if they don't have Control modifier
