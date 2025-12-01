@@ -1,3 +1,21 @@
+ # --- Fix for FastAPI + PyInstaller + python-multipart ---
+try:
+    import importlib
+
+    multipart = importlib.import_module("multipart")
+    # FastAPI checks for multipart.__version__ to verify python-multipart
+    if not getattr(multipart, "__version__", None):
+        try:
+            # Try to get the real version from the installed dist
+            import pkg_resources
+            multipart.__version__ = pkg_resources.get_distribution("python-multipart").version
+        except Exception:
+            # Fallback: any non-empty string will satisfy FastAPI's check
+            multipart.__version__ = "0.0.0"
+except ImportError:
+    # If multipart truly isn't installed, FastAPI will still raise a clear error later
+    pass
+ # --- end fix ---
 from __future__ import annotations
 
 import os
