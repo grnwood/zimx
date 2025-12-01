@@ -6,6 +6,7 @@ import os
 import sqlite3
 import sys
 from collections import Counter
+import copy
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -1109,7 +1110,8 @@ class AIChatPanel(QtWidgets.QWidget):
         self._unsent_buffer: str = ""
         self._building_tree = False
         self._current_chat_path = None
-        self.system_prompts = []
+        self.system_prompts: list[dict[str, str]] = []
+        self.system_prompts_tree: dict = {}
         self.current_system_prompt = None
         self.font_size = font_size
         self.condense_prompt = self._load_condense_prompt()
@@ -2433,6 +2435,7 @@ class AIChatPanel(QtWidgets.QWidget):
                 merged_systems.append(extra_system)
             if merged_systems:
                 blocks.insert(0, {"role": "system", "content": "\n\n".join(merged_systems)})
+                _log_ai_chat(f"[system prompt] sending {len(merged_systems)} system block(s); primary:\n{merged_systems[-1]}")
             self._api_worker = ApiWorker(self.current_server, blocks, self.model_combo.currentText(), stream=True)
             self._api_worker.chunk.connect(lambda chunk, idx=assistant_index: self._handle_chunk(idx, chunk))
             self._api_worker.finished.connect(lambda full, idx=assistant_index: self._handle_finished(idx, full))
@@ -2663,24 +2666,40 @@ class AIChatPanel(QtWidgets.QWidget):
 
     def _load_system_prompts(self):
         self.system_prompts = []
-        base = self.vault_root or str(Path.home())
-        prompts_path = Path(base) / ".zimx" / "ai-system-prompts.json"
-        if prompts_path.exists():
-            try:
-                with open(prompts_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, list):
-                    for entry in data:
-                        if isinstance(entry, dict):
-                            name = entry.get("name")
-                            text = entry.get("text")
-                            if name and text:
-                                self.system_prompts.append({"name": name, "text": text})
-            except Exception:
-                pass
-        if not self.system_prompts:
-            self.system_prompts = [{"name": "Default", "text": "You are a helpful assistant."}]
-        self.prompts_path = prompts_path
+        self.system_prompts_tree = {}
+        home_prompts = Path.home() / ".zimx" / "ai-system-prompts.json"
+        vault_prompts: Optional[Path] = None
+        if self.vault_root:
+            vault_prompts = Path(self.vault_root) / ".zimx" / "ai-system-prompts.json"
+
+        source_paths = [home_prompts]
+        if vault_prompts and not home_prompts.exists():
+            source_paths.append(vault_prompts)
+        asset_path = _resolve_asset_path("ai-system-prompts.json")
+        if asset_path and not home_prompts.exists():
+            source_paths.append(asset_path)
+
+        self._prompts_source_path: Optional[Path] = None
+        for path in source_paths:
+            if path and path.exists():
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    tree = self._normalize_prompt_tree(data)
+                    if tree:
+                        self.system_prompts_tree = tree
+                        self._prompts_source_path = path
+                        print(f"[AIChat][prompts] loaded system prompts from {path}")
+                        break
+                    print(f"[AIChat][prompts] {path} had no prompts after normalization, skipping.")
+                except Exception:
+                    print(f"[AIChat][prompts] failed to load {path}")
+                    continue
+
+        if not self.system_prompts_tree:
+            self.system_prompts_tree = {"User Defined": [{"name": "Default", "text": "You are a helpful assistant."}]}
+        self.system_prompts = self._flatten_prompt_tree(self.system_prompts_tree)
+        self.prompts_path = home_prompts
 
     def _save_system_prompts(self):
         if not hasattr(self, "prompts_path"):
@@ -2688,17 +2707,79 @@ class AIChatPanel(QtWidgets.QWidget):
         try:
             self.prompts_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.prompts_path, "w", encoding="utf-8") as f:
-                json.dump(self.system_prompts, f, indent=2)
+                json.dump(self.system_prompts_tree, f, indent=2)
         except Exception:
             pass
 
+    @staticmethod
+    def _normalize_prompt_tree(data: object) -> dict:
+        """Convert legacy list or nested dict to a consistent {category: prompts|subdict} tree."""
+        def _coerce_prompts(seq: object) -> list[dict]:
+            prompts: list[dict] = []
+            if isinstance(seq, list):
+                for entry in seq:
+                    if isinstance(entry, dict) and entry.get("text"):
+                        prompts.append({"name": entry.get("name", "Prompt"), "text": entry.get("text", "")})
+            return prompts
+
+        if isinstance(data, list):
+            return {"User Defined": _coerce_prompts(data)}
+        if not isinstance(data, dict):
+            return {}
+        tree: dict = {}
+        for key, val in data.items():
+            if isinstance(val, dict):
+                subtree = {}
+                for sub_key, sub_val in val.items():
+                    if isinstance(sub_val, dict):
+                        nested = {}
+                        for leaf_key, leaf_val in sub_val.items():
+                            prompts = _coerce_prompts(leaf_val)
+                            if prompts:
+                                nested[leaf_key] = prompts
+                        if nested:
+                            subtree[sub_key] = nested
+                    else:
+                        prompts = _coerce_prompts(sub_val)
+                        if prompts:
+                            subtree[sub_key] = prompts
+                if subtree:
+                    tree[key] = subtree
+            else:
+                prompts = _coerce_prompts(val)
+                if prompts:
+                    tree[key] = prompts
+        return tree
+
+    @staticmethod
+    def _flatten_prompt_tree(tree: dict) -> list[dict]:
+        """Flatten hierarchical prompts for quick access in other UI."""
+        flat: list[dict] = []
+
+        def _walk(node: object, path: list[str]):
+            if isinstance(node, list):
+                for entry in node:
+                    if isinstance(entry, dict) and entry.get("text"):
+                        flat.append({"name": entry.get("name", "Prompt"), "text": entry.get("text", ""), "path": list(path)})
+            elif isinstance(node, dict):
+                for key, val in node.items():
+                    _walk(val, path + [key])
+
+        _walk(tree, [])
+        return flat
+
     def _open_prompt_dialog(self):
-        dialog = SystemPromptDialog(self, prompts=list(self.system_prompts), current_prompt=self.current_system_prompt)
+        dialog = SystemPromptDialog(
+            self,
+            prompts_tree=copy.deepcopy(self.system_prompts_tree),
+            current_prompt=self.current_system_prompt,
+        )
         if dialog.exec() == QtWidgets.QDialog.Accepted and dialog.selected_prompt:
             self.current_system_prompt = dialog.selected_prompt
             if self.current_session_id:
                 self.store.update_session_system_prompt(self.current_session_id, self.current_system_prompt)
-            self.system_prompts = dialog.prompts
+            self.system_prompts_tree = dialog.prompt_tree
+            self.system_prompts = dialog.flattened_prompts
             self._save_system_prompts()
 
     def set_current_page(self, rel_path: Optional[str]) -> None:
@@ -2997,28 +3078,50 @@ class ContextListPopup(QtWidgets.QFrame):
                 return
 
 class SystemPromptDialog(QtWidgets.QDialog):
-    def __init__(self, parent=None, prompts: Optional[List[Dict[str, str]]] = None, current_prompt: Optional[str] = None):
+    def __init__(
+        self,
+        parent=None,
+        prompts_tree: Optional[Dict] = None,
+        current_prompt: Optional[str] = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("System Prompts")
-        self.prompts = prompts or []
+        self.prompt_tree = prompts_tree or {"User Defined": []}
+        self.flattened_prompts: list[dict] = []
         self.selected_prompt: Optional[str] = current_prompt
         self.resize(520, 520)
         self._dirty = False
         self._build_ui()
+        self._reload_tree()
         self._select_prompt_by_text(current_prompt)
 
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
 
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(QtWidgets.QLabel("Prompt:"))
+        row1 = QtWidgets.QHBoxLayout()
+        row1.addWidget(QtWidgets.QLabel("Category:"))
+        self.level1_combo = QtWidgets.QComboBox()
+        self.level1_combo.currentIndexChanged.connect(self._on_level1_changed)
+        row1.addWidget(self.level1_combo, 1)
+        layout.addLayout(row1)
+
+        row2 = QtWidgets.QHBoxLayout()
+        self.level2_label = QtWidgets.QLabel("Subcategory:")
+        row2.addWidget(self.level2_label)
+        self.level2_combo = QtWidgets.QComboBox()
+        self.level2_combo.currentIndexChanged.connect(self._on_level2_changed)
+        row2.addWidget(self.level2_combo, 1)
+        layout.addLayout(row2)
+
+        row3 = QtWidgets.QHBoxLayout()
+        row3.addWidget(QtWidgets.QLabel("Prompt:"))
         self.prompt_combo = QtWidgets.QComboBox()
-        self.prompt_combo.currentIndexChanged.connect(self._on_select)
-        row.addWidget(self.prompt_combo, 1)
+        self.prompt_combo.currentIndexChanged.connect(self._on_prompt_select)
+        row3.addWidget(self.prompt_combo, 1)
         del_btn = QtWidgets.QPushButton("Delete")
         del_btn.clicked.connect(self._delete_prompt)
-        row.addWidget(del_btn)
-        layout.addLayout(row)
+        row3.addWidget(del_btn)
+        layout.addLayout(row3)
 
         self.helper_label = QtWidgets.QLabel("Define how the AI should behave (role, tone, rules, formatting).")
         layout.addWidget(self.helper_label)
@@ -3042,24 +3145,69 @@ class SystemPromptDialog(QtWidgets.QDialog):
         btn_row.addStretch()
         btn_row.addWidget(ok_btn)
         layout.addLayout(btn_row)
-        self._reload_combo()
 
-    def _reload_combo(self):
+    def _reload_tree(self) -> None:
+        if not self.prompt_tree:
+            self.prompt_tree = {"User Defined": []}
+        self.flattened_prompts = self._flatten_prompt_tree(self.prompt_tree)
+        self.level1_combo.blockSignals(True)
+        self.level1_combo.clear()
+        for key in self.prompt_tree.keys():
+            self.level1_combo.addItem(key)
+        self.level1_combo.blockSignals(False)
+        if self.level1_combo.count() == 0:
+            self.prompt_combo.clear()
+            return
+        self._on_level1_changed(self.level1_combo.currentIndex())
+
+    def _on_level1_changed(self, idx: int):
+        key = self.level1_combo.currentText()
+        node = self.prompt_tree.get(key) if key else None
+        has_sub = isinstance(node, dict)
+        self.level2_combo.blockSignals(True)
+        self.level2_combo.clear()
+        if has_sub:
+            for sub in node.keys():
+                self.level2_combo.addItem(sub)
+            self.level2_combo.setVisible(True)
+            self.level2_label.setVisible(True)
+        else:
+            self.level2_combo.setVisible(False)
+            self.level2_label.setVisible(False)
+        self.level2_combo.blockSignals(False)
+        self._reload_prompt_combo()
+
+    def _on_level2_changed(self, idx: int):
+        self._reload_prompt_combo()
+
+    def _prompt_list_for_selection(self) -> list[dict]:
+        level1 = self.level1_combo.currentText()
+        node = self.prompt_tree.get(level1) if level1 else None
+        if isinstance(node, dict):
+            sub = self.level2_combo.currentText()
+            node = node.get(sub) if sub else None
+        return node if isinstance(node, list) else []
+
+    def _reload_prompt_combo(self):
+        prompts = self._prompt_list_for_selection()
         self.prompt_combo.blockSignals(True)
         self.prompt_combo.clear()
         self.prompt_combo.addItem("Add New...")
-        for prompt in self.prompts:
+        for prompt in prompts:
             self.prompt_combo.addItem(prompt.get("name", "Prompt"))
         self.prompt_combo.blockSignals(False)
-        self._update_save_button_label()
+        self._on_prompt_select(self.prompt_combo.currentIndex())
 
-    def _on_select(self, idx: int):
-        if idx <= 0:
+    def _on_prompt_select(self, idx: int):
+        prompts = self._prompt_list_for_selection()
+        if idx <= 0 or idx - 1 >= len(prompts):
             self.text_edit.clear()
+            self.selected_prompt = None
             self._update_save_button_label()
             return
-        self.text_edit.setPlainText(self.prompts[idx - 1].get("text", ""))
-        self.selected_prompt = self.prompts[idx - 1].get("text", "")
+        prompt = prompts[idx - 1]
+        self.text_edit.setPlainText(prompt.get("text", ""))
+        self.selected_prompt = prompt.get("text", "")
         self._dirty = False
         self._update_save_button_label()
 
@@ -3073,48 +3221,59 @@ class SystemPromptDialog(QtWidgets.QDialog):
             name, ok = QtWidgets.QInputDialog.getText(self, "Prompt name", "Name:")
             if not ok or not name.strip():
                 return
-            self.prompts.append({"name": name.strip(), "text": text})
-            self._reload_combo()
-            self.prompt_combo.setCurrentIndex(len(self.prompts))
+            target = self.prompt_tree.setdefault("User Defined", [])
+            if not isinstance(target, list):
+                target = []
+                self.prompt_tree["User Defined"] = target
+            target.append({"name": name.strip(), "text": text})
+            self._reload_tree()
+            self._select_prompt_by_text(text)
         else:
-            self.prompts[idx - 1]["text"] = text
+            prompts = self._prompt_list_for_selection()
+            if idx - 1 < len(prompts):
+                prompts[idx - 1]["text"] = text
             self._dirty = False
             self._update_save_button_label()
 
     def _delete_prompt(self):
         idx = self.prompt_combo.currentIndex()
-        if idx <= 0 or idx - 1 >= len(self.prompts):
+        prompts = self._prompt_list_for_selection()
+        if idx <= 0 or idx - 1 >= len(prompts):
             return
-        del self.prompts[idx - 1]
-        self._reload_combo()
+        del prompts[idx - 1]
+        self._reload_tree()
         self.text_edit.clear()
         self.selected_prompt = None
         self._update_save_button_label()
 
     def _import_prompts(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Import prompts", "system_prompts.json", "JSON files (*.json)")
+        default_dir = str(Path.home())
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Import prompts", str(Path(default_dir) / "ai-system-prompts.json"), "JSON files (*.json)"
+        )
         if not path:
             return
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            imported = []
-            if isinstance(data, list):
-                for entry in data:
-                    if isinstance(entry, dict) and "text" in entry:
-                        imported.append({"name": entry.get("name", "Prompt"), "text": entry.get("text", "")})
-            self.prompts.extend(imported)
-            self._reload_combo()
+            self.prompt_tree = AIChatPanel._normalize_prompt_tree(data)
+            self._reload_tree()
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Import failed", str(exc))
 
     def _export_prompts(self):
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export prompts", "system_prompts.json", "JSON files (*.json)")
+        default_dir = str(Path.home())
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export prompts",
+            str(Path(default_dir) / "ai-system-prompts.json"),
+            "JSON files (*.json)",
+        )
         if not path:
             return
         try:
             with open(path, "w", encoding="utf-8") as f:
-                json.dump(self.prompts, f, indent=2)
+                json.dump(self.prompt_tree, f, indent=2)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Export failed", str(exc))
 
@@ -3122,16 +3281,32 @@ class SystemPromptDialog(QtWidgets.QDialog):
         if not prompt_text:
             self.prompt_combo.setCurrentIndex(0)
             return
-        for idx, prompt in enumerate(self.prompts, start=1):
-            if prompt.get("text") == prompt_text:
-                self.prompt_combo.setCurrentIndex(idx)
-                return
+        for entry in self.flattened_prompts:
+            if entry.get("text") == prompt_text:
+                path = entry.get("path") or []
+                if path:
+                    level1 = path[0]
+                    idx1 = self.level1_combo.findText(level1)
+                    if idx1 >= 0:
+                        self.level1_combo.setCurrentIndex(idx1)
+                    if len(path) > 1:
+                        level2 = path[1]
+                        idx2 = self.level2_combo.findText(level2)
+                        if idx2 >= 0:
+                            self.level2_combo.setCurrentIndex(idx2)
+                    prompts = self._prompt_list_for_selection()
+                    for idx, prompt in enumerate(prompts, start=1):
+                        if prompt.get("text") == prompt_text:
+                            self.prompt_combo.setCurrentIndex(idx)
+                            return
+        self.text_edit.setPlainText("Prompt not found")
         self.prompt_combo.setCurrentIndex(0)
 
     def accept(self):
         idx = self.prompt_combo.currentIndex()
-        if idx > 0 and idx - 1 < len(self.prompts):
-            self.selected_prompt = self.prompts[idx - 1].get("text", "")
+        prompts = self._prompt_list_for_selection()
+        if idx > 0 and idx - 1 < len(prompts):
+            self.selected_prompt = prompts[idx - 1].get("text", "")
         else:
             self.selected_prompt = self.text_edit.toPlainText().strip() or None
         super().accept()
@@ -3153,3 +3328,19 @@ class SystemPromptDialog(QtWidgets.QDialog):
         if idx > 0:
             self._dirty = True
         self._update_save_button_label()
+
+    @staticmethod
+    def _flatten_prompt_tree(tree: dict) -> list[dict]:
+        flat: list[dict] = []
+
+        def _walk(node: object, path: list[str]):
+            if isinstance(node, list):
+                for entry in node:
+                    if isinstance(entry, dict) and entry.get("text"):
+                        flat.append({"name": entry.get("name", "Prompt"), "text": entry.get("text", ""), "path": list(path)})
+            elif isinstance(node, dict):
+                for key, val in node.items():
+                    _walk(val, path + [key])
+
+        _walk(tree, [])
+        return flat
