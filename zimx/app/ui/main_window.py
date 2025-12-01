@@ -3963,6 +3963,7 @@ class MainWindow(QMainWindow):
     def _translate_vi_key_event(self, event: QKeyEvent) -> tuple[int, Qt.KeyboardModifiers] | None:
         # Check for disallowed modifiers (but allow keys with only Shift or no modifiers)
         key = event.key()
+        text = event.text()
         shift = bool(event.modifiers() & Qt.ShiftModifier)
         alt = bool(event.modifiers() & Qt.AltModifier)
 
@@ -4047,9 +4048,13 @@ class MainWindow(QMainWindow):
             target_key = Qt.Key_Home
             if shift:
                 target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
-        elif key in (Qt.Key_Semicolon, Qt.Key_Colon):
+        elif key in (Qt.Key_Semicolon, Qt.Key_Colon) or text in (";", ":"):
+            # Some Windows layouts report this physical key as Key_Colon, and some layouts
+            # require Shift to produce ";" which would otherwise force Shift+End. Drive
+            # selection only when the character is ":" so ";" always maps to a plain End.
+            is_colon = key == Qt.Key_Colon or text == ":"
             target_key = Qt.Key_End
-            if shift:
+            if is_colon:
                 target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
         # Delete variants
         elif key == Qt.Key_D:
