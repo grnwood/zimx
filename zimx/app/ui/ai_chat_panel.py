@@ -822,6 +822,11 @@ class ApiWorker(QtCore.QThread):
         self.messages = messages
         self.model = model
         self.stream = stream
+        self._cancel_requested = False
+
+    def request_cancel(self) -> None:
+        """Ask the worker to stop streaming as soon as possible."""
+        self._cancel_requested = True
 
     def run(self) -> None:
         try:
@@ -836,6 +841,9 @@ class ApiWorker(QtCore.QThread):
                     resp.raise_for_status()
                     full = ""
                     for line in resp.iter_lines():
+                        if self._cancel_requested:
+                            self.failed.emit("Cancelled")
+                            return
                         if not line:
                             continue
                         decoded = line.decode("utf-8") if isinstance(line, (bytes, bytearray)) else str(line)
@@ -1107,12 +1115,15 @@ class AIChatPanel(QtWidgets.QWidget):
         self.condense_prompt = self._load_condense_prompt()
         self._condense_buffer = ""
         self._summary_content = None
+        self._cancel_pending_send = False
+        self._cancel_pending_condense = False
         self._build_ui()
         self._load_system_prompts()
         self._refresh_server_dropdown()
         self._refresh_model_dropdown(initial=True)
         self._load_chat_tree()
         self._select_default_chat()
+        self._update_stop_button()
 
     def _config_default_server(self) -> Optional[str]:
         try:
@@ -1245,6 +1256,14 @@ class AIChatPanel(QtWidgets.QWidget):
         self.condense_btn.setIconSize(QSize(10, 10))
         self.condense_btn.clicked.connect(self._condense_chat)
         self.condense_btn.setFixedWidth(28)
+        self.stop_btn = QtWidgets.QToolButton()
+        self.stop_btn.setToolTip("Stop current request")
+        stop_icon = _load_icon("cancel.svg", QSize(10, 10))
+        self.stop_btn.setIcon(stop_icon)
+        self.stop_btn.setIconSize(QSize(10, 10))
+        self.stop_btn.clicked.connect(self._cancel_active_operation)
+        self.stop_btn.setFixedWidth(28)
+        self.stop_btn.setStyleSheet("background:#e53935; color:white; border:1px solid #c62828;")
         self.send_btn = QtWidgets.QToolButton()
         self.send_btn.setToolTip("Send message (Ctrl+Enter)")
         send_icon = _load_icon("send-message.svg", QSize(10, 10))
@@ -1260,6 +1279,7 @@ class AIChatPanel(QtWidgets.QWidget):
         btn_row.addWidget(self.condense_btn)
         btn_row.addWidget(self.reset_btn)
         btn_row.addWidget(self.send_btn)
+        btn_row.addWidget(self.stop_btn)
         input_layout.addLayout(btn_row)
         chat_split.addWidget(input_container)
         chat_split.setStretchFactor(0, 3)
@@ -1309,7 +1329,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self._load_chat_tree()
         if self._ensure_active_chat() and self.current_session_id:
             self._load_chat_messages(self.current_session_id)
-        self.status_label.setText("Chat history cleared.")
+        self._set_status("Chat history cleared.")
         print("[AIChat][reset] Finished _reset_chat_history")
 
     def _load_condense_prompt(self) -> str:
@@ -1371,6 +1391,20 @@ class AIChatPanel(QtWidgets.QWidget):
         self.server_config_btn.setToolTip("Hide Config" if checked else "Server Config")
         self.prompt_btn.setVisible(checked)
         # Do not auto-refresh models on config toggle
+
+    def _has_active_operation(self) -> bool:
+        return bool(self._api_worker or self._condense_worker)
+
+    def _update_stop_button(self) -> None:
+        if hasattr(self, "stop_btn"):
+            self.stop_btn.setVisible(self._has_active_operation())
+
+    def _set_status(self, text: str, color: str | None = None) -> None:
+        self.status_label.setText(text)
+        if color:
+            self.status_label.setStyleSheet(f"color: {color}; font-weight: bold;")
+        else:
+            self.status_label.setStyleSheet("")
 
     def _render_messages(self) -> None:
         parts: List[str] = []
@@ -2276,6 +2310,36 @@ class AIChatPanel(QtWidgets.QWidget):
             return True
         return False
 
+    def _cancel_active_operation(self) -> None:
+        cancelled = False
+        if self._api_worker:
+            try:
+                self._api_worker.request_cancel()
+            except Exception:
+                pass
+            cancelled = True
+            self._cancel_pending_send = True
+            if self.messages and self.messages[-1][0] == "assistant":
+                role, content = self.messages[-1]
+                note = "[cancelled]"
+                self.messages[-1] = (role, content + ("\n\n" if content else "") + note if content else note)
+            self.send_btn.setEnabled(True)
+        if self._condense_worker:
+            try:
+                self._condense_worker.request_cancel()
+            except Exception:
+                pass
+            cancelled = True
+            self._cancel_pending_condense = True
+            if not self._summary_content:
+                self._summary_content = "[condense cancelled]"
+            self._condense_buffer = ""
+            self.condense_btn.setEnabled(True)
+        if cancelled:
+            self._render_messages()
+            self._set_status("Cancelled.", "#2ecc71")
+        self._update_stop_button()
+
     def _send_message(self) -> None:
         content = self.input_edit.toPlainText().strip()
         self.input_edit.clear()
@@ -2332,8 +2396,9 @@ class AIChatPanel(QtWidgets.QWidget):
             self._condense_worker.finished.connect(self._handle_condense_finished)
             self._condense_worker.failed.connect(self._handle_condense_error)
             self._condense_worker.start()
-            self.status_label.setText("Condensing chat…")
+            self._set_status("Condensing chat…", "#f6c343")
             self.condense_btn.setEnabled(False)
+            self._update_stop_button()
         except Exception as exc:
             self._condense_worker = None
             QtWidgets.QMessageBox.critical(self, "Condense", str(exc))
@@ -2374,14 +2439,16 @@ class AIChatPanel(QtWidgets.QWidget):
             self._api_worker.failed.connect(self._handle_error)
             self._api_worker.start()
             self.send_btn.setEnabled(False)
-            self.status_label.setText("Waiting for response…")
-            self.status_label.setStyleSheet("color: #00d800; font-weight: bold;")
+            self._set_status("Waiting for response…", "#f6c343")
+            self._update_stop_button()
         except Exception as exc:
             self.messages.pop()  # remove assistant placeholder
             QtWidgets.QMessageBox.critical(self, "Send failed", str(exc))
             self._render_messages()
 
     def _handle_chunk(self, idx: int, chunk: str) -> None:
+        if self._cancel_pending_send:
+            return
         if 0 <= idx < len(self.messages):
             role, existing = self.messages[idx]
             if role == "assistant":
@@ -2389,6 +2456,11 @@ class AIChatPanel(QtWidgets.QWidget):
                 self._render_messages()
 
     def _handle_finished(self, idx: int, full: str) -> None:
+        if self._cancel_pending_send:
+            self._cancel_pending_send = False
+            self._api_worker = None
+            self._update_stop_button()
+            return
         if 0 <= idx < len(self.messages):
             role, _ = self.messages[idx]
             self.messages[idx] = (role, full)
@@ -2397,41 +2469,60 @@ class AIChatPanel(QtWidgets.QWidget):
                 self.store.update_session_last_model(self.current_session_id, self.model_combo.currentText())
                 self.store.update_session_last_server(self.current_session_id, self.current_server.get("name", ""))
         self._render_messages()
-        self.status_label.setText("Response received.")
-        self.status_label.setStyleSheet("")
+        self._set_status("Response received.", "#2ecc71")
         self._update_model_status()
         self.send_btn.setEnabled(True)
         self._api_worker = None
+        self._update_stop_button()
         _log_llm_response(f"[AIChat][stream complete] response_len={len(full)}")
 
     def _handle_condense_chunk(self, chunk: str) -> None:
+        if self._cancel_pending_condense:
+            return
         self._condense_buffer += chunk
         self._render_messages()
 
     def _handle_condense_finished(self, full: str) -> None:
+        if self._cancel_pending_condense:
+            self._cancel_pending_condense = False
+            self._condense_worker = None
+            self._update_stop_button()
+            return
         self._summary_content = full or self._condense_buffer
         self._condense_buffer = ""
         self._condense_worker = None
         self.condense_btn.setEnabled(True)
         self._render_messages()
-        self.status_label.setText("Condensed chat ready.")
+        self._set_status("Condensed chat ready.", "#2ecc71")
+        self._update_stop_button()
 
     def _handle_condense_error(self, err: str) -> None:
         self._condense_buffer = ""
-        self._summary_content = None
+        if err != "Cancelled":
+            self._summary_content = None
         self._condense_worker = None
+        self._cancel_pending_condense = False
         self.condense_btn.setEnabled(True)
         self._render_messages()
-        self.status_label.setText(f"Condense failed: {err}")
+        if err == "Cancelled":
+            self._set_status("Condense cancelled.", "#2ecc71")
+        else:
+            self._set_status(f"Condense failed: {err}")
+        self._update_stop_button()
 
     def _handle_error(self, err: str) -> None:
         if self.messages and self.messages[-1][0] == "assistant" and not self.messages[-1][1]:
             self.messages[-1] = ("assistant", f"[error] {err}")
         self._render_messages()
-        self.status_label.setText(f"API error: {err}")
+        if err == "Cancelled":
+            self._set_status("Cancelled.", "#2ecc71")
+        else:
+            self._set_status(f"API error: {err}")
         self.send_btn.setEnabled(True)
         self._api_worker = None
+        self._cancel_pending_send = False
         self._update_model_status()
+        self._update_stop_button()
 
     def _delete_message(self, msg_id: str) -> None:
         role, content = self._message_map.get(msg_id, ("", ""))
@@ -2502,7 +2593,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self._condense_buffer = ""
         self._summary_content = None
         self._render_messages()
-        self.status_label.setText("Chat condensed.")
+        self._set_status("Chat condensed.", "#2ecc71")
 
     def _reject_summary(self) -> None:
         self._condense_buffer = ""

@@ -3834,6 +3834,14 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _send_capslock_key_event(self) -> None:
+        """Simulate a CapsLock press so vi-mode toggles via the same path."""
+        target = QApplication.focusWidget() or self
+        press = QKeyEvent(QEvent.KeyPress, Qt.Key_CapsLock, Qt.NoModifier)
+        release = QKeyEvent(QEvent.KeyRelease, Qt.Key_CapsLock, Qt.NoModifier)
+        QApplication.sendEvent(target, press)
+        QApplication.sendEvent(target, release)
+
     def _install_vi_mode_filters(self) -> None:
         for target in getattr(self, "_vi_filter_targets", []):
             target.removeEventFilter(self)
@@ -3862,10 +3870,16 @@ class MainWindow(QMainWindow):
                 self._toggle_vi_mode()
                 return True
             # Allow Esc to exit vi-mode explicitly
-            if event.key() == Qt.Key_Escape and self._vi_mode_active:
-                self._vi_mode_active = False
-                self._apply_vi_mode_statusbar_style()
-                return True
+            if event.key() == Qt.Key_Escape:
+                try:
+                    if getattr(self, "editor", None) and self.editor.is_ai_overlay_visible():
+                        return False
+                except Exception:
+                    pass
+                if self._vi_mode_active:
+                    self._vi_mode_active = False
+                    self._apply_vi_mode_statusbar_style()
+                    return True
             # Toggle vi-mode on Ctrl+Space (without Shift)
             if (
                 event.key() == Qt.Key_Space
@@ -3874,7 +3888,7 @@ class MainWindow(QMainWindow):
             ):
                 if getattr(self, "_vi_mode_locked", False):
                     return True
-                self._toggle_vi_mode()
+                self._send_capslock_key_event()
                 return True
             if self._vi_mode_active:
                 # Always let Control-modified shortcuts through (bold/italic/strike/etc.)

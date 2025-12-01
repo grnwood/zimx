@@ -26,6 +26,27 @@ def _read_global_config() -> dict:
     except (json.JSONDecodeError, OSError):
         return {}
 
+def load_non_actionable_task_tags() -> str:
+    """Load the configured non-actionable task tags as a space-separated string (default: '@wait @wt')."""
+    payload = _read_global_config()
+    tags = payload.get("non_actionable_task_tags")
+    if isinstance(tags, str) and tags.strip():
+        return tags.strip()
+    return "@wait @wt"
+
+def load_non_actionable_task_tags_list() -> list[str]:
+    """Return configured non-actionable tags as lower-case names without leading @ symbols."""
+    raw = load_non_actionable_task_tags()
+    tags: list[str] = []
+    for token in raw.replace(",", " ").split():
+        cleaned = token.lstrip("@").strip()
+        if cleaned:
+            tags.append(cleaned.lower())
+    return tags
+
+def save_non_actionable_task_tags(tags: str) -> None:
+    """Save the non-actionable task tags as a space-separated string."""
+    _update_global_config({"non_actionable_task_tags": tags.strip()})
 
 def load_last_vault() -> Optional[str]:
     payload = _read_global_config()
@@ -695,6 +716,7 @@ def fetch_tasks(
     if not conn:
         return []
 
+    non_actionable_tags = set(load_non_actionable_task_tags_list())
     select_cols = """
         SELECT
             t.task_id,
@@ -790,6 +812,25 @@ def fetch_tasks(
         for task_id, tag in tag_rows:
             if task_id in tasks:
                 tasks[task_id]["tags"].append(tag)
+
+    if non_actionable_tags:
+        for task in tasks.values():
+            tag_set = {t.lower() for t in task.get("tags", [])}
+            if tag_set & non_actionable_tags:
+                task["actionable"] = False
+
+    if actionable_only and tasks:
+        actionable_ids = {task_id for task_id, task in tasks.items() if task.get("actionable")}
+        if include_ancestors and actionable_ids:
+            keep_ids = set(actionable_ids)
+            for task_id in list(actionable_ids):
+                current = tasks.get(task_id, {}).get("parent")
+                while current and current not in keep_ids:
+                    keep_ids.add(current)
+                    current = tasks.get(current, {}).get("parent")
+        else:
+            keep_ids = actionable_ids
+        tasks = {task_id: task for task_id, task in tasks.items() if task_id in keep_ids}
 
     return sorted(
         tasks.values(),

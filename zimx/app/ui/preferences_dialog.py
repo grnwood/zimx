@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QMessageBox,
     QComboBox,
+    QLineEdit,
 )
 
 from zimx.app import config
@@ -39,6 +40,18 @@ class PreferencesDialog(QDialog):
         )
         self.layout.addWidget(self.vi_block_cursor_checkbox)
 
+        # Non Actionable Task Tags
+        self.layout.addSpacing(10)
+        non_actionable_label = QLabel("<b>Non Actionable Task Tags</b>")
+        self.layout.addWidget(non_actionable_label)
+        self.non_actionable_tags_edit = QLineEdit()
+        self.non_actionable_tags_edit.setPlaceholderText("@wait @wt")
+        try:
+            val = config.load_non_actionable_task_tags()
+        except Exception:
+            val = None
+        self.non_actionable_tags_edit.setText(val or "@wait @wt")
+        self.layout.addWidget(self.non_actionable_tags_edit)
         # Features
         self.layout.addSpacing(10)
         features_label = QLabel("<b>Features</b>")
@@ -213,6 +226,7 @@ class PreferencesDialog(QDialog):
         config.save_default_ai_server(self.default_server_combo.currentText() or None)
         config.save_default_ai_model(self.default_model_combo.currentText() or None)
         config.save_vault_force_read_only(self.force_read_only_checkbox.isChecked())
+        config.save_non_actionable_task_tags(self.non_actionable_tags_edit.text())
         super().accept()
 
     def _warn_restart_required(self) -> None:

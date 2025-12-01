@@ -110,3 +110,21 @@ def test_tag_search_shows_non_actionable_matches(temp_db) -> None:
     )
     texts_filtered = {t["text"] for t in filtered}
     assert "task one" in texts_filtered
+
+
+def test_actionable_filter_respects_non_actionable_tags(temp_db, monkeypatch) -> None:
+    """Configured non-actionable tags should be excluded from actionable view."""
+    monkeypatch.setattr(config, "load_non_actionable_task_tags", lambda: "@wt")
+    path = "/Todos/Todos.txt"
+    content = """
+( ) waiting around @wt
+( ) do now
+""".strip()
+    tasks = indexer.extract_tasks(path, content)
+    config.update_page_index(path=path, title="Todos", tags=[], links=[], tasks=tasks)
+
+    actionable = config.fetch_tasks(include_done=False, include_ancestors=True, actionable_only=True)
+    names_actionable = {t["text"] for t in actionable}
+
+    assert "waiting around" not in names_actionable
+    assert "do now" in names_actionable

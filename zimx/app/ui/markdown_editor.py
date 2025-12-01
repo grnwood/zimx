@@ -164,6 +164,8 @@ class AIActionOverlay(QWidget):
         self.show()
         self.raise_()
         self._refresh_list()
+        if self._list.count():
+            self._list.setCurrentRow(0)
 
     def _update_entries(self) -> None:
         self._entries = []
@@ -187,7 +189,6 @@ class AIActionOverlay(QWidget):
 
     def _refresh_list(self) -> None:
         text = self._search.text().lower().strip()
-        current = self._list.currentRow()
         self._list.clear()
         for entry in self._entries:
             if text and text not in entry.label.lower():
@@ -197,7 +198,7 @@ class AIActionOverlay(QWidget):
             self._list.addItem(item)
         count = self._list.count()
         if count:
-            self._list.setCurrentRow(min(current if current >= 0 else 0, count - 1))
+            self._list.setCurrentRow(0)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         if obj == self._search and event.type() == QEvent.KeyPress:
@@ -279,6 +280,10 @@ class AIActionOverlay(QWidget):
     def hide(self) -> None:  # type: ignore[override]
         super().hide()
         self.closed.emit()
+
+    def is_visible(self) -> bool:
+        """Helper so parents can detect when the overlay is open."""
+        return self.isVisible()
 HEADING_SENTINEL_BASE = 0xE000
 HEADING_MARK_PATTERN = re.compile(r"^(\s*)(#{1,5})(\s+)(.+)$", re.MULTILINE)
 HEADING_SENTINEL_CHARS = "".join(chr(HEADING_SENTINEL_BASE + lvl) for lvl in range(1, HEADING_MAX_LEVEL + 1))
@@ -849,9 +854,9 @@ class MarkdownEditor(QTextEdit):
         self.setAcceptDrops(True)
         # Configure scroll-past-end margin initially
         QTimer.singleShot(0, self._apply_scroll_past_end_margin)
-        self._ai_send_shortcut = QShortcut(QKeySequence("Ctrl+Shift+;"), self)
+        self._ai_send_shortcut = QShortcut(QKeySequence("Ctrl+Shift+P"), self)
         self._ai_send_shortcut.activated.connect(self._show_ai_action_overlay)
-        self._ai_focus_shortcut = QShortcut(QKeySequence("Ctrl+Shift+'"), self)
+        self._ai_focus_shortcut = QShortcut(QKeySequence("Ctrl+Shift+["), self)
         self._ai_focus_shortcut.activated.connect(self._emit_ai_chat_focus)
 
         self._ai_action_overlay = AIActionOverlay(self)
@@ -859,6 +864,9 @@ class MarkdownEditor(QTextEdit):
         self._ai_action_overlay.sendSelection.connect(self._emit_ai_chat_send)
         self._ai_action_overlay.closed.connect(self._restore_vi_after_overlay)
         self._overlay_vi_mode_before: Optional[bool] = None
+
+    def is_ai_overlay_visible(self) -> bool:
+        return self._ai_action_overlay.is_visible()
 
     def paintEvent(self, event):  # type: ignore[override]
         """Custom paint to draw horizontal rules as visual lines."""
@@ -1843,9 +1851,9 @@ class MarkdownEditor(QTextEdit):
         self._overlay_vi_mode_before = None
 
     def _add_ai_chat_context_actions(self, menu: QMenu) -> None:
-        send_action = QAction("AI Chat: Send to Open Chat\tCtrl+Shift+;", self)
+        send_action = QAction("AI Chat: Send to Open Chat\tCtrl+Shift+P", self)
         send_action.triggered.connect(self._emit_ai_chat_send)
-        start_action = QAction("AI Chat: Start Chat with this Page\tCtrl+Shift+'", self)
+        start_action = QAction("AI Chat: Start Chat with this Page\tCtrl+Shift+[", self)
         start_action.setEnabled(bool(self._current_path))
         start_action.triggered.connect(self._emit_ai_chat_focus)
         first = menu.actions()[0] if menu.actions() else None

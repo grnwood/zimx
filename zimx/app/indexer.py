@@ -180,7 +180,10 @@ def extract_tasks(path: str, content: str) -> List[dict]:
 
         body = match.group("body")
         state = match.group("state1") or match.group("state2") or ("x" if match.group("box") == "☑" else " ")
-        tags = sorted(set(TAG_PATTERN.findall(body)))
+        # Inherit tags from parent, add own tags
+        own_tags = set(TAG_PATTERN.findall(body))
+        parent_tags = set(parent["tags"]) if parent else set()
+        tags = sorted(parent_tags | own_tags)
         explicit_due = _first_match(DUE_PATTERN, body)
         start = _first_match(START_PATTERN, body)
         pri_matches = PRIORITY_PATTERN.findall(body)
