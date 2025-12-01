@@ -4069,7 +4069,15 @@ class MainWindow(QMainWindow):
             if is_colon:
                 target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
             if self._vi_debug:
-                self._debug(f"Vi-mode: ';' key mapping -> End (colon={is_colon}, key={key}, text='{text}', mods={int(mods)})")
+                mods_val = mods
+                try:
+                    mods_val = int(mods)  # type: ignore[arg-type]
+                except Exception:
+                    try:
+                        mods_val = int(getattr(mods, "value", mods))  # type: ignore[arg-type]
+                    except Exception:
+                        pass
+                self._debug(f"Vi-mode: ';' key mapping -> End (colon={is_colon}, key={key}, text='{text}', mods={mods_val})")
         # Delete variants
         elif key == Qt.Key_D:
             if shift:
