@@ -7,6 +7,7 @@ from typing import List, Optional
 from chromadb import PersistentClient
 from chromadb.config import Settings
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from zimx.rag import telemetry
 from zimx.rag.index import RetrievedChunk
 
 
@@ -19,11 +20,15 @@ class ChromaRAG:
         base = Path(self.vault_root) / ".zimx" / "chroma"
         base.mkdir(parents=True, exist_ok=True)
         self.persist_dir = str(base)
+        telemetry_impl = f"{telemetry.NoopTelemetryClient.__module__}.{telemetry.NoopTelemetryClient.__name__}"
         settings = Settings(
             chroma_api_impl="chromadb.api.rust.RustBindingsAPI",
             is_persistent=True,
             persist_directory=self.persist_dir,
             allow_reset=True,
+            chroma_product_telemetry_impl=telemetry_impl,
+            chroma_telemetry_impl=telemetry_impl,
+            anonymized_telemetry=False,
         )
         self.client = PersistentClient(
             path=self.persist_dir,

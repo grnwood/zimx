@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import traceback
 from pathlib import Path
 from typing import Iterable, List, Literal, Optional
 
@@ -282,7 +283,7 @@ def vector_add(payload: VectorAddPayload) -> dict:
         vector_manager.index_text(root, payload.page_ref, payload.text, payload.kind, payload.attachment_name)
         _log_vector(f"Added vector entry for {payload.page_ref} ({payload.kind})")
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _handle_vector_exception("indexing vector data", exc)
     return {"ok": True}
 
 
@@ -293,7 +294,7 @@ def vector_remove(payload: VectorRemovePayload) -> dict:
         vector_manager.delete_text(root, payload.page_ref, payload.kind, payload.attachment_name)
         _log_vector(f"Removed vector entry for {payload.page_ref} ({payload.kind})")
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _handle_vector_exception("removing vector data", exc)
     return {"ok": True}
 
 
@@ -324,7 +325,7 @@ def vector_query(payload: VectorQueryPayload) -> dict:
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _handle_vector_exception("querying vector data", exc)
     return {"chunks": [_chunk_to_dict(chunk) for chunk in chunks]}
 
 
@@ -334,6 +335,12 @@ def _log_attachment(message: str) -> None:
 
 def _log_vector(message: str) -> None:
     print(f"[Vector] {message}")
+
+
+def _handle_vector_exception(context: str, exc: Exception) -> None:
+    _log_vector(f"{context} failed: {exc}")
+    traceback.print_exc()
+    raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 def _vault_relative_path(path: str) -> str:

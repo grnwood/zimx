@@ -24,9 +24,22 @@ ROOT = _find_root()
 MAIN = os.path.join(ROOT, 'zimx', 'app', 'main.py')
 
 # Hidden imports sometimes needed for PySide6 / FastAPI
-hidden = collect_submodules('PySide6') + [
-    'fastapi', 'httpx', 'pydantic', 'uvicorn', 'jinja2', 'anyio', 'starlette'
-]
+hidden = (
+    collect_submodules('PySide6')
+    + [
+        'fastapi',
+        'httpx',
+        'pydantic',
+        'uvicorn',
+        'jinja2',
+        'anyio',
+        'starlette',
+        'chromadb.api.rust',
+    ]
+    + collect_submodules('chromadb')
+    + collect_submodules('onnxruntime')
+    + collect_submodules('tokenizers')
+)
 
 ZIMX_VERSION = os.getenv('ZIMX_VERSION','0.1.0')
 
