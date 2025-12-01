@@ -2,10 +2,9 @@
 Logbook of all the development efforts on zim. yes!
 
 ### Calendar
-
-(x)  I'm seeing some blue dates on a fresh calendar, i only have the 24th defined? @zimx
-		￼	
-(x)  Add Calendar panel @zimx
+(x)  I'm seeing some blue dates on a fresh calendar, i only have the 24th defined?  @cal
+		 	
+(x)  Add Calendar panel  @cal
 	move the calendar to its own tab (first)
 	put the Journal part of the file tree under it.
 	move tasks to its own 
@@ -13,21 +12,45 @@ Logbook of all the development efforts on zim. yes!
 	remove 'show jornal' from left nav since it's under calendar.
 
 ### Editor
-(x)  I still see sometimes my page doesn't save, there is some kind of navigation why to lose the buffer, keep an eye out. @zimx
+(x)  I still see sometimes my page doesn't save, there is some kind of navigation why to lose the buffer, keep an eye out.  @edit
 	pretty sure this is VI navigation (soft keys) doing this, need to make sure it fires a write ALL the time. Gotta hitj ctrl-s for now.
 	I found **ONE** : If you activate a link before page saved it loses buffer, need to fix!
-( )  should i use fast api locally if server and ui are in the same place? @zimx
+(x)  should i use fast api locally if server and ui are in the same place?  @edit
+( )  when you click a link from a floating editor to a anchor, show the animation  @edit
+( )  found the vi ; key bug, when i'm in caps it works, when lower it doesn't (maybe win32 only)  @edit
+  ( )  figure out a way to not allow crazy links to get generated and pasted @edit				￼
+  			![paste_image_001](./paste_image_001.png)
+		This is also for supporting file system links "C :  \some\folder\etc"
+ 	Also make colon-link (: somelink) processing smarter, like if its in a the middle of the sentence
+ 		or 8 : 56pm
+ 		of  This : That  <-- not a link.		
+( )  add find and replace functionality @edit
+( ) implement the full text search with your chatgpt vetted feature @edit
+
+### Git
+( )  git support: simple 'version this vault' @edit
+	maybe version this vault, or page... with a note.
+	System pref:  git control for vault?  default no.
+	Requirements: 
+		git installed in OS and on path. (or warning)
+		attempt a git init.  Setup a remote origin and auto push?  (auto push on commit?)
+		
+### ### Tasks
+( )  support hiearchy assignment  @task
+( ) if all tasks on a tag are complete, tag comes out of tags filter (unless show completed is selected)  @task
+( ) if tree is filtered, filter the tasks panel based on tree and sub pages? @task
+	(show red filtered message next to tags label)
 
 
 ### Page Templages
-( )  ctrl-n should default to the `New Page` template.  @**zimx**
-( ) Add some more? @zimx
+( )  ctrl-n should default to the `New Page` template.  @page
+( ) Add some more?  @edit
  
 ### Printing
-( )  print to browser[:print_to_browser|] feature? @zimx  <2025-12-01
+( )  print to browser[:print_to_browser|] feature?  @print  <2025-12-01
 
 ### Ai Stuff
-( )  need to add chroma/rag into chat. @zimx
+( )  need to add chroma/rag into chat.  @ai
 	* add the page text into chroma by default?
 	* (#) hash tag loads list of file attachements from page?
 	* (@) allows linking to any other page in the notebook
