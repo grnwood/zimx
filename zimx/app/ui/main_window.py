@@ -3964,13 +3964,25 @@ class MainWindow(QMainWindow):
         # Check for disallowed modifiers (but allow keys with only Shift or no modifiers)
         key = event.key()
         text = event.text()
-        shift = bool(event.modifiers() & Qt.ShiftModifier)
-        alt = bool(event.modifiers() & Qt.AltModifier)
+        mods = event.modifiers()
+        shift = bool(mods & Qt.ShiftModifier)
+        alt = bool(mods & Qt.AltModifier)
+        # AltGr on Windows sends Ctrl+Alt; if this produced ";" / ":" we should still map End.
+        altgr_semicolon = text in (";", ":") and bool(mods & Qt.ControlModifier) and bool(mods & Qt.AltModifier)
 
 
 
         # Allow Alt (for Alt+h / Alt+l mappings) plus Shift; block everything else
-        disallowed = event.modifiers() & ~(Qt.ShiftModifier | Qt.KeypadModifier | Qt.AltModifier)
+        disallowed_mask = Qt.ShiftModifier | Qt.KeypadModifier | Qt.AltModifier
+        if altgr_semicolon:
+            # Allow Ctrl too when AltGr was used to type ";" / ":".
+            disallowed_mask |= Qt.ControlModifier
+        # Some layouts set GroupSwitchModifier; allow it.
+        try:
+            disallowed_mask |= Qt.GroupSwitchModifier  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        disallowed = mods & ~disallowed_mask
         if disallowed:
             print(f"[DEBUG] _translate_vi_key_event: Blocking key {key} due to disallowed modifiers: {disallowed}")
             return None
@@ -4056,6 +4068,8 @@ class MainWindow(QMainWindow):
             target_key = Qt.Key_End
             if is_colon:
                 target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
+            if self._vi_debug:
+                self._debug(f"Vi-mode: ';' key mapping -> End (colon={is_colon}, key={key}, text='{text}', mods={int(mods)})")
         # Delete variants
         elif key == Qt.Key_D:
             if shift:
