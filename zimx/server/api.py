@@ -1,3 +1,4 @@
+from __future__ import annotations
  # --- Fix for FastAPI + PyInstaller + python-multipart ---
 try:
     import importlib
@@ -16,7 +17,6 @@ except ImportError:
     # If multipart truly isn't installed, FastAPI will still raise a clear error later
     pass
  # --- end fix ---
-from __future__ import annotations
 
 import os
 import shutil
