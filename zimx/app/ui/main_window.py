@@ -93,7 +93,7 @@ TYPE_ROLE = PATH_ROLE + 1
 OPEN_ROLE = TYPE_ROLE + 1
 FILTER_BANNER = "__NAV_FILTER_BANNER__"
 _DETAILED_LOGGING = os.getenv("ZIMX_DETAILED_LOGGING", "0") not in ("0", "false", "False", "", None)
-
+_VI_KEY_LOGGING = os.getenv("VI_KEY_DETAILED", "0") not in ("0", "false", "False", "", None)
 
 class InlineNameEdit(QLineEdit):
     submitted = Signal(str)
@@ -206,7 +206,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, api_base: str) -> None:
         super().__init__()
-        self._vi_debug =  True
+        self._vi_debug =  _VI_KEY_LOGGING
         self.setWindowTitle("ZimX Desktop")
         self.api_base = api_base.rstrip("/")
         self.http = httpx.Client(base_url=self.api_base, timeout=10.0)
