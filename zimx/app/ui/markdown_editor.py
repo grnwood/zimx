@@ -26,10 +26,24 @@ from PySide6.QtGui import (
     QShortcut,
     QAction,
 )
-from PySide6.QtWidgets import QTextEdit, QMenu, QInputDialog, QDialog, QApplication
+from PySide6.QtWidgets import (
+    QTextEdit,
+    QMenu,
+    QInputDialog,
+    QDialog,
+    QApplication,
+    QWidget,
+    QVBoxLayout,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QLabel,
+)
 from .path_utils import path_to_colon, colon_to_path, ensure_root_colon_link
 from .heading_utils import heading_slug
 from .page_load_logger import PageLoadLogger
+from .ai_actions_data import AI_ACTION_GROUPS
+from zimx.app import config
 
 
 TAG_PATTERN = QRegularExpression(r"@(\w+)")
@@ -78,6 +92,193 @@ TABLE_ROW_PATTERN = re.compile(r"^\s*\|.*\|\s*$")
 TABLE_SEP_PATTERN = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$")
 
 HEADING_MAX_LEVEL = 5
+
+
+class AIActionOverlay(QWidget):
+    """Overlay widget showing AI action categories and actions."""
+
+    actionTriggered = Signal(str, str)
+    sendSelection = Signal()
+    closed = Signal()
+
+    class Entry:
+        def __init__(self, label: str, kind: str, group=None, action=None):
+            self.label = label
+            self.kind = kind
+            self.group = group
+            self.action = action
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self._text = ""
+        self._current_group = None
+        self._entries: list[AIActionOverlay.Entry] = []
+        self._groups = AI_ACTION_GROUPS
+        self.setStyleSheet("background: #000000; color: white; border-radius: 10px; border: 1px solid #222222;")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(6)
+        self._selection_label = QLabel()
+        self._selection_label.setStyleSheet("color: #dfe6fa; font-size: 16px;")
+        self._selection_label.setVisible(False)
+        layout.addWidget(self._selection_label)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Send Selection to AI Chat or type action…")
+        self._search.setStyleSheet(
+            "font-size: 18px; color: white; background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.5); padding: 8px; border-radius: 6px;"
+        )
+        self._search.textChanged.connect(self._refresh_list)
+        layout.addWidget(self._search)
+        self._list = QListWidget()
+        self._list.setUniformItemSizes(True)
+        self._list.setStyleSheet("font-size: 18px; color: white; background: transparent; padding: 4px;")
+        self._list.itemActivated.connect(self._activate_current_item)
+        self._list.itemClicked.connect(lambda *_: self._activate_current_item())
+        layout.addWidget(self._list)
+        self._list.setMinimumHeight(220)
+        self._search.installEventFilter(self)
+        self._update_header()
+
+    def text(self) -> str:
+        return self._text
+
+    def open(self, text: str) -> None:
+        if not text:
+            return
+        self._text = text
+        self._current_group = None
+        self._update_entries()
+        self._search.clear()
+        self._search.setFocus()
+        parent = self.parent()
+        if parent:
+            geo = parent.rect()
+            width = min(max(420, geo.width() - 80), geo.width())
+            height = min(280, max(200, geo.height() - 100))
+            center = parent.mapToGlobal(geo.center())
+            left = center.x() - width // 2
+            top = center.y() - height // 2
+            self.setGeometry(left, top, width, height)
+        self._update_header()
+        self.show()
+        self.raise_()
+        self._refresh_list()
+
+    def _update_entries(self) -> None:
+        self._entries = []
+        if not self._current_group:
+            self._entries.append(AIActionOverlay.Entry("Send Selection to AI Chat", "default"))
+            for group in self._groups:
+                self._entries.append(AIActionOverlay.Entry(group.title, "group", group=group))
+        else:
+            for action in self._current_group.actions:
+                self._entries.append(AIActionOverlay.Entry(action.title, "action", action=action))
+        self._update_header()
+
+    def _update_header(self) -> None:
+        if self._current_group:
+            self._selection_label.setText(f"{self._current_group.title}")
+            self._selection_label.setVisible(True)
+            self._search.setPlaceholderText(f"Type an action in {self._current_group.title}…")
+        else:
+            self._selection_label.setVisible(False)
+            self._search.setPlaceholderText("Send Selection to AI Chat or type action…")
+
+    def _refresh_list(self) -> None:
+        text = self._search.text().lower().strip()
+        current = self._list.currentRow()
+        self._list.clear()
+        for entry in self._entries:
+            if text and text not in entry.label.lower():
+                continue
+            item = QListWidgetItem(entry.label)
+            item.setData(Qt.UserRole, entry)
+            self._list.addItem(item)
+        count = self._list.count()
+        if count:
+            self._list.setCurrentRow(min(current if current >= 0 else 0, count - 1))
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if obj == self._search and event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Down, Qt.Key_Up):
+                delta = 1 if event.key() == Qt.Key_Down else -1
+                self._move_selection(delta)
+                return True
+            if event.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
+                if event.key() == Qt.Key_J:
+                    self._move_selection(1)
+                    return True
+                if event.key() == Qt.Key_K:
+                    self._move_selection(-1)
+                    return True
+            if event.key() == Qt.Key_Right:
+                current = self._list.currentItem()
+                if current:
+                    entry = current.data(Qt.UserRole)
+                    if entry and entry.kind == "group":
+                        self._current_group = entry.group
+                        self._update_entries()
+                        self._refresh_list()
+                        return True
+            if event.key() in (Qt.Key_Left, Qt.Key_Backspace) and not self._search.text():
+                if self._current_group:
+                    self._current_group = None
+                    self._update_entries()
+                    self._refresh_list()
+                    return True
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab, Qt.Key_Space):
+                self._activate_current_item()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _move_selection(self, delta: int) -> None:
+        count = self._list.count()
+        if not count:
+            return
+        row = self._list.currentRow()
+        row = max(0, min(count - 1, row + delta))
+        self._list.setCurrentRow(row)
+
+    def _activate_current_item(self) -> None:
+        item = self._list.currentItem()
+        if not item:
+            return
+        entry = item.data(Qt.UserRole)
+        if not entry:
+            return
+        if entry.kind == "default":
+            self.sendSelection.emit()
+            self.hide()
+        elif entry.kind == "group":
+            self._current_group = entry.group
+            self._update_entries()
+            self._refresh_list()
+        elif entry.kind == "action":
+            self.actionTriggered.emit(entry.action.title, entry.action.prompt)
+            self.hide()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space, Qt.Key_Tab):
+            self._activate_current_item()
+            return
+        if event.key() == Qt.Key_Escape:
+            self.hide()
+            return
+        if event.key() == Qt.Key_Backspace and not self._search.text() and self._current_group:
+            self._current_group = None
+            self._update_entries()
+            self._refresh_list()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event) -> None:
+        self.hide()
+        super().focusOutEvent(event)
+
+    def hide(self) -> None:  # type: ignore[override]
+        super().hide()
+        self.closed.emit()
 HEADING_SENTINEL_BASE = 0xE000
 HEADING_MARK_PATTERN = re.compile(r"^(\s*)(#{1,5})(\s+)(.+)$", re.MULTILINE)
 HEADING_SENTINEL_CHARS = "".join(chr(HEADING_SENTINEL_BASE + lvl) for lvl in range(1, HEADING_MAX_LEVEL + 1))
@@ -648,10 +849,16 @@ class MarkdownEditor(QTextEdit):
         self.setAcceptDrops(True)
         # Configure scroll-past-end margin initially
         QTimer.singleShot(0, self._apply_scroll_past_end_margin)
-        self._ai_send_shortcut = QShortcut(QKeySequence("Ctrl+Shift+J"), self)
-        self._ai_send_shortcut.activated.connect(self._emit_ai_chat_send)
-        self._ai_focus_shortcut = QShortcut(QKeySequence("Ctrl+Shift+K"), self)
+        self._ai_send_shortcut = QShortcut(QKeySequence("Ctrl+Shift+;"), self)
+        self._ai_send_shortcut.activated.connect(self._show_ai_action_overlay)
+        self._ai_focus_shortcut = QShortcut(QKeySequence("Ctrl+Shift+'"), self)
         self._ai_focus_shortcut.activated.connect(self._emit_ai_chat_focus)
+
+        self._ai_action_overlay = AIActionOverlay(self)
+        self._ai_action_overlay.actionTriggered.connect(self._handle_ai_action_overlay)
+        self._ai_action_overlay.sendSelection.connect(self._emit_ai_chat_send)
+        self._ai_action_overlay.closed.connect(self._restore_vi_after_overlay)
+        self._overlay_vi_mode_before: Optional[bool] = None
 
     def paintEvent(self, event):  # type: ignore[override]
         """Custom paint to draw horizontal rules as visual lines."""
@@ -1542,15 +1749,12 @@ class MarkdownEditor(QTextEdit):
 
             # AI Chat actions at the top level
             self._add_ai_chat_context_actions(menu)
-        if self._ai_actions_enabled:
-            selection = self.textCursor().selectedText()
-            full_text = self.toPlainText()
-            if selection or full_text:
-                if menu is None:
-                    menu = self.createStandardContextMenu()
-                # Add AI Chat actions at the top level if not already present
-                self._add_ai_chat_context_actions(menu)
-                self._populate_ai_actions_menu(menu, selection or full_text)
+        if self._ai_actions_enabled and config.load_enable_ai_chats():
+            if menu is None:
+                menu = self.createStandardContextMenu()
+            ai_action = menu.addAction("AI Actions...")
+            ai_action.triggered.connect(self._show_ai_action_overlay)
+            self._add_ai_chat_context_actions(menu)
             if menu is not None:
                 menu.exec(event.globalPos())
                 return
@@ -1589,14 +1793,6 @@ class MarkdownEditor(QTextEdit):
             if self._filter_nav_callback and self._current_path:
                 filter_action = menu.addAction("Filter navigator to this subtree")
                 filter_action.triggered.connect(lambda: self._filter_nav_callback(self._current_path or ""))
-            # Add AI Chat actions at the top level
-            self._add_ai_chat_context_actions(menu)
-            if self._ai_actions_enabled:
-                selection = self.textCursor().selectedText()
-                full_text = self.toPlainText()
-                if selection or full_text:
-                    self._populate_ai_actions_menu(menu, selection or full_text)
-            
             menu.exec(event.globalPos())
             return
        
@@ -1620,10 +1816,36 @@ class MarkdownEditor(QTextEdit):
             return
         self.aiChatPageFocusRequested.emit(self._current_path)
 
+    def _show_ai_action_overlay(self) -> None:
+        if not self._ai_actions_enabled or not config.load_enable_ai_chats():
+            return
+        text = self._ai_chat_payload_text()
+        if not text:
+            return
+        self._suspend_vi_for_overlay()
+        self._ai_action_overlay.open(text)
+
+    def _handle_ai_action_overlay(self, title: str, prompt: str) -> None:
+        text = self._ai_action_overlay.text()
+        self.aiActionRequested.emit(title, prompt, text)
+
+    def _suspend_vi_for_overlay(self) -> None:
+        if self._overlay_vi_mode_before is not None:
+            return
+        self._overlay_vi_mode_before = self._vi_mode_active
+        if self._vi_mode_active:
+            self.set_vi_mode(False)
+
+    def _restore_vi_after_overlay(self) -> None:
+        if self._overlay_vi_mode_before is None:
+            return
+        self.set_vi_mode(self._overlay_vi_mode_before)
+        self._overlay_vi_mode_before = None
+
     def _add_ai_chat_context_actions(self, menu: QMenu) -> None:
-        send_action = QAction("AI Chat: Send to Open Chat\tCtrl+Shift+J", self)
+        send_action = QAction("AI Chat: Send to Open Chat\tCtrl+Shift+;", self)
         send_action.triggered.connect(self._emit_ai_chat_send)
-        start_action = QAction("AI Chat: Start Chat with this Page\tCtrl+Shift+K", self)
+        start_action = QAction("AI Chat: Start Chat with this Page\tCtrl+Shift+'", self)
         start_action.setEnabled(bool(self._current_path))
         start_action.triggered.connect(self._emit_ai_chat_focus)
         first = menu.actions()[0] if menu.actions() else None
@@ -3157,228 +3379,6 @@ class MarkdownEditor(QTextEdit):
     def set_ai_chat_available(self, available: bool) -> None:
         """Toggle whether a chat already exists for the current page."""
         self._ai_chat_available = bool(available)
-
-    def _populate_ai_actions_menu(self, parent_menu, text: str) -> None:
-        """Build the hierarchical AI Actions menu."""
-        if _DETAILED_LOGGING:
-            print(f"[AI Menu Debug] populate_ai_actions_menu text_len={len(text)}")
-        def add_actions(menu, items):
-            for title, prompt in items:
-                act = menu.addAction(title)
-                act.triggered.connect(lambda t=title, p=prompt: self.aiActionRequested.emit(t, p, text))
-
-        ai_menu = parent_menu.addMenu("AI Actions")
-
-        ai_menu_summarize = ai_menu.addMenu("Summarize")
-        add_actions(
-            ai_menu_summarize,
-            [
-                ("Short Summary", "Summarize this note in 3–5 sentences."),
-                ("Bullet Summary", "Summarize into bullet points."),
-                ("Key Insights", "Extract key insights / themes."),
-                ("TL;DR", "Give a one-line TL;DR."),
-                ("Meeting Minutes Style", "Convert to meeting minutes."),
-                ("Executive Summary", "Summarize for an executive audience."),
-            ],
-        )
-
-        ai_menu_rewrite = ai_menu.addMenu("Rewrite / Improve Writing")
-        add_actions(
-            ai_menu_rewrite,
-            [
-                ("Rewrite for Clarity", "Rewrite for clarity."),
-                ("Rewrite Concisely", "Rewrite concisely."),
-                ("Rewrite More Detailed", "Rewrite with more detail."),
-                ("Rewrite More Casual", "Rewrite in a more casual tone."),
-                ("Rewrite More Professional", "Rewrite in a more professional tone."),
-                ("Rewrite as Email", "Rewrite this as an email."),
-                ("Rewrite as Action Plan", "Rewrite as an action plan."),
-                ("Rewrite as Journal Entry", "Rewrite as a journal entry."),
-                ("Rewrite as Tutorial / Guide", "Rewrite as a tutorial / guide."),
-            ],
-        )
-
-        ai_menu_translate = ai_menu.addMenu("Translate")
-        add_actions(
-            ai_menu_translate,
-            [
-                ("Auto-Detect → English", "Translate (auto-detect) to English."),
-                ("English → Spanish", "Translate from English to Spanish."),
-                ("English → French", "Translate from English to French."),
-                ("English → German", "Translate from English to German."),
-                ("English → Italian", "Translate from English to Italian."),
-                ("English → Chinese", "Translate from English to Chinese."),
-                ("English → Japanese", "Translate from English to Japanese."),
-                ("English → Korean", "Translate from English to Korean."),
-            ],
-        )
-        custom_lang = ai_menu_translate.addAction("Custom Language…")
-        custom_lang.triggered.connect(lambda: self._prompt_custom_translation(text))
-
-        ai_menu_extract = ai_menu.addMenu("Extract")
-        add_actions(
-            ai_menu_extract,
-            [
-                ("Tasks / To-Dos", "Extract tasks / to-dos."),
-                ("Dates / Deadlines", "Extract dates and deadlines."),
-                ("Names & People", "Extract names and people."),
-                ("Action Items", "Extract action items."),
-                ("Questions", "Extract questions."),
-                ("Entities & Keywords", "Extract entities and keywords."),
-                ("Topics / Tags", "Extract topics or tags."),
-                ("Structured JSON Data", "Extract structured JSON data."),
-                ("Links / URLs mentioned", "Extract links / URLs mentioned."),
-            ],
-        )
-
-        ai_menu_analyze = ai_menu.addMenu("Analyze")
-        add_actions(
-            ai_menu_analyze,
-            [
-                ("Sentiment Analysis", "Perform sentiment analysis."),
-                ("Tone Analysis", "Analyze tone."),
-                ("Bias / Assumptions", "Find bias or assumptions."),
-                ("Logical Fallacies", "Check for logical fallacies."),
-                ("Risk Assessment", "Provide a risk assessment."),
-                ("Pros & Cons", "List pros and cons."),
-                ("Root-Cause Analysis", "Perform root-cause analysis."),
-                ("SWOT Analysis", "Provide a SWOT analysis."),
-            ],
-        )
-        compare_note = ai_menu_analyze.addAction("Compare Against Another Note…")
-        compare_note.triggered.connect(lambda: self._prompt_compare_note(text))
-
-        ai_menu_explain = ai_menu.addMenu("Explain")
-        add_actions(
-            ai_menu_explain,
-            [
-                ("Explain Like I'm 5", "Explain like I'm 5."),
-                ("Explain for a Beginner", "Explain for a beginner."),
-                ("Explain for an Expert", "Explain for an expert."),
-                ("Break Down Step-By-Step", "Break down step by step."),
-                ("Provide Examples", "Provide examples."),
-                ("Define All Concepts", "Define all concepts."),
-                ("Explain the Why Behind Each Step", "Explain the why behind each step."),
-            ],
-        )
-
-        ai_menu_brainstorm = ai_menu.addMenu("Brainstorm")
-        add_actions(
-            ai_menu_brainstorm,
-            [
-                ("Brainstorm Ideas", "Brainstorm ideas."),
-                ("Brainstorm Questions to Ask", "Brainstorm questions to ask."),
-                ("Alternative Approaches", "Suggest alternative approaches."),
-                ("Solutions to the Problem", "Suggest solutions to the problem."),
-                ("Potential Risks / Pitfalls", "List potential risks or pitfalls."),
-                ("Related Topics I Should Explore", "List related topics to explore."),
-            ],
-        )
-
-        ai_menu_transform = ai_menu.addMenu("Transform")
-        add_actions(
-            ai_menu_transform,
-            [
-                ("Convert to Markdown", "Convert to Markdown."),
-                ("Convert to Bullet Points", "Convert to bullet points."),
-                ("Convert to Outline", "Convert to an outline."),
-                ("Convert to Table", "Convert to a table."),
-                ("Convert to Checklist", "Convert to a checklist."),
-                ("Convert to JSON", "Convert to JSON."),
-                ("Convert to CSV", "Convert to CSV."),
-                ("Convert to Code Comments", "Convert to code comments."),
-                ("Convert to Script (Python / JS / Bash)", "Convert to a script (Python / JS / Bash)."),
-                ("Convert to Slide Outline", "Convert to a slide outline."),
-            ],
-        )
-
-        if self._looks_like_code(text):
-            ai_menu_code = ai_menu.addMenu("Code Actions")
-            add_actions(
-                ai_menu_code,
-                [
-                    ("Explain Code", "Explain this code."),
-                    ("Optimize Code", "Optimize this code."),
-                    ("Refactor Code", "Refactor this code."),
-                    ("Add Comments", "Add comments to this code."),
-                    ("Convert to Another Language…", "Convert this code to another language."),
-                    ("Generate Unit Tests", "Generate unit tests for this code."),
-                    ("Find Bugs", "Find bugs in this code."),
-                ],
-            )
-
-        ai_menu_research = ai_menu.addMenu("Research Helper")
-        add_actions(
-            ai_menu_research,
-            [
-                ("Generate Questions I Should Ask", "Generate questions I should ask."),
-                ("List Assumptions", "List assumptions."),
-                ("Find Missing Info", "Find missing information."),
-                ("Provide Historical Context", "Provide historical context."),
-                ("Predict Outcomes", "Predict outcomes."),
-                ("Summarize Top Debates Around This Topic", "Summarize top debates around this topic."),
-                ("Give Related References / Sources (non-live)", "Give related references or sources (non-live)."),
-            ],
-        )
-
-        ai_menu_creative = ai_menu.addMenu("Creative")
-        add_actions(
-            ai_menu_creative,
-            [
-                ("Rewrite as Story", "Rewrite as a story."),
-                ("Rewrite as Poem", "Rewrite as a poem."),
-                ("Rewrite as Dialogue", "Rewrite as a dialogue."),
-                ("Rewrite as Song", "Rewrite as a song."),
-                ("Rewrite as Fiction Scene", "Rewrite as a fiction scene."),
-                ("Turn This Into: characters / plot / setting", "Turn this into characters, plot, and setting."),
-            ],
-        )
-
-        ai_menu_chat = ai_menu.addMenu("Chat-About-This Note")
-        add_actions(
-            ai_menu_chat,
-            [
-                ("Ask the AI About This Note", "Ask the AI about this note."),
-                ("Continue Thought from Here", "Continue the thought from here."),
-                ("What Should I Do Next Based on This Note?", "What should I do next based on this note?"),
-                ("How Can I Improve This?", "How can I improve this?"),
-                ("Generate Next Section", "Generate the next section."),
-            ],
-        )
-
-        ai_menu_memory = ai_menu.addMenu("Memory & Linking")
-        add_actions(
-            ai_menu_memory,
-            [
-                ("Suggest Tags", "Suggest tags."),
-                ("Suggest Backlinks", "Suggest backlinks."),
-                ("Build Concept Map", "Build a concept map."),
-                ("Identify Repeating Themes Across Notes", "Identify repeating themes across notes."),
-            ],
-        )
-
-        ai_menu_privacy = ai_menu.addMenu("Privacy / Redaction")
-        add_actions(
-            ai_menu_privacy,
-            [
-                ("Remove Personal Info", "Remove personal information."),
-                ("Anonymize Names", "Anonymize names."),
-                ("Anonymize Companies", "Anonymize companies."),
-                ("Detect Sensitive Content", "Detect sensitive content."),
-            ],
-        )
-
-        ai_menu_debug = ai_menu.addMenu("Debug Note Content")
-        add_actions(
-            ai_menu_debug,
-            [
-                ("Check for Contradictions", "Check for contradictions."),
-                ("Check for Missing Steps", "Check for missing steps."),
-                ("Check for Ambiguous Claims", "Check for ambiguous claims."),
-                ("Check for Outdated Info", "Check for outdated info."),
-                ("Validate Against External Knowledge (optional)", "Validate against external knowledge (optional)."),
-            ],
-        )
 
     def _prompt_custom_translation(self, text: str) -> None:
         lang, ok = QInputDialog.getText(self, "Custom Language", "Translate to which language?")
