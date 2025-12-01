@@ -35,6 +35,7 @@ hidden = (
         'anyio',
         'starlette',
         'chromadb.api.rust',
+        'python_multipart',
     ]
     + collect_submodules('chromadb')
     + collect_submodules('onnxruntime')
