@@ -4047,7 +4047,7 @@ class MainWindow(QMainWindow):
             target_key = Qt.Key_Home
             if shift:
                 target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
-        elif key == Qt.Key_Semicolon:
+        elif key in (Qt.Key_Semicolon, Qt.Key_Colon):
             target_key = Qt.Key_End
             if shift:
                 target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
