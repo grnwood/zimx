@@ -19,9 +19,7 @@ Logbook of all the development efforts on zim. yes!
 (x)  when you click a link from a floating editor to a anchor, show the animation  @edit
 (x)  found the vi ; key bug, when i'm in caps it works, when lower it doesn't (maybe win32 only)  @edit
   ( )  figure out a way to not allow crazy links to get generated and pasted @edit				￼
-  			![paste_image_001](./paste_image_001.png)
-		This is also for supporting file system links "C :  \some\folder\etc"
- 	Also make colon-link (: somelink) processing smarter, like if its in a the middle of the sentence
+  			![paste_image_001](./paste_image_001.png)make colon-link (: somelink) processing smarter, like if its in a the middle of the sentence
  		or 8 : 56pm
  		of  This : That  <-- not a link.		
 ( )  add find and replace functionality @edit
@@ -43,7 +41,6 @@ Logbook of all the development efforts on zim. yes!
 ( )  need a way to AI chat with my tasks. @task
 ( ) need a way to print my tasks (esp. the current filter... print to browser?) @task
 
-
 ### Page Templages
 ( )  ctrl-n should default to the `New Page` template.  @page
 ( ) Add some more?  @edit
@@ -59,3 +56,6 @@ Logbook of all the development efforts on zim. yes!
 	  * How to handle subfolders, etc?
 	* Delete has to remove from chroma or get to big.
 	* Chroma per chat?  or global chroma file for the whole app?
+( )  i lost my right click ai actions in the ai chat window text, lets put them back. @ai
+( )  when i send in ai prompts from main editor it doesn't register in that as sent, lets fix @ai
+
