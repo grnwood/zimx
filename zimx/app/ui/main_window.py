@@ -197,7 +197,7 @@ class MainWindow(QMainWindow):
 
     # --- Vi-mode dialog lockout ---
     def _lock_vi_mode_toggle(self):
-        """Prevent vi mode from being toggled (CapsLock key) while a dialog is open."""
+        """Prevent vi mode from being toggled while a dialog is open."""
         self._vi_mode_locked = True
 
     def _unlock_vi_mode_toggle(self):
@@ -652,7 +652,7 @@ class MainWindow(QMainWindow):
         open_vault_shortcut.activated.connect(lambda: self._select_vault(spawn_new_process=False))
         open_vault_new_win_shortcut = QShortcut(QKeySequence("Ctrl+Shift+O"), self)
         open_vault_new_win_shortcut.activated.connect(lambda: self._select_vault(spawn_new_process=True))
-        # Focus toggle moved to Ctrl+Shift+Space; Ctrl+Space now toggles vi-mode
+        # Focus toggle moved to Ctrl+Shift+Space; Alt+Space now toggles vi-mode
         focus_toggle = QShortcut(QKeySequence("Ctrl+Shift+Space"), self)
         focus_toggle.activated.connect(self._toggle_focus_between_tree_and_editor)
         # Explicit heading popup shortcut (Ctrl+Shift+Tab)
@@ -1725,26 +1725,30 @@ class MainWindow(QMainWindow):
         except httpx.HTTPError as exc:
             self._alert(f"Failed to create journal entry: {exc}")
             return
-        path = resp.json().get("path")
+        payload = resp.json()
+        path = payload.get("path")
+        created = payload.get("created", False)
         if path:
             # Repopulate tree so newly created nested year/month/day nodes appear
             self._pending_selection = path
             self._populate_vault_tree()
             # Apply journal templates (year/month/day) if newly created
-            self._apply_journal_templates(path)
+            self._apply_journal_templates(path, allow_overwrite=created)
             # Open with cursor at end for immediate typing
-            self._open_file(path, cursor_at_end=True)
+            self._debug(f"Journal shortcut: forcing reload for {path}")
+            self._open_file(path, force=True, cursor_at_end=True)
             self.statusBar().showMessage("Journal: today", 4000)
             # Ensure focus returns to editor (tree selection may have taken focus)
             self.editor.setFocus()
             self._apply_focus_borders()
 
-    def _apply_journal_templates(self, day_file_path: str) -> None:
-        """Ensure year/month/day journal pages exist and apply templates with variable substitution.
+    def _apply_journal_templates(self, day_file_path: str, allow_overwrite: bool = True) -> None:
+        """Ensure year/month/day journal scaffolding exists and apply templates if allowed.
 
         day_file_path: relative file path like /Journal/2025/11/12/12.txt (from API)
         Templates: JournalYear.txt, JournalMonth.txt, JournalDay.txt
         Variables: {{YYYY}}, {{Month}}, {{DOW}}, {{dd}}
+        allow_overwrite: when False, existing files are left untouched (no template writes)
         """
         if not self.vault_root:
             return
@@ -1807,12 +1811,12 @@ class MainWindow(QMainWindow):
             return size < 20  # heuristic: very small stub header
 
         # Year
-        if needs_write(year_page) and year_tpl.exists():
+        if allow_overwrite and needs_write(year_page) and year_tpl.exists():
             content = render(year_tpl)
             if content:
                 year_page.write_text(content, encoding="utf-8")
         # Month
-        if needs_write(month_page) and month_tpl.exists():
+        if allow_overwrite and needs_write(month_page) and month_tpl.exists():
             content = render(month_tpl)
             if content:
                 month_page.write_text(content, encoding="utf-8")
@@ -1832,21 +1836,22 @@ class MainWindow(QMainWindow):
             if len(lines) <= 3 and len(stripped) < 160:
                 return True
             return False
-        if needs_day_write(day_page) and day_tpl.exists():
+        if allow_overwrite and needs_day_write(day_page) and day_tpl.exists():
             content = render(day_tpl)
             if content:
                 day_page.write_text(content, encoding="utf-8")
         # Always perform a substitution pass on existing day page if placeholders remain
-        try:
-            existing = day_page.read_text(encoding="utf-8")
-            if any(token in existing for token in ("{{YYYY}}","{{Month}}","{{DOW}}","{{dd}}")):
-                replaced = existing
-                for k,v in vars_map.items():
-                    replaced = replaced.replace(k, v)
-                if replaced != existing:
-                    day_page.write_text(replaced, encoding="utf-8")
-        except Exception:
-            pass
+        if allow_overwrite:
+            try:
+                existing = day_page.read_text(encoding="utf-8")
+                if any(token in existing for token in ("{{YYYY}}","{{Month}}","{{DOW}}","{{dd}}")):
+                    replaced = existing
+                    for k,v in vars_map.items():
+                        replaced = replaced.replace(k, v)
+                    if replaced != existing:
+                        day_page.write_text(replaced, encoding="utf-8")
+            except Exception:
+                pass
 
     def _on_image_saved(self, filename: str) -> None:
         self.statusBar().showMessage(f"Image pasted as {filename}", 5000)
@@ -1892,9 +1897,12 @@ class MainWindow(QMainWindow):
         vi_was_active = self._suspend_vi_mode_for_dialog()
         
         # Get selected text if any
+        editor_cursor = self.editor.textCursor()
+        selection_range: tuple[int, int] | None = None
         selected_text = ""
-        if self.editor.textCursor().hasSelection():
-            selected_text = self.editor.textCursor().selectedText()
+        if editor_cursor.hasSelection():
+            selection_range = (editor_cursor.selectionStart(), editor_cursor.selectionEnd())
+            selected_text = editor_cursor.selectedText()
             # Clean up selected text - remove line breaks and paragraph separators
             # Qt returns paragraph separators as U+2029 which cause line breaks in links
             selected_text = selected_text.replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ').strip()
@@ -1922,12 +1930,14 @@ class MainWindow(QMainWindow):
             link_name = dlg.selected_link_name()
             if colon_path:
                 # If there was selected text, replace it with the link
-                if selected_text:
+                if selection_range:
                     cursor = self.editor.textCursor()
-                    if cursor.hasSelection():
-                        cursor.removeSelectedText()
-                        self.editor.setTextCursor(cursor)
-                label = link_name or colon_path
+                    start, end = selection_range
+                    cursor.setPosition(start)
+                    cursor.setPosition(end, QTextCursor.KeepAnchor)
+                    cursor.removeSelectedText()
+                    self.editor.setTextCursor(cursor)
+                label = link_name or selected_text or colon_path
                 self.editor.insert_link(colon_path, label)
                 inserted = True
 
@@ -2279,6 +2289,8 @@ class MainWindow(QMainWindow):
         """Handle link activations from the editor (main or popup)."""
         if not link:
             return
+        if "\x00" in link:
+            link = link.split("\x00", 1)[0]
         if link.startswith(("http://", "https://")):
             try:
                 from PySide6.QtGui import QDesktopServices
@@ -2760,7 +2772,7 @@ class MainWindow(QMainWindow):
 
     # --- Focus toggle & visual indication ---------------------------
     def _toggle_focus_between_tree_and_editor(self) -> None:
-        """Toggle focus between tree, editor, and right panel (Ctrl+Space) using MRU order."""
+        """Toggle focus between tree, editor, and right panel (Ctrl+Shift+Space) using MRU order."""
         current = self._focus_target_for_widget(self.focusWidget())
         if current in self._focus_recent:
             # Rotate MRU list so current moves to end, pick next
@@ -3833,14 +3845,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def _send_capslock_key_event(self) -> None:
-        """Simulate a CapsLock press so vi-mode toggles via the same path."""
-        target = QApplication.focusWidget() or self
-        press = QKeyEvent(QEvent.KeyPress, Qt.Key_CapsLock, Qt.NoModifier)
-        release = QKeyEvent(QEvent.KeyRelease, Qt.Key_CapsLock, Qt.NoModifier)
-        QApplication.sendEvent(target, press)
-        QApplication.sendEvent(target, release)
-
     def _install_vi_mode_filters(self) -> None:
         for target in getattr(self, "_vi_filter_targets", []):
             target.removeEventFilter(self)
@@ -3862,12 +3866,6 @@ class MainWindow(QMainWindow):
                 else:
                     self._cycle_popup("history", reverse=event.key() == Qt.Key_Backtab)
                 return True
-            if event.key() == Qt.Key_CapsLock:
-                # Toggle vi-mode via CapsLock (also available via Ctrl+Space)
-                if getattr(self, "_vi_mode_locked", False):
-                    return True
-                self._toggle_vi_mode()
-                return True
             # Allow Esc to exit vi-mode explicitly
             if event.key() == Qt.Key_Escape:
                 try:
@@ -3879,16 +3877,18 @@ class MainWindow(QMainWindow):
                     self._vi_mode_active = False
                     self._apply_vi_mode_statusbar_style()
                     return True
-            # Toggle vi-mode on Ctrl+Space (without Shift)
-            if (
-                event.key() == Qt.Key_Space
-                and event.modifiers() & Qt.ControlModifier
-                and not (event.modifiers() & Qt.ShiftModifier)
-            ):
-                if getattr(self, "_vi_mode_locked", False):
+            if event.key() == Qt.Key_Semicolon:
+                mods = event.modifiers()
+                base_mods = mods & ~Qt.KeypadModifier
+                try:
+                    base_mods &= ~Qt.GroupSwitchModifier  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                if base_mods == Qt.AltModifier:
+                    if getattr(self, "_vi_mode_locked", False):
+                        return True
+                    self._toggle_vi_mode()
                     return True
-                self._send_capslock_key_event()
-                return True
             if self._vi_mode_active:
                 # Always let Control-modified shortcuts through (bold/italic/strike/etc.)
                 if event.modifiers() & Qt.ControlModifier:

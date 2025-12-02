@@ -1,2 +1,2 @@
-# {{DOW}} {{dd}} {{YYYY}}
+# {{DOW}}, {{Month}} {{dd}} {{YYYY}}
 ---

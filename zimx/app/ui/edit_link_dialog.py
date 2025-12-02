@@ -1,45 +1,6 @@
 from __future__ import annotations
-import sys
 
-def is_capslock_on():
-    """Check if CapsLock is currently enabled."""
-    if sys.platform.startswith('linux'):
-        import subprocess
-        try:
-            xset_output = subprocess.check_output(['xset', 'q'], text=True)
-            return 'Caps Lock:   on' in xset_output
-        except Exception:
-            return False
-    elif sys.platform.startswith('win'):
-        try:
-            import ctypes
-            # 0x14 is the virtual-key code for CapsLock
-            return bool(ctypes.WinDLL("User32.dll").GetKeyState(0x14) & 1)
-        except Exception:
-            return False
-    else:
-        return False
-
-def toggle_capslock():
-    """Toggle CapsLock key in a cross-platform way (Linux/Windows)."""
-    if sys.platform.startswith('linux'):
-        import subprocess
-        subprocess.run(['xdotool', 'key', 'Caps_Lock'])
-    elif sys.platform.startswith('win'):
-        try:
-            import keyboard
-        except ImportError:
-            raise ImportError("The 'keyboard' module is required on Windows. Please install it with 'pip install keyboard'.")
-        keyboard.press_and_release('caps lock')
-    else:
-        raise NotImplementedError("CapsLock toggle not implemented for this OS.")
-
-def ensure_capslock_off():
-    """Ensure CapsLock is off by toggling if needed."""
-    if is_capslock_on():
-        toggle_capslock()
 from PySide6.QtCore import Qt
-import sys
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import (

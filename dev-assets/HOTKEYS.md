@@ -30,7 +30,7 @@ Tasks / Vi Mode
 ---------------
 - `F12`: Toggle task checkbox at cursor.
 - `Ctrl+\` or `Ctrl+Backslash`: Focus Tasks search.
-- Vi-mode toggle: `CapsLock` or `Ctrl+Space`.
+- Vi-mode toggle: `Alt+Space`.
   - Esc exits vi-mode.
   - Vim-style navigation applies when vi-mode is on; Ctrl shortcuts still work as usual.
 

@@ -10,6 +10,7 @@ from PySide6.QtCore import QEvent, QMimeData, Qt, QRegularExpression, Signal, QU
 from PySide6.QtGui import (
     QColor,
     QFont,
+    QFontDatabase,
     QImage,
     QTextCharFormat,
     QTextCursor,
@@ -350,10 +351,17 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.italic_format = QTextCharFormat()
         self.italic_format.setForeground(QColor("#ffa7c4"))
 
+        mono_font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        if mono_font.family():
+            mono_family = mono_font.family()
+        else:
+            mono_family = "Courier New"
         self.code_format = QTextCharFormat()
         self.code_format.setForeground(QColor("#a3ffab"))
         self.code_format.setBackground(QColor("#2a2a2a"))
-        self.code_format.setFontFamily("Fira Code")
+        self.code_format.setFontFamily(mono_family)
+        self.code_format.setFontFixedPitch(True)
+        self.code_format.setFontStyleHint(QFont.StyleHint.Monospace)
 
         self.quote_format = QTextCharFormat()
         self.quote_format.setForeground(QColor("#7fdbff"))
@@ -365,7 +373,9 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.code_block = QTextCharFormat()
         self.code_block.setBackground(QColor("#2a2a2a"))
         self.code_block.setForeground(QColor("#a3ffab"))
-        self.code_block.setFontFamily("Fira Code")
+        self.code_block.setFontFamily(mono_family)
+        self.code_block.setFontFixedPitch(True)
+        self.code_block.setFontStyleHint(QFont.StyleHint.Monospace)
         
         self.code_fence_format = QTextCharFormat()
         self.code_fence_format.setForeground(QColor("#555555"))
@@ -382,7 +392,9 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.hr_format.setBackground(QColor("#333333"))
 
         self.table_format = QTextCharFormat()
-        self.table_format.setFontFamily("Fira Code")
+        self.table_format.setFontFamily(mono_family)
+        self.table_format.setFontFixedPitch(True)
+        self.table_format.setFontStyleHint(QFont.StyleHint.Monospace)
         
         # Strikethrough format
         self.strikethrough_format = QTextCharFormat()
@@ -408,7 +420,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         prev_state = self.previousBlockState()
         in_code_block = (prev_state == 1)
         
-        # Check if this line starts or ends a code block
+        # Check if this line starts or ends a code block                            
         if text.startswith("```"):
             # Toggle code block state
             in_code_block = not in_code_block
@@ -666,8 +678,12 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                         self.setFormat(idx, label_start - idx, self.hidden_format)
                         # If label is empty, show the link; otherwise show the label
                         if label_end == label_start:  # Empty label
-                            # Show the link part instead
-                            self.setFormat(link_start, link_end - link_start, link_format)
+                            # Skip the sentinel pipe we inject for empty labels.
+                            visible_end = link_end
+                            if link_end > link_start and text[link_end - 1] == "|":
+                                visible_end -= 1
+                            if visible_end > link_start:
+                                self.setFormat(link_start, visible_end - link_start, link_format)
                         else:  # Non-empty label
                             self.setFormat(label_start, label_end - label_start, link_format)
                         self.setFormat(label_end, 1, self.hidden_format)  # Hide closing sentinel
@@ -694,7 +710,13 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         camel_iter = CAMEL_LINK_PATTERN.globalMatch(text)
         while camel_iter.hasNext():
             match = camel_iter.next()
-            self.setFormat(match.capturedStart(), match.capturedLength(), link_format)
+            start = match.capturedStart()
+            end = start + match.capturedLength()
+            inside_wiki = any(ws <= start and end <= we for (ws, we) in wiki_spans)
+            inside_display = any(ds <= start and end <= de for (ds, de) in display_link_spans)
+            if inside_wiki or inside_display:
+                continue
+            self.setFormat(start, end - start, link_format)
 
         # Plain colon links: :Page:Name
         colon_iter = COLON_LINK_PATTERN.globalMatch(text)
@@ -775,10 +797,16 @@ class MarkdownEditor(QTextEdit):
                 link_spans.append((label_start, m.end() - 1))  # exclude the closing ]
         def is_in_label(pos):
             return any(start <= pos < end for start, end in link_spans)
+        allowed_prefixes = {"(", "[", "{", "<", "'", '"'}
         def replacer(match):
             start = match.start()
             if is_in_label(start):
                 return match.group(0)  # Don't replace if in label part
+            if start > 0:
+                prev = text[start - 1]
+                # Only convert when +CamelCase appears after whitespace or opening punctuation.
+                if not prev.isspace() and prev not in allowed_prefixes:
+                    return match.group(0)
             link = match.group('link')
             label = link  # Just the page name, no plus
             if base_dir:
@@ -1340,8 +1368,25 @@ class MarkdownEditor(QTextEdit):
         return text.strip("\n")
 
     def _normalize_external_link(self, link: str) -> str:
-        """Preserve full external links (including scheme) for storage."""
-        return link.strip()
+        """Preserve full external links while stripping whitespace and hidden sentinels."""
+        text = (link or "").strip()
+        if "\x00" in text:
+            text = text.split("\x00", 1)[0]
+        return text
+
+    def _wrap_plain_http_links(self, text: str) -> str:
+        """Convert bare HTTP(S) URLs into wiki format [url|] to enable sentinel rendering."""
+        if not text or "http" not in text:
+            return text
+
+        pattern = re.compile(r"(?<!\[)(?<!\()(https?://[^\s<>\[\]\(\)\x00]+)")
+
+        def repl(match: re.Match[str]) -> str:
+            url = match.group(1)
+            normalized = self._normalize_external_link(url)
+            return f"[{normalized}|]"
+
+        return pattern.sub(repl, text)
 
     def _has_markdown_syntax(self, text: str) -> bool:
         """Heuristic to decide if text is markdown (headings, lists, code, etc.)."""
@@ -1531,11 +1576,19 @@ class MarkdownEditor(QTextEdit):
         
         # Vi-mode: Shift+H selects left, Shift+L selects right (like Shift+Arrow)
         if self._vi_mode_active:
-            # Shift+; (:) should select to end of line, not type a link marker
-            if (event.key() in (Qt.Key_Semicolon, Qt.Key_Colon) or event.text() == ":"):
-                c = self.textCursor()
-                c.movePosition(QTextCursor.EndOfLine, QTextCursor.KeepAnchor)
-                self.setTextCursor(c)
+            # Map ';' to End and ':' (Shift+;) to Shift+End
+            if event.key() in (Qt.Key_Semicolon, Qt.Key_Colon) or event.text() in (";", ":"):
+                cursor = self.textCursor()
+                keep_anchor = (
+                    bool(event.modifiers() & Qt.ShiftModifier)
+                    or event.key() == Qt.Key_Colon
+                    or event.text() == ":"
+                )
+                cursor.movePosition(
+                    QTextCursor.EndOfLine,
+                    QTextCursor.KeepAnchor if keep_anchor else QTextCursor.MoveAnchor,
+                )
+                self.setTextCursor(cursor)
                 event.accept()
                 return
             if (event.modifiers() & Qt.ShiftModifier) and not (event.modifiers() & Qt.ControlModifier):
@@ -2081,12 +2134,18 @@ class MarkdownEditor(QTextEdit):
                         if label_end == label_start:  # Empty label - link is visible
                             visible_start = link_start
                             visible_end = link_end
+                            if visible_end > visible_start and text[visible_end - 1] == "|":
+                                visible_end -= 1
+                            raw_link = text[link_start:link_end]
+                            if raw_link.endswith("|"):
+                                raw_link = raw_link[:-1]
                         else:  # Non-empty label - label is visible
                             visible_start = label_start
                             visible_end = label_end
+                            raw_link = text[link_start:link_end]
                         
                         if visible_start <= rel < visible_end:
-                            return (text[link_start:link_end], visible_start, visible_end)
+                            return (raw_link, visible_start, visible_end)
                         
                         idx = label_end + 1
                         continue
@@ -2175,22 +2234,26 @@ class MarkdownEditor(QTextEdit):
                     label_start = link_end + 1
                     label_end = text.find('\x00', label_start)
                     if label_end >= label_start:  # >= to handle empty labels
-                        # Determine visible region
+                        raw_link = text[link_start:link_end]
+                        visible_label = text[label_start:label_end]
                         if label_end == label_start:  # Empty label - link is visible
                             visible_start = link_start
                             visible_end = link_end
-                            visible_text = text[link_start:link_end]
+                            if visible_end > visible_start and text[visible_end - 1] == "|":
+                                visible_end -= 1
+                            visible_text = text[link_start:visible_end]
+                            clean_link = raw_link[:-1] if raw_link.endswith("|") else raw_link
                         else:  # Non-empty label - label is visible
                             visible_start = label_start
                             visible_end = label_end
-                            visible_text = text[label_start:label_end]
-                        
+                            visible_text = visible_label
+                            clean_link = raw_link
+
                         # Check if cursor is in the visible portion
                         if visible_start <= rel <= visible_end:
-                            link = text[link_start:link_end]
-                            label = text[label_start:label_end]
-                            return (idx, label_end + 1, label if label else link, link)
-                        
+                            display_text = visible_text or clean_link
+                            return (idx, label_end + 1, display_text, clean_link)
+
                         idx = label_end + 1
                         continue
             idx += 1
@@ -2570,15 +2633,20 @@ class MarkdownEditor(QTextEdit):
         return f"{indent}{hashes}{spacer}{clean_body}"
 
     def _encode_wiki_link(self, match: re.Match[str]) -> str:
-        """Convert [link|label] to hidden format: \x00link\x00label\x00"""
+        """Convert [link|label] to hidden format, preserving empty-label marker."""
         link = match.group("link")
         label = match.group("label")
+        if not label:
+            # Inject a trailing pipe so plain-text round trips keep the wiki delimiter.
+            return f"\x00{link}|\x00\x00"
         return f"\x00{link}\x00{label}\x00"
 
     def _decode_wiki_link(self, match: re.Match[str]) -> str:
         """Convert hidden format \x00link\x00label\x00 back to [link|label]"""
         link = match.group("link")
         label = match.group("label")
+        if not label and link.endswith("|"):
+            link = link[:-1]
         return f"[{link}|{label}]"
 
     def refresh_heading_outline(self) -> None:
@@ -2659,6 +2727,7 @@ class MarkdownEditor(QTextEdit):
         storage_text = self._from_display(current_text)
         # Convert +CamelCase links immediately so display is updated without waiting for save
         storage_text = self._convert_camelcase_links(storage_text)
+        storage_text = self._wrap_plain_http_links(storage_text)
         # Then convert to display format
         display_text = self._to_display(storage_text)
         old_cursor_pos = self.textCursor().position()

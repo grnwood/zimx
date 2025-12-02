@@ -172,9 +172,9 @@ def file_write(payload: FileWritePayload) -> dict:
 def journal_today(payload: JournalPayload) -> dict:
     root = vault_state.get_root()
     # Pass template through so the initial content becomes the user's day template
-    target = files.ensure_journal_today(root, template=payload.template)
+    target, created = files.ensure_journal_today(root, template=payload.template)
     rel = f"/{target.relative_to(root).as_posix()}"
-    return {"path": rel}
+    return {"path": rel, "created": created}
 
 
 @app.get("/api/tasks")

@@ -54,7 +54,7 @@ class WidgetTest(QMainWindow):
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.KeyPress:
-            if event.key() == Qt.Key_CapsLock:
+            if event.key() == Qt.Key_Semicolon and event.modifiers() == Qt.AltModifier:
                 self._vi_mode = not self._vi_mode
                 self.editor.set_vi_mode(self._vi_mode)
                 return True
@@ -67,9 +67,6 @@ class WidgetTest(QMainWindow):
                 if Qt.Key_A <= event.key() <= Qt.Key_Z:
                     if not (event.modifiers() & Qt.ControlModifier):
                         return True
-        elif event.type() == QEvent.KeyRelease:
-            if event.key() == Qt.Key_CapsLock:
-                return True
         return super().eventFilter(obj, event)
 
     def _translate_vi_key_event(self, event):

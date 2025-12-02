@@ -55,6 +55,12 @@ def test_camelcase_link(editor):
     assert "CamelCasePage" in editor.toPlainText() or "CamelCasePage" in editor.toHtml()
 
 
+def test_camelcase_skip_inside_http(editor):
+    url = "https://lyonscg.atlassian.net/wiki/spaces/AC/pages/5814616065/SAP+2025+-+Launch+Checklist"
+    converted = editor._convert_camelcase_links(url)
+    assert converted == url
+
+
 def test_insert_link_dialog_like_http(editor):
     # Simulate inserting a complex HTTP link through the editor helper
     url = "https://teams.microsoft.com/l/message/19:5071d17824ad4b278afaa9b39ca3fea4@thread.v2/1763757927194?context=%7B%22contextType%22%3A%22chat%22%7D"
@@ -75,6 +81,20 @@ def test_paste_complex_http_link_normalizes(editor):
     editor._refresh_display()
     expected = "/teams.microsoft.com/l/message/19:5071d17824ad4b278afaa9b39ca3fea4@thread.v2/1763757927194?context=%7B%22contextType%22%3A%22chat%22%7D|"
     assert expected in editor.toPlainText()
+
+
+def test_insert_link_with_plus_signs(editor):
+    url = "https://lyonscg.atlassian.net/wiki/spaces/AC/pages/5814616065/SAP+2025+-+Launch+Checklist"
+    editor.setPlainText("")
+    editor.insert_link(url, None)
+    markdown = editor.to_markdown()
+    assert f"[{url}|]" in markdown
+
+
+def test_normalize_external_link_strips_sentinels(editor):
+    url = "https://sample.example/path+Part"
+    raw = f"{url}\x00extra label\x00"
+    assert editor._normalize_external_link(raw) == url
 
 
 def test_camelcase_link_uses_parent_folder(editor):

@@ -37,6 +37,8 @@ class InsertLinkDialog(QDialog):
         self._filter_prefix = filter_prefix
         self._filter_label = filter_label
         self._clear_filter_cb = clear_filter_cb
+        self._launched_with_selection = False
+        self._seeded_text = ""
         
         # Set up geometry save timer (debounced)
         self.geometry_save_timer = QTimer(self)
@@ -100,14 +102,17 @@ class InsertLinkDialog(QDialog):
         # Initialize with selected text if provided
         if selected_text:
             clean_text = selected_text.replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ').strip()
-            # Check if it's an HTTP URL - if so, don't normalize it
-            if clean_text.startswith(("http://", "https://")):
-                self.search.setText(clean_text)
-                self.link_name.setText(clean_text)
-            else:
-                normalized = normalize_link_target(clean_text)
-                self.search.setText(normalized)
-                self.link_name.setText(normalized)
+            self._launched_with_selection = True
+            self._seeded_text = clean_text
+            self._link_name_manually_edited = True
+            self._ignore_search_change = True
+            self.search.blockSignals(True)
+            self.search.setText(clean_text)
+            self.search.blockSignals(False)
+            self._ignore_search_change = False
+            self.link_name.blockSignals(True)
+            self.link_name.setText(clean_text)
+            self.link_name.blockSignals(False)
             # Select all text in search field so typing replaces it
             self.search.selectAll()
 
@@ -139,6 +144,8 @@ class InsertLinkDialog(QDialog):
         text = self.search.text().strip()
         # Don't normalize HTTP URLs
         if text.startswith(("http://", "https://")):
+            return text or None
+        if self._launched_with_selection and text == self._seeded_text:
             return text or None
         normalized = normalize_link_target(text)
         return normalized or None
