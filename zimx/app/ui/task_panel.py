@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from zimx.app import config
+from zimx.server.adapters.files import PAGE_SUFFIX
 from .path_utils import path_to_colon
 
 
@@ -120,7 +121,26 @@ class TaskPanel(QWidget):
         self.task_tree.setFocusPolicy(Qt.StrongFocus)
 
         sidebar = QVBoxLayout()
-        sidebar.addWidget(QLabel("Tags"))
+        tags_row = QHBoxLayout()
+        tags_row.addWidget(QLabel("Tags"))
+        self.filter_label = QLabel("Filtered")
+        self.filter_label.setVisible(False)
+        tags_row.addSpacing(6)
+        tags_row.addWidget(self.filter_label)
+        self.filter_checkbox = QCheckBox()
+        self.filter_checkbox.setChecked(True)
+        self.filter_checkbox.setVisible(False)
+        self.filter_checkbox.setToolTip("Limit tasks to the filtered navigation subtree.")
+        self.filter_checkbox.toggled.connect(self._on_filter_checkbox_toggled)
+        tags_row.addWidget(self.filter_checkbox)
+        self.journal_checkbox = QCheckBox("Journal?")
+        self.journal_checkbox.setChecked(True)
+        self.journal_checkbox.setVisible(False)
+        self.journal_checkbox.setToolTip("Include tasks from the Journal subtree while filtered.")
+        self.journal_checkbox.toggled.connect(self._on_journal_checkbox_toggled)
+        tags_row.addWidget(self.journal_checkbox)
+        tags_row.addStretch(1)
+        sidebar.addLayout(tags_row)
         sidebar.addWidget(self.tag_list)
         toggles_row = QHBoxLayout()
         toggles_row.addWidget(self.show_completed)
@@ -144,7 +164,13 @@ class TaskPanel(QWidget):
         self.setLayout(layout)
         
         self.vault_root = None
+        self._nav_filter_prefix: Optional[str] = None
+        self._nav_filter_enabled = True
+        self._include_journal = True
+        self._visible_tasks: list[dict] = []
+        self._tag_source_tasks: list[dict] = []
         self._setup_focus_defaults()
+        self._update_filter_indicator()
 
     def _setup_focus_defaults(self) -> None:
         """Ensure sensible default focus inside the Tasks tab."""
@@ -154,6 +180,114 @@ class TaskPanel(QWidget):
         self.task_tree.setFocusPolicy(Qt.StrongFocus)
         self.search.installEventFilter(self)
         self.task_tree.installEventFilter(self)
+
+    def _on_filter_checkbox_toggled(self, checked: bool) -> None:
+        if not self._nav_filter_prefix:
+            self.filter_checkbox.blockSignals(True)
+            self.filter_checkbox.setChecked(True)
+            self.filter_checkbox.blockSignals(False)
+            return
+        self._nav_filter_enabled = bool(checked)
+        self._update_filter_indicator()
+        self._refresh_tasks()
+
+    def _on_journal_checkbox_toggled(self, checked: bool) -> None:
+        if not self._nav_filter_prefix:
+            self.journal_checkbox.blockSignals(True)
+            self.journal_checkbox.setChecked(True)
+            self.journal_checkbox.blockSignals(False)
+            return
+        self._include_journal = bool(checked)
+        self._refresh_tasks()
+
+    def _update_filter_indicator(self) -> None:
+        active = bool(self._nav_filter_prefix)
+        self.filter_label.setVisible(active)
+        self.filter_checkbox.setVisible(active)
+        self.journal_checkbox.setVisible(active)
+        if not active:
+            self.filter_label.setStyleSheet("")
+            self.filter_checkbox.blockSignals(True)
+            self.filter_checkbox.setChecked(True)
+            self.filter_checkbox.blockSignals(False)
+            self.journal_checkbox.blockSignals(True)
+            self.journal_checkbox.setChecked(True)
+            self.journal_checkbox.blockSignals(False)
+            self.journal_checkbox.setEnabled(False)
+            self._nav_filter_enabled = True
+            self._include_journal = True
+            return
+        self.filter_checkbox.blockSignals(True)
+        self.filter_checkbox.setChecked(self._nav_filter_enabled)
+        self.filter_checkbox.blockSignals(False)
+        self.journal_checkbox.blockSignals(True)
+        self.journal_checkbox.setChecked(self._include_journal)
+        self.journal_checkbox.blockSignals(False)
+        self.journal_checkbox.setEnabled(self._nav_filter_enabled)
+        if self._nav_filter_enabled:
+            self.filter_label.setStyleSheet(
+                "color: #ffffff; background-color: #c62828; padding: 1px 6px; border-radius: 4px;"
+            )
+        else:
+            self.filter_label.setStyleSheet("")
+
+    @staticmethod
+    def _normalize_task_path(path: Optional[str]) -> str:
+        if not path:
+            return ""
+        norm = path.replace("\\", "/")
+        if not norm.startswith("/"):
+            norm = "/" + norm.lstrip("/")
+        return norm
+
+    def _task_matches_filter(self, task_path: str, prefix: str) -> bool:
+        if not task_path or not prefix:
+            return False
+        if prefix == "/":
+            return True
+        if prefix.endswith(PAGE_SUFFIX):
+            return task_path == prefix
+        base = prefix.rstrip("/")
+        if not base:
+            return True
+        if task_path.startswith(base + "/"):
+            return True
+        file_target = base + PAGE_SUFFIX
+        return task_path == file_target
+
+    def _is_journal_path(self, task_path: str) -> bool:
+        if not task_path:
+            return False
+        norm = task_path
+        journal_root = "/Journal"
+        if norm == journal_root:
+            return True
+        if norm == journal_root + PAGE_SUFFIX:
+            return True
+        return norm.startswith(journal_root + "/")
+
+    def _apply_nav_filter(self, tasks: list[dict]) -> list[dict]:
+        if not tasks:
+            return []
+        if not self._nav_filter_prefix or not self._nav_filter_enabled:
+            return tasks
+        prefix = self._normalize_task_path(self._nav_filter_prefix)
+        include_journal = self._include_journal
+        filtered: list[dict] = []
+        seen_ids: set = set()
+        for task in tasks:
+            task_path = self._normalize_task_path(task.get("path"))
+            task_id = task.get("id") or task_path
+            if self._task_matches_filter(task_path, prefix):
+                if task_id not in seen_ids:
+                    filtered.append(task)
+                    seen_ids.add(task_id)
+                continue
+            if include_journal and self._is_journal_path(task_path):
+                if task_id not in seen_ids:
+                    filtered.append(task)
+                    seen_ids.add(task_id)
+        return filtered
 
     def focusInEvent(self, event):  # type: ignore[override]
         super().focusInEvent(event)
@@ -175,7 +309,6 @@ class TaskPanel(QWidget):
             if self.tag_list.itemAt(event.pos()) is None:
                 self.active_tags.clear()
                 self._refresh_tasks()
-                self._refresh_tags()
                 return True
         if obj in (self.search, self.task_tree) and event.type() == QEvent.KeyPress:
             if obj is self.search and _should_suspend_nav_for_tag(
@@ -192,7 +325,6 @@ class TaskPanel(QWidget):
         if event.key() == Qt.Key_Escape:
             self.active_tags.clear()
             self.search.clear()
-            self._refresh_tags()
             self._refresh_tasks()
             event.accept()
             return
@@ -269,27 +401,58 @@ class TaskPanel(QWidget):
             self.active_tags.remove(tag)
         else:
             self.active_tags.add(tag)
-        self._refresh_tags()
         self._refresh_tasks()
 
     def refresh(self) -> None:
         if not config.has_active_vault():
             self.clear()
             return
-        self._refresh_tags()
         self._refresh_tasks()
 
     def clear(self) -> None:
         self.active_tags.clear()
         self.tag_list.clear()
         self.task_tree.clear()
+        self._visible_tasks = []
+        self._tag_source_tasks = []
+        self._nav_filter_prefix = None
+        self._nav_filter_enabled = True
+        self._include_journal = True
+        self._update_filter_indicator()
 
     def _refresh_tags(self) -> None:
         self.tag_list.blockSignals(True)
         self.tag_list.clear()
-        tags = config.fetch_task_tags()
-        self._available_tags = {tag for tag, _ in tags}
-        for tag, count in tags:
+        if self._tag_source_tasks:
+            counts: dict[str, int] = {}
+            source_tasks = self._tag_source_tasks
+            for task in source_tasks:
+                tag_set = set(task.get("tags", []))
+                text = task.get("text", "") or ""
+                for token in re.findall(r"@[A-Za-z0-9_]+", text):
+                    tag_set.add(token)
+                for tag in tag_set:
+                    counts[tag] = counts.get(tag, 0) + 1
+            tag_items = sorted(counts.items())
+        elif self._nav_filter_prefix and self._nav_filter_enabled:
+            counts: dict[str, int] = {}
+            for task in self._visible_tasks:
+                tag_set = set(task.get("tags", []))
+                text = task.get("text", "") or ""
+                for token in re.findall(r"@[A-Za-z0-9_]+", text):
+                    tag_set.add(token)
+                for tag in tag_set:
+                    counts[tag] = counts.get(tag, 0) + 1
+            tag_items = sorted(counts.items())
+        else:
+            tag_items = config.fetch_task_tags()
+        self._available_tags = {tag for tag, _ in tag_items}
+        # Drop active tags that are no longer available in the current view
+        if self.active_tags:
+            unavailable = {tag for tag in self.active_tags if tag not in self._available_tags}
+            if unavailable:
+                self.active_tags.difference_update(unavailable)
+        for tag, count in tag_items:
             item = QListWidgetItem(f"{tag} ({count})")
             item.setData(Qt.UserRole, tag)
             active = tag in self.active_tags
@@ -308,7 +471,6 @@ class TaskPanel(QWidget):
         if found_tags is not None:
             if set(found_tags) != self.active_tags:
                 self.active_tags = set(found_tags)
-                self._refresh_tags()
         include_done = self.show_completed.isChecked()
         effective_tags = self.active_tags
         searching = bool(query) or bool(effective_tags)
@@ -322,8 +484,29 @@ class TaskPanel(QWidget):
             # unless the user is explicitly filtering/searching.
             actionable_only=actionable_toggle or (not include_done and not searching),
         )
+        tasks = self._apply_nav_filter(tasks)
+
+        if include_done:
+            self._tag_source_tasks = list(tasks)
+        else:
+            extra_tasks = config.fetch_tasks(
+                query,
+                sorted(effective_tags),
+                include_done=True,
+                include_ancestors=True,
+                actionable_only=False,
+            )
+            if self._nav_filter_prefix and self._nav_filter_enabled:
+                extra_tasks = self._apply_nav_filter(extra_tasks)
+            tag_source_map = {task.get("id") or task.get("path"): task for task in extra_tasks}
+            for task in tasks:
+                tag_source_map.setdefault(task.get("id") or task.get("path"), task)
+            self._tag_source_tasks = list(tag_source_map.values())
+
         self.task_tree.clear()
+        self._visible_tasks = []
         if not tasks:
+            self._refresh_tags()
             return
         task_map = {task["id"]: task for task in tasks}
         visible_ids: set[str] = set()
@@ -341,9 +524,11 @@ class TaskPanel(QWidget):
                 _mark_visible(task["id"])
 
         items_by_id: dict[str, QTreeWidgetItem] = {}
+        visible_tasks: list[dict] = []
         for task in sorted(tasks, key=self._task_sort_key):
             if task["id"] not in visible_ids:
                 continue
+            visible_tasks.append(task)
             priority_level = min(task.get("priority", 0) or 0, 3)
             priority = "!" * priority_level
             due = task.get("due", "") or ""
@@ -378,8 +563,10 @@ class TaskPanel(QWidget):
             else:
                 self.task_tree.addTopLevelItem(item)
             items_by_id[task["id"]] = item
+        self._visible_tasks = visible_tasks
         self.task_tree.expandAll()
         self.task_tree.sortItems(self.sort_column, self.sort_order)
+        self._refresh_tags()
 
     def _handle_header_click(self, column: int) -> None:
         if column == self.sort_column:
@@ -392,8 +579,16 @@ class TaskPanel(QWidget):
 
     def set_active_tags(self, tags: Iterable[str]) -> None:
         self.active_tags = set(tags)
-        self._refresh_tags()
         self._refresh_tasks()
+
+    def set_navigation_filter(self, prefix: Optional[str], refresh: bool = True) -> None:
+        normalized = self._normalize_task_path(prefix) if prefix else None
+        self._nav_filter_prefix = normalized
+        self._nav_filter_enabled = True
+        self._include_journal = True
+        self._update_filter_indicator()
+        if refresh:
+            self._refresh_tasks()
 
     def _due_colors(self, task: dict) -> Optional[tuple[QColor | None, QColor | None]]:
         """Return (fg, bg) for due column with red/orange/yellow emphasis."""

@@ -1287,6 +1287,10 @@ class MainWindow(QMainWindow):
         if not path:
             return
         self._nav_filter_path = path if path.startswith("/") else f"/{path}"
+        try:
+            self.right_panel.task_panel.set_navigation_filter(self._nav_filter_path, refresh=False)
+        except Exception:
+            pass
         self._populate_vault_tree()
         self.tree_view.expandAll()
         self._apply_nav_filter_style()
@@ -1298,6 +1302,10 @@ class MainWindow(QMainWindow):
             self.tree_view.collapseAll()
             return
         self._nav_filter_path = None
+        try:
+            self.right_panel.task_panel.set_navigation_filter(None, refresh=False)
+        except Exception:
+            pass
         self._populate_vault_tree()
         self.tree_view.collapseAll()
         self._apply_nav_filter_style()
@@ -2142,6 +2150,10 @@ class MainWindow(QMainWindow):
             return
         panel = TaskPanel()
         panel.set_vault_root(self.vault_root or "")
+        try:
+            panel.set_navigation_filter(self._nav_filter_path, refresh=False)
+        except Exception:
+            pass
         panel.refresh()
         panel.taskActivated.connect(self._open_task_from_panel)
         window = QMainWindow(self)
@@ -2714,6 +2726,9 @@ class MainWindow(QMainWindow):
     def _focus_editor_from_tree(self) -> None:
         index = self.tree_view.currentIndex()
         target = index.data(OPEN_ROLE) or index.data(PATH_ROLE) if index.isValid() else None
+        if target == FILTER_BANNER:
+            self._clear_nav_filter()
+            return
         if target and target != self.current_path:
             self._skip_next_selection_open = True
             self._open_file(target)
@@ -2722,6 +2737,9 @@ class MainWindow(QMainWindow):
     def _on_tree_row_clicked(self, index: QModelIndex) -> None:
         """Open and focus editor when a tree row is clicked."""
         target = index.data(OPEN_ROLE) or index.data(PATH_ROLE)
+        if target == FILTER_BANNER:
+            self._clear_nav_filter()
+            return
         if target:
             if target != self.current_path:
                 self._skip_next_selection_open = True
@@ -3569,6 +3587,9 @@ class MainWindow(QMainWindow):
         def jump() -> None:
             if not self.editor.jump_to_anchor(slug):
                 self.statusBar().showMessage(f"Heading not found for anchor #{slug}", 4000)
+                return
+            cursor = self.editor.textCursor()
+            self._animate_or_flash_to_cursor(cursor)
 
         QTimer.singleShot(0, jump)
 

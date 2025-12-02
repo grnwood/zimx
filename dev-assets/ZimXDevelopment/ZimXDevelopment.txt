@@ -16,8 +16,8 @@ Logbook of all the development efforts on zim. yes!
 	pretty sure this is VI navigation (soft keys) doing this, need to make sure it fires a write ALL the time. Gotta hitj ctrl-s for now.
 	I found **ONE** : If you activate a link before page saved it loses buffer, need to fix!
 (x)  should i use fast api locally if server and ui are in the same place?  @edit
-( )  when you click a link from a floating editor to a anchor, show the animation  @edit
-( )  found the vi ; key bug, when i'm in caps it works, when lower it doesn't (maybe win32 only)  @edit
+(x)  when you click a link from a floating editor to a anchor, show the animation  @edit
+(x)  found the vi ; key bug, when i'm in caps it works, when lower it doesn't (maybe win32 only)  @edit
   ( )  figure out a way to not allow crazy links to get generated and pasted @edit				￼
   			![paste_image_001](./paste_image_001.png)
 		This is also for supporting file system links "C :  \some\folder\etc"
@@ -35,11 +35,13 @@ Logbook of all the development efforts on zim. yes!
 		git installed in OS and on path. (or warning)
 		attempt a git init.  Setup a remote origin and auto push?  (auto push on commit?)
 		
-### ### Tasks
-( )  support hiearchy assignment  @task
+### Tasks
+(x)  support hiearchy assignment  @task
 ( ) if all tasks on a tag are complete, tag comes out of tags filter (unless show completed is selected)  @task
-( ) if tree is filtered, filter the tasks panel based on tree and sub pages? @task
+(x) if tree is filtered, filter the tasks panel based on tree and sub pages? @task
 	(show red filtered message next to tags label)
+( )  need a way to AI chat with my tasks. @task
+( ) need a way to print my tasks (esp. the current filter... print to browser?) @task
 
 
 ### Page Templages
