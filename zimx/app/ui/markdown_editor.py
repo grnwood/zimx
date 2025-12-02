@@ -315,7 +315,6 @@ def heading_level_from_char(char: str) -> int:
         return code
     return 0
 
-
 class MarkdownHighlighter(QSyntaxHighlighter):
     def __init__(self, parent) -> None:  # type: ignore[override]
         super().__init__(parent)
@@ -420,19 +419,16 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         prev_state = self.previousBlockState()
         in_code_block = (prev_state == 1)
         
-        # Check if this line starts or ends a code block                            
+        # Check if this line starts or ends a code block
         if text.startswith("```"):
-            # Toggle code block state
             in_code_block = not in_code_block
             self.setCurrentBlockState(1 if in_code_block else 0)
-            # Dim the fence line
             self.setFormat(0, len(text), self.code_fence_format)
             if self._timing_enabled:
                 self._timing_blocks += 1
                 self._timing_total += time.perf_counter() - t0
             return
         elif in_code_block:
-            # Inside code block - style everything as code
             self.setCurrentBlockState(1)
             self.setFormat(0, len(text), self.code_block)
             if self._timing_enabled:
@@ -477,19 +473,17 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         stripped_for_quote = text.lstrip()
         if stripped_for_quote.startswith(">"):
             # Count the number of > markers
-            quote_depth = 0
             idx = 0
             while idx < len(stripped_for_quote) and stripped_for_quote[idx] == '>':
-                quote_depth += 1
                 idx += 1
             # Skip optional space after >
             if idx < len(stripped_for_quote) and stripped_for_quote[idx] == ' ':
                 idx += 1
-            
+
             # Hide the > markers and optional spaces
             quote_start = len(text) - len(stripped_for_quote)
             self.setFormat(quote_start, idx, self.hidden_format)
-            
+
             # Style the remaining text as quote
             remaining_length = len(text) - quote_start - idx
             if remaining_length > 0:
@@ -882,6 +876,7 @@ class MarkdownEditor(QTextEdit):
         self.setAcceptDrops(True)
         # Configure scroll-past-end margin initially
         QTimer.singleShot(0, self._apply_scroll_past_end_margin)
+
         self._ai_send_shortcut = QShortcut(QKeySequence("Ctrl+Shift+P"), self)
         self._ai_send_shortcut.activated.connect(self._show_ai_action_overlay)
         self._ai_focus_shortcut = QShortcut(QKeySequence("Ctrl+Shift+["), self)
@@ -899,8 +894,7 @@ class MarkdownEditor(QTextEdit):
     def paintEvent(self, event):  # type: ignore[override]
         """Custom paint to draw horizontal rules as visual lines."""
         super().paintEvent(event)
-        
-        # Draw horizontal rules (blocks containing exactly '---')
+
         painter = QPainter(self.viewport())
         pen = QPen(QColor("#555555"))
         pen.setWidth(2)
