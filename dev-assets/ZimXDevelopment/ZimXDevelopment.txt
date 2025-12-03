@@ -5,6 +5,7 @@ Logbook of all the development efforts on zim. yes!
 (x)  I'm seeing some blue dates on a fresh calendar, i only have the 24th defined?  @cal
 		 	
 (x)  Add Calendar panel  @cal
+	yes, this is great!
 	move the calendar to its own tab (first)
 	put the Journal part of the file tree under it.
 	move tasks to its own 
@@ -19,19 +20,31 @@ Logbook of all the development efforts on zim. yes!
 (x)  when you click a link from a floating editor to a anchor, show the animation  @edit
 (x)  found the vi ; key bug, when i'm in caps it works, when lower it doesn't (maybe win32 only)  @edit
   ( )  figure out a way to not allow crazy links to get generated and pasted @edit				￼
-  			![paste_image_001](./paste_image_001.png)make colon-link (: somelink) processing smarter, like if its in a the middle of the sentence
+  			￼smarter, like if its in a the middle of the sentence
  		or 8 : 56pm
  		of  This : That  <-- not a link.		
 ( )  add find and replace functionality @edit
 ( ) implement the full text search with your chatgpt vetted feature @edit
+( )  creating a camel case link while in a sentence causes issues @edit
+	first issue: creates a page/page insteed of just page.
+	when deleting that structure hands, then causes a crash.
+( )  if i have a link to a journal sub page it doesn't go all the way @edit
+	example :  a link like 
+		colon Journal : 2025 : 11 : 25 : LinkPageName
+		link works fine with right click, but ctrl-shift-l over the link doesn't do it right.
+( )  vi mode always or 'true' vi: make a option to always be in vi mode when page loads @edit
+	so VI button changes to INS and it always off.  when 'i' or 'a' is selected changes to INS yellow.
+( )  If i select a buffer of lines in the editor and tab or shift-tab they should indent/dedent together.  @edit
+	right now it just eats them up with a tab char.
 
 ### Git
 ( )  git support: simple 'version this vault' @edit
 	maybe version this vault, or page... with a note.
+	i dunno what it hink
 	System pref:  git control for vault?  default no.
 	Requirements: 
 		git installed in OS and on path. (or warning)
-		attempt a git init.  Setup a remote origin and auto push?  (auto push on commit?)
+		attempt a git init.  Sttup a remote origin and auto push?  (auto push on commit?)
 		
 ### Tasks
 (x)  support hiearchy assignment  @task
@@ -41,10 +54,13 @@ Logbook of all the development efforts on zim. yes!
 ( )  need a way to AI chat with my tasks. @task
 ( ) need a way to print my tasks (esp. the current filter... print to browser?) @task
 ( )  double check the searching seems to not be filtering right (tags and tasks text?) @task
-
+( )  move checkboxes to the right rail between tags and tasks horizontally @task
+	this is so i can shrink the tags panel tighter and not waste screen realestate.
+	
 ### Page Templages
 ( )  ctrl-n should default to the `New Page` template.  @page
 ( ) Add some more?  @edit
+this is interesting.
 ( )  need to fix template engine. add a open template folder (users .zimx folder overrides). @page
 	probably add !qotd! in there too for fun, any others?
 	
@@ -56,9 +72,10 @@ Logbook of all the development efforts on zim. yes!
 	* add the page text into chroma by default?
 	* (#) hash tag loads list of file attachements from page?
 	* (@) allows linking to any other page in the notebook
-	  * How to handle subfolders, etc?
-	* Delete has to remove from chroma or get to big.
-	* Chroma per chat?  or global chroma file for the whole app?
+* How to handle subfolders, etc?
+* Delete has to remove from chroma or get to big.
+* Chroma per chat?  or global chroma file for the whole app?
 ( )  i lost my right click ai actions in the ai chat window text, lets put them back. @ai
 ( )  when i send in ai prompts from main editor it doesn't register in that as sent, lets fix @ai
-
+( )  def some wonkiness in the right click start chat with this page @ai
+	it's putting them under the wrong chat and loading the wrong editor (probs all related)
