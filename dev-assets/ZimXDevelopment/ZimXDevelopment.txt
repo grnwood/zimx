@@ -40,11 +40,14 @@ Logbook of all the development efforts on zim. yes!
 	(show red filtered message next to tags label)
 ( )  need a way to AI chat with my tasks. @task
 ( ) need a way to print my tasks (esp. the current filter... print to browser?) @task
+( )  double check the searching seems to not be filtering right (tags and tasks text?) @task
 
 ### Page Templages
 ( )  ctrl-n should default to the `New Page` template.  @page
 ( ) Add some more?  @edit
- 
+( )  need to fix template engine. add a open template folder (users .zimx folder overrides). @page
+	probably add !qotd! in there too for fun, any others?
+	
 ### Printing
 ( )  print to browser[:print_to_browser|] feature?  @print  <2025-12-01
 
