@@ -31,7 +31,7 @@ class PreferencesDialog(QDialog):
         # Vi-mode block cursor setting
         vi_section = QLabel("<b>Vi Mode</b>")
         self.layout.addWidget(vi_section)
-        
+
         self.vi_block_cursor_checkbox = QCheckBox("Use Vi Mode Block Cursor")
         self.vi_block_cursor_checkbox.setChecked(config.load_vi_block_cursor_enabled())
         self.vi_block_cursor_checkbox.setToolTip(
@@ -39,6 +39,14 @@ class PreferencesDialog(QDialog):
             "Disable this if you experience flickering on Linux/Cinnamon."
         )
         self.layout.addWidget(self.vi_block_cursor_checkbox)
+
+        self.vi_strict_mode_checkbox = QCheckBox("Enable Strict Vi Mode")
+        self.vi_strict_mode_checkbox.setChecked(config.load_vi_strict_mode_enabled())
+        self.vi_strict_mode_checkbox.setToolTip(
+            "When enabled, vi-mode uses separate navigation/insert states with vi-like edits\n"
+            "(i/a/o/O to insert, x/s/r/d for deletes, u undo, . to repeat last edit)."
+        )
+        self.layout.addWidget(self.vi_strict_mode_checkbox)
 
         # Non Actionable Task Tags
         self.layout.addSpacing(10)
@@ -221,6 +229,7 @@ class PreferencesDialog(QDialog):
     def accept(self):
         """Save preferences when OK is clicked."""
         config.save_vi_block_cursor_enabled(self.vi_block_cursor_checkbox.isChecked())
+        config.save_vi_strict_mode_enabled(self.vi_strict_mode_checkbox.isChecked())
         print(f"[DEBUG] Saving enable_ai_chats: {self.enable_ai_chats_checkbox.isChecked()}")
         config.save_enable_ai_chats(self.enable_ai_chats_checkbox.isChecked())
         config.save_default_ai_server(self.default_server_combo.currentText() or None)
