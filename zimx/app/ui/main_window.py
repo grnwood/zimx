@@ -319,7 +319,6 @@ class MainWindow(QMainWindow):
         self.editor.set_font_point_size(self.font_size)
         # Load vi-mode block cursor preference
         self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
-        self.editor.set_vi_strict_mode_enabled(config.load_vi_strict_mode_enabled())
         self.toc_widget = TableOfContentsWidget(self.editor.viewport())
         self.toc_widget.set_headings([])
         self.toc_widget.set_base_path("")
@@ -499,6 +498,12 @@ class MainWindow(QMainWindow):
         self._vi_badge_base_style = self._badge_base_style
         self._vi_status_label.setStyleSheet(self._vi_badge_base_style + " background-color: transparent;")
         self.statusBar().addPermanentWidget(self._vi_status_label, 0)
+
+        try:
+            self.editor.viStrictStateChanged.connect(self._on_vi_strict_state_changed)
+        except Exception:
+            pass
+        self._apply_vi_preferences_from_config()
 
         self._detached_panels: list[QMainWindow] = []
         self._detached_link_panels: list[LinkNavigatorPanel] = []
@@ -2065,7 +2070,7 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.Accepted:
             # Reload vi-mode cursor setting and apply to editor
             self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
-            self.editor.set_vi_strict_mode_enabled(config.load_vi_strict_mode_enabled())
+            self._apply_vi_preferences_from_config()
             # Re-apply vi-mode state to refresh cursor
             if self._vi_mode_active:
                 self.editor.set_vi_mode(True)
@@ -3858,6 +3863,22 @@ class MainWindow(QMainWindow):
         if getattr(self, '_vi_mode_locked', False):
             # Ignore toggle requests while locked for dialog
             return
+        try:
+            if self.editor.is_vi_strict_mode_enabled():
+                if not self._vi_mode_active:
+                    self._vi_mode_active = True
+                    self._apply_vi_mode_statusbar_style()
+                else:
+                    try:
+                        self.statusBar().showMessage(
+                            "Strict vi mode keeps navigation enabled. Use i/a/o/O to insert.",
+                            3000,
+                        )
+                    except Exception:
+                        pass
+                return
+        except Exception:
+            pass
         prev_focus = self.focusWidget()
         self._vi_mode_active = not self._vi_mode_active
         self._apply_vi_mode_statusbar_style()
@@ -3880,6 +3901,11 @@ class MainWindow(QMainWindow):
     def eventFilter(self, obj, event):  # type: ignore[override]
         # (Removed overlay repositioning logic; using status bar indicator)
         if event.type() == QEvent.KeyPress:
+            editor = getattr(self, "editor", None)
+            try:
+                strict_vi_enabled = bool(editor and editor.is_vi_strict_mode_enabled())
+            except Exception:
+                strict_vi_enabled = False
             # Ctrl+Tab history popup
             if event.key() == Qt.Key_Tab and (event.modifiers() & Qt.ControlModifier):
                 # With Shift: cycle headings; without: history
@@ -3892,10 +3918,12 @@ class MainWindow(QMainWindow):
             # Allow Esc to exit vi-mode explicitly
             if event.key() == Qt.Key_Escape:
                 try:
-                    if getattr(self, "editor", None) and self.editor.is_ai_overlay_visible():
+                    if editor and editor.is_ai_overlay_visible():
                         return False
                 except Exception:
                     pass
+                if strict_vi_enabled:
+                    return False
                 if self._vi_mode_active:
                     self._vi_mode_active = False
                     self._apply_vi_mode_statusbar_style()
@@ -3909,6 +3937,15 @@ class MainWindow(QMainWindow):
                     pass
                 if base_mods == Qt.AltModifier:
                     if getattr(self, "_vi_mode_locked", False):
+                        return True
+                    if strict_vi_enabled:
+                        try:
+                            self.statusBar().showMessage(
+                                "Strict vi mode keeps navigation enabled. Use i/a/o/O to insert.",
+                                3000,
+                            )
+                        except Exception:
+                            pass
                         return True
                     self._toggle_vi_mode()
                     return True
@@ -3946,8 +3983,8 @@ class MainWindow(QMainWindow):
                 
                 target = self._vi_mode_target_widget()
                 if target:
-                    if target is self.editor and self.editor.is_vi_strict_mode_enabled():
-                        if self.editor.handle_vi_strict_key(event):
+                    if target is editor and strict_vi_enabled:
+                        if editor.handle_vi_strict_key(event):
                             return True
                         if event.key() in (Qt.Key_Tab, Qt.Key_Backtab):
                             return False
@@ -4257,27 +4294,63 @@ class MainWindow(QMainWindow):
             )
             self._dirty_status_label.setToolTip("All changes saved")
 
+    def _apply_vi_preferences_from_config(self) -> None:
+        strict_enabled = False
+        try:
+            strict_enabled = config.load_vi_strict_mode_enabled()
+        except Exception:
+            strict_enabled = False
+        self.editor.set_vi_strict_mode_enabled(strict_enabled)
+        if strict_enabled and not self._vi_mode_active:
+            self._vi_mode_active = True
+        self._apply_vi_mode_statusbar_style()
+
+    def _on_vi_strict_state_changed(self, enabled: bool, insert_mode: bool) -> None:
+        if enabled and not self._vi_mode_active:
+            self._vi_mode_active = True
+        self._apply_vi_mode_statusbar_style()
+
     def _apply_vi_mode_statusbar_style(self) -> None:
         # Switch editor cursor styling for vi-mode; no banners/overlays
-        self.editor.set_vi_mode(self._vi_mode_active)
-        # Show a brief status message when vi-mode toggles
         try:
-            state = "ON" if self._vi_mode_active else "OFF"
-            self.statusBar().showMessage(f"Vi mode: {state}", 2000)
-            # Update permanent VI indicator badge background color
-            if hasattr(self, "_vi_status_label"):
-                if self._vi_mode_active:
-                    # Yellow background with dark text for visibility
-                    self._vi_status_label.setStyleSheet(
-                        self._vi_badge_base_style + " background-color: #ffd54d; color: #000;"
-                    )
-                else:
-                    # Transparent background (normal status bar look)
-                    self._vi_status_label.setStyleSheet(
-                        self._vi_badge_base_style + " background-color: transparent;"
-                    )
+            strict_enabled = self.editor.is_vi_strict_mode_enabled()
+            strict_insert = self.editor.is_vi_strict_insert_mode() if strict_enabled else False
         except Exception:
-            # Avoid breaking if status bar not yet initialized
+            strict_enabled = False
+            strict_insert = False
+
+        if strict_enabled and not self._vi_mode_active:
+            self._vi_mode_active = True
+
+        self.editor.set_vi_mode(self._vi_mode_active)
+
+        try:
+            if hasattr(self, "_vi_status_label"):
+                if strict_enabled:
+                    message_state = "INS" if strict_insert else "NAV"
+                    self._vi_status_label.setText("INS")
+                    if strict_insert:
+                        self._vi_status_label.setStyleSheet(
+                            self._vi_badge_base_style + " background-color: #ffd54d; color: #000;"
+                        )
+                    else:
+                        self._vi_status_label.setStyleSheet(
+                            self._vi_badge_base_style + " background-color: transparent; color: palette(windowText);"
+                        )
+                    self.statusBar().showMessage(f"Strict vi: {message_state}", 2000)
+                else:
+                    message_state = "ON" if self._vi_mode_active else "OFF"
+                    self._vi_status_label.setText("VI")
+                    if self._vi_mode_active:
+                        self._vi_status_label.setStyleSheet(
+                            self._vi_badge_base_style + " background-color: #ffd54d; color: #000;"
+                        )
+                    else:
+                        self._vi_status_label.setStyleSheet(
+                            self._vi_badge_base_style + " background-color: transparent;"
+                        )
+                    self.statusBar().showMessage(f"Vi mode: {message_state}", 2000)
+        except Exception:
             pass
 
     # (Removed move/resize overlays; not used)

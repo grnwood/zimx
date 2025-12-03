@@ -830,6 +830,7 @@ class MarkdownEditor(QTextEdit):
     aiChatSendRequested = Signal(str)  # Send selected/whole text to the open chat
     aiChatPageFocusRequested = Signal(str)  # Request the chat tab focused on this page
     aiActionRequested = Signal(str, str, str)  # title, prompt, text
+    viStrictStateChanged = Signal(bool, bool)  # (strict enabled, insert mode active)
     _VI_EXTRA_KEY = QTextFormat.UserProperty + 1
     _FLASH_EXTRA_KEY = QTextFormat.UserProperty + 2
 
@@ -845,6 +846,7 @@ class MarkdownEditor(QTextEdit):
         self._vi_replace_pending: Optional[str] = None
         self._vi_saved_flash_time: Optional[int] = None
         self._vi_last_cursor_pos: int = -1
+        self._emit_vi_strict_state()
         self._heading_outline: list[dict] = []
         self._dialog_block_input: bool = False
         self._ai_actions_enabled: bool = True
@@ -1553,6 +1555,7 @@ class MarkdownEditor(QTextEdit):
         self._vi_strict_insert_mode = True
         self._vi_replace_pending = None
         self._update_vi_cursor()
+        self._emit_vi_strict_state()
 
     def _vi_move_cursor(self, operation: QTextCursor.MoveOperation, keep_anchor: bool = False) -> None:
         cursor = self.textCursor()
@@ -1599,6 +1602,7 @@ class MarkdownEditor(QTextEdit):
             if key == Qt.Key_Escape and mods in (Qt.NoModifier, Qt.ShiftModifier):
                 self._vi_strict_insert_mode = False
                 self._update_vi_cursor()
+                self._emit_vi_strict_state()
                 event.accept()
                 return True
             return False
@@ -1610,44 +1614,52 @@ class MarkdownEditor(QTextEdit):
         keep = mods == Qt.ShiftModifier
 
         # Insert entry commands
-        if key == Qt.Key_I:
+        if key == Qt.Key_I and mods == Qt.NoModifier:
             self._enter_vi_insert_mode()
             event.accept()
             return True
-        if key == Qt.Key_A:
+        if key == Qt.Key_A and mods == Qt.NoModifier:
             cursor = self.textCursor()
             cursor.movePosition(QTextCursor.Right)
             self.setTextCursor(cursor)
             self._enter_vi_insert_mode()
             event.accept()
             return True
-        if key == Qt.Key_O:
-            cursor = self.textCursor()
-            cursor.movePosition(QTextCursor.EndOfLine)
-            indent = re.match(r"\s*", cursor.block().text() or "")[0]
-            cursor.beginEditBlock()
-            cursor.insertBlock()
-            cursor.insertText(indent)
-            cursor.endEditBlock()
-            self.setTextCursor(cursor)
-            self._enter_vi_insert_mode()
+        if key == Qt.Key_O and mods == Qt.ShiftModifier:
+            def open_above() -> None:
+                cursor = self.textCursor()
+                indent = re.match(r"\s*", cursor.block().text() or "")[0]
+                cursor.beginEditBlock()
+                cursor.movePosition(QTextCursor.StartOfLine)
+                cursor.insertBlock()
+                cursor.insertText(indent)
+                cursor.endEditBlock()
+                self.setTextCursor(cursor)
+                self._enter_vi_insert_mode()
+
+            open_above()
+            self._vi_last_edit_action = open_above
             event.accept()
             return True
-        if key == Qt.Key_O and mods == Qt.ShiftModifier:
-            cursor = self.textCursor()
-            indent = re.match(r"\s*", cursor.block().text() or "")[0]
-            cursor.beginEditBlock()
-            cursor.movePosition(QTextCursor.StartOfLine)
-            cursor.insertBlock()
-            cursor.insertText(indent)
-            cursor.endEditBlock()
-            self.setTextCursor(cursor)
-            self._enter_vi_insert_mode()
+        if key == Qt.Key_O and mods == Qt.NoModifier:
+            def open_below() -> None:
+                cursor = self.textCursor()
+                cursor.movePosition(QTextCursor.EndOfLine)
+                indent = re.match(r"\s*", cursor.block().text() or "")[0]
+                cursor.beginEditBlock()
+                cursor.insertBlock()
+                cursor.insertText(indent)
+                cursor.endEditBlock()
+                self.setTextCursor(cursor)
+                self._enter_vi_insert_mode()
+
+            open_below()
+            self._vi_last_edit_action = open_below
             event.accept()
             return True
 
         # Edits
-        if key == Qt.Key_X:
+        if key == Qt.Key_X and mods == Qt.NoModifier:
             def delete_char():
                 cursor = self.textCursor()
                 if cursor.hasSelection():
@@ -1660,7 +1672,7 @@ class MarkdownEditor(QTextEdit):
             self._vi_last_edit_action = delete_char
             event.accept()
             return True
-        if key == Qt.Key_S:
+        if key == Qt.Key_S and mods == Qt.NoModifier:
             def substitute_char():
                 cursor = self.textCursor()
                 if not cursor.atEnd():
@@ -1672,11 +1684,11 @@ class MarkdownEditor(QTextEdit):
             self._vi_last_edit_action = substitute_char
             event.accept()
             return True
-        if key == Qt.Key_R:
+        if key == Qt.Key_R and mods == Qt.NoModifier:
             self._vi_replace_pending = ""
             event.accept()
             return True
-        if key == Qt.Key_D:
+        if key == Qt.Key_D and mods == Qt.NoModifier:
             def delete_line():
                 cursor = self.textCursor()
                 cursor.beginEditBlock()
@@ -1690,11 +1702,11 @@ class MarkdownEditor(QTextEdit):
             self._vi_last_edit_action = delete_line
             event.accept()
             return True
-        if key == Qt.Key_U:
+        if key == Qt.Key_U and mods == Qt.NoModifier:
             self.undo()
             event.accept()
             return True
-        if key == Qt.Key_Period:
+        if key == Qt.Key_Period and mods == Qt.NoModifier:
             if self._vi_last_edit_action:
                 self._vi_last_edit_action()
                 event.accept()
@@ -2720,13 +2732,26 @@ class MarkdownEditor(QTextEdit):
 
     def set_vi_strict_mode_enabled(self, enabled: bool) -> None:
         """Enable or disable strict vi-mode state machine (navigation vs insert)."""
+        if self._vi_strict_enabled == enabled:
+            self._emit_vi_strict_state()
+            return
         self._vi_strict_enabled = enabled
         if not enabled:
             self._vi_strict_insert_mode = False
             self._vi_replace_pending = None
+        self._emit_vi_strict_state()
 
     def is_vi_strict_mode_enabled(self) -> bool:
         return self._vi_strict_enabled
+
+    def is_vi_strict_insert_mode(self) -> bool:
+        return self._vi_strict_insert_mode
+
+    def _emit_vi_strict_state(self) -> None:
+        try:
+            self.viStrictStateChanged.emit(self._vi_strict_enabled, self._vi_strict_insert_mode)
+        except Exception:
+            pass
 
     def set_vi_mode(self, active: bool) -> None:
         """Enable or disable vi-mode cursor styling (pink block)."""
@@ -2756,6 +2781,7 @@ class MarkdownEditor(QTextEdit):
             self._vi_saved_flash_time = None
             self._vi_last_cursor_pos = -1
         self._update_vi_cursor()
+        self._emit_vi_strict_state()
         # Ensure editor focus when vi mode is toggled and no dialog is open
         if not self._dialog_block_input:
             self.setFocus()
