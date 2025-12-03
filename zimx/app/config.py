@@ -134,6 +134,22 @@ def save_vi_block_cursor_enabled(enabled: bool) -> None:
     _update_global_config({"vi_block_cursor": enabled})
 
 
+def load_vi_strict_mode_enabled() -> bool:
+    """Load app-level preference for strict vi-mode editing/navigation."""
+    if not GLOBAL_CONFIG.exists():
+        return False
+    try:
+        payload = json.loads(GLOBAL_CONFIG.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    return bool(payload.get("vi_strict_mode", False))
+
+
+def save_vi_strict_mode_enabled(enabled: bool) -> None:
+    """Save app-level preference for strict vi-mode editing/navigation."""
+    _update_global_config({"vi_strict_mode": enabled})
+
+
 def load_ai_chat_font_size(default: int = 13) -> int:
     """Load preferred font size for AI chat panel."""
     if not GLOBAL_CONFIG.exists():

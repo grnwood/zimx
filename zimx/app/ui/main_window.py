@@ -320,6 +320,7 @@ class MainWindow(QMainWindow):
         # Load vi-mode block cursor preference
         self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
         self.editor.viModeStateChanged.connect(self._update_vi_badge)
+        self.editor.set_vi_strict_mode_enabled(config.load_vi_strict_mode_enabled())
         self.toc_widget = TableOfContentsWidget(self.editor.viewport())
         self.toc_widget.set_headings([])
         self.toc_widget.set_base_path("")
@@ -2066,6 +2067,7 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.Accepted:
             # Reload vi-mode cursor setting and apply to editor
             self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
+            self.editor.set_vi_strict_mode_enabled(config.load_vi_strict_mode_enabled())
             # Re-apply vi-mode state to refresh cursor
             if self._vi_mode_active:
                 self.editor.set_vi_mode(True)
@@ -3946,6 +3948,13 @@ class MainWindow(QMainWindow):
                 
                 target = self._vi_mode_target_widget()
                 if target:
+                    if target is self.editor and self.editor.is_vi_strict_mode_enabled():
+                        if self.editor.handle_vi_strict_key(event):
+                            return True
+                        if event.key() in (Qt.Key_Tab, Qt.Key_Backtab):
+                            return False
+                        # Let strict-mode keys reach the editor without legacy translation
+                        return False
                     mapping = self._translate_vi_key_event(event)
                     if mapping:
                         key_name = chr(event.key()) if Qt.Key_A <= event.key() <= Qt.Key_Z else f"Key_{event.key()}"
@@ -3989,6 +3998,7 @@ class MainWindow(QMainWindow):
         mods = event.modifiers()
         shift = bool(mods & Qt.ShiftModifier)
         alt = bool(mods & Qt.AltModifier)
+        strict_vi = getattr(self, "editor", None) is not None and self.editor.is_vi_strict_mode_enabled()
         if self._vi_debug:
             mods_val = mods
             try:
@@ -4087,6 +4097,9 @@ class MainWindow(QMainWindow):
         elif key == Qt.Key_B and not shift:
             target_key = Qt.Key_Left
             target_modifiers = Qt.KeyboardModifiers(Qt.ControlModifier)
+        elif strict_vi and key == Qt.Key_E and not shift:
+            target_key = Qt.Key_Right
+            target_modifiers = Qt.KeyboardModifiers(Qt.ControlModifier)
         # Home/End and selection variants
         elif key == Qt.Key_A:
             target_key = Qt.Key_Home
@@ -4110,6 +4123,17 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
                 self._debug(f"Vi-mode: ';' key mapping -> End (colon={is_colon}, key={key}, text='{text}', mods={mods_val})")
+        elif strict_vi and key == Qt.Key_0:
+            target_key = Qt.Key_Home
+        elif strict_vi and key == Qt.Key_Dollar:
+            target_key = Qt.Key_End
+        elif strict_vi and key == Qt.Key_AsciiCircum:
+            target_key = Qt.Key_Home
+            if shift:
+                target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
+        elif strict_vi and key == Qt.Key_G:
+            target_key = Qt.Key_Home if not shift else Qt.Key_End
+            target_modifiers = Qt.KeyboardModifiers(Qt.ControlModifier)
         # Delete variants
         elif key == Qt.Key_D:
             if shift:
