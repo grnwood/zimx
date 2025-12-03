@@ -830,6 +830,7 @@ class MarkdownEditor(QTextEdit):
     aiChatSendRequested = Signal(str)  # Send selected/whole text to the open chat
     aiChatPageFocusRequested = Signal(str)  # Request the chat tab focused on this page
     aiActionRequested = Signal(str, str, str)  # title, prompt, text
+    viModeStateChanged = Signal(bool, bool, bool)  # active, strict-enabled, insert-mode
     _VI_EXTRA_KEY = QTextFormat.UserProperty + 1
     _FLASH_EXTRA_KEY = QTextFormat.UserProperty + 2
 
@@ -838,6 +839,8 @@ class MarkdownEditor(QTextEdit):
         self._current_path: Optional[str] = None
         self._vault_root: Optional[Path] = None
         self._vi_mode_active: bool = False
+        self._strict_vi_mode_enabled: bool = False
+        self._vi_insert_mode_active: bool = False
         self._vi_block_cursor_enabled: bool = True  # default on, controlled by preferences
         self._vi_strict_enabled: bool = False
         self._vi_strict_insert_mode: bool = False
@@ -2733,6 +2736,11 @@ class MarkdownEditor(QTextEdit):
         if self._vi_mode_active == active:
             return
         self._vi_mode_active = active
+        # Reset insert mode when entering navigation or when strict mode is disabled
+        if not self._strict_vi_mode_enabled:
+            self._vi_insert_mode_active = False
+        elif active:
+            self._vi_insert_mode_active = False
         if self._vi_strict_enabled:
             self._vi_strict_insert_mode = False
             self._vi_replace_pending = None
@@ -2756,9 +2764,40 @@ class MarkdownEditor(QTextEdit):
             self._vi_saved_flash_time = None
             self._vi_last_cursor_pos = -1
         self._update_vi_cursor()
+        self._emit_vi_mode_state()
         # Ensure editor focus when vi mode is toggled and no dialog is open
         if not self._dialog_block_input:
             self.setFocus()
+
+    def set_strict_vi_mode_enabled(self, enabled: bool) -> None:
+        """Enable or disable strict vi mode tracking (insert vs navigation)."""
+        if self._strict_vi_mode_enabled == enabled:
+            return
+        self._strict_vi_mode_enabled = enabled
+        if not enabled:
+            self._vi_insert_mode_active = False
+        self._emit_vi_mode_state()
+
+    def is_strict_vi_mode_enabled(self) -> bool:
+        return self._strict_vi_mode_enabled
+
+    def set_vi_insert_mode_active(self, active: bool) -> None:
+        """Set whether strict vi insert mode is active."""
+        if not self._strict_vi_mode_enabled:
+            active = False
+        if self._vi_insert_mode_active == active:
+            return
+        self._vi_insert_mode_active = active
+        self._emit_vi_mode_state()
+
+    def is_vi_insert_mode_active(self) -> bool:
+        return self._vi_insert_mode_active
+
+    def _emit_vi_mode_state(self) -> None:
+        try:
+            self.viModeStateChanged.emit(self._vi_mode_active, self._strict_vi_mode_enabled, self._vi_insert_mode_active)
+        except Exception:
+            pass
 
     def _maybe_update_vi_cursor(self) -> None:
         if not self._vi_mode_active or not self._vi_block_cursor_enabled:

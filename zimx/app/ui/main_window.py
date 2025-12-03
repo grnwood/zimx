@@ -319,6 +319,7 @@ class MainWindow(QMainWindow):
         self.editor.set_font_point_size(self.font_size)
         # Load vi-mode block cursor preference
         self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
+        self.editor.viModeStateChanged.connect(self._update_vi_badge)
         self.editor.set_vi_strict_mode_enabled(config.load_vi_strict_mode_enabled())
         self.toc_widget = TableOfContentsWidget(self.editor.viewport())
         self.toc_widget.set_headings([])
@@ -499,6 +500,7 @@ class MainWindow(QMainWindow):
         self._vi_badge_base_style = self._badge_base_style
         self._vi_status_label.setStyleSheet(self._vi_badge_base_style + " background-color: transparent;")
         self.statusBar().addPermanentWidget(self._vi_status_label, 0)
+        self._update_vi_badge()
 
         self._detached_panels: list[QMainWindow] = []
         self._detached_link_panels: list[LinkNavigatorPanel] = []
@@ -4257,25 +4259,49 @@ class MainWindow(QMainWindow):
             )
             self._dirty_status_label.setToolTip("All changes saved")
 
+    def _update_vi_badge(self) -> None:
+        """Refresh the VI/INS badge text and background."""
+        if not hasattr(self, "_vi_status_label"):
+            return
+        strict_mode_enabled = False
+        insert_mode = False
+        try:
+            strict_mode_enabled = bool(self.editor.is_strict_vi_mode_enabled())
+            if strict_mode_enabled:
+                insert_mode = bool(self.editor.is_vi_insert_mode_active())
+        except Exception:
+            strict_mode_enabled = False
+            insert_mode = False
+
+        label_text = "INS" if strict_mode_enabled else "VI"
+        if strict_mode_enabled:
+            suffix = " background-color: #ffd54d; color: #000;" if insert_mode else " background-color: transparent;"
+        else:
+            suffix = " background-color: #ffd54d; color: #000;" if self._vi_mode_active else " background-color: transparent;"
+
+        try:
+            self._vi_status_label.setText(label_text)
+            self._vi_status_label.setStyleSheet(self._vi_badge_base_style + suffix)
+        except Exception:
+            pass
+
     def _apply_vi_mode_statusbar_style(self) -> None:
         # Switch editor cursor styling for vi-mode; no banners/overlays
         self.editor.set_vi_mode(self._vi_mode_active)
-        # Show a brief status message when vi-mode toggles
+        # Keep strict vi insert/navigation state aligned with the active flag
+        try:
+            if self.editor.is_strict_vi_mode_enabled():
+                self.editor.set_vi_insert_mode_active(not self._vi_mode_active)
+            else:
+                self.editor.set_vi_insert_mode_active(False)
+        except Exception:
+            pass
+
+        # Show a brief status message when vi-mode toggles and refresh the badge
         try:
             state = "ON" if self._vi_mode_active else "OFF"
             self.statusBar().showMessage(f"Vi mode: {state}", 2000)
-            # Update permanent VI indicator badge background color
-            if hasattr(self, "_vi_status_label"):
-                if self._vi_mode_active:
-                    # Yellow background with dark text for visibility
-                    self._vi_status_label.setStyleSheet(
-                        self._vi_badge_base_style + " background-color: #ffd54d; color: #000;"
-                    )
-                else:
-                    # Transparent background (normal status bar look)
-                    self._vi_status_label.setStyleSheet(
-                        self._vi_badge_base_style + " background-color: transparent;"
-                    )
+            self._update_vi_badge()
         except Exception:
             # Avoid breaking if status bar not yet initialized
             pass
