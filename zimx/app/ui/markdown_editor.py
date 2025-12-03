@@ -839,6 +839,10 @@ class MarkdownEditor(QTextEdit):
         self._vault_root: Optional[Path] = None
         self._vi_mode_active: bool = False
         self._vi_block_cursor_enabled: bool = True  # default on, controlled by preferences
+        self._vi_strict_enabled: bool = False
+        self._vi_strict_insert_mode: bool = False
+        self._vi_last_edit_action: Optional[Callable[[], None]] = None
+        self._vi_replace_pending: Optional[str] = None
         self._vi_saved_flash_time: Optional[int] = None
         self._vi_last_cursor_pos: int = -1
         self._heading_outline: list[dict] = []
@@ -1545,6 +1549,221 @@ class MarkdownEditor(QTextEdit):
         super().focusOutEvent(event)
         self.focusLost.emit()
 
+    def _enter_vi_insert_mode(self) -> None:
+        self._vi_strict_insert_mode = True
+        self._vi_replace_pending = None
+        self._update_vi_cursor()
+
+    def _vi_move_cursor(self, operation: QTextCursor.MoveOperation, keep_anchor: bool = False) -> None:
+        cursor = self.textCursor()
+        mode = QTextCursor.KeepAnchor if keep_anchor else QTextCursor.MoveAnchor
+        cursor.movePosition(operation, mode)
+        self.setTextCursor(cursor)
+
+    def handle_vi_strict_key(self, event: QKeyEvent) -> bool:
+        if not (self._vi_mode_active and self._vi_strict_enabled):
+            return False
+
+        key = event.key()
+        mods = event.modifiers() & ~Qt.KeypadModifier
+
+        # Allow indentation shortcuts to flow through
+        if key in (Qt.Key_Tab, Qt.Key_Backtab):
+            return False
+
+        # Pending single-character replace
+        if self._vi_replace_pending is not None:
+            if key == Qt.Key_Escape and mods == Qt.NoModifier:
+                self._vi_replace_pending = None
+                event.accept()
+                return True
+            replacement = event.text()
+            if replacement:
+                text = replacement[0]
+
+                def do_replace():
+                    cursor = self.textCursor()
+                    if not cursor.atEnd():
+                        cursor.deleteChar()
+                    cursor.insertText(text)
+                    self.setTextCursor(cursor)
+
+                do_replace()
+                self._vi_last_edit_action = do_replace
+                self._vi_replace_pending = None
+                event.accept()
+                return True
+            return False
+
+        if self._vi_strict_insert_mode:
+            if key == Qt.Key_Escape and mods in (Qt.NoModifier, Qt.ShiftModifier):
+                self._vi_strict_insert_mode = False
+                self._update_vi_cursor()
+                event.accept()
+                return True
+            return False
+
+        # Navigation mode operations
+        if mods not in (Qt.NoModifier, Qt.ShiftModifier):
+            return False
+
+        keep = mods == Qt.ShiftModifier
+
+        # Insert entry commands
+        if key == Qt.Key_I:
+            self._enter_vi_insert_mode()
+            event.accept()
+            return True
+        if key == Qt.Key_A:
+            cursor = self.textCursor()
+            cursor.movePosition(QTextCursor.Right)
+            self.setTextCursor(cursor)
+            self._enter_vi_insert_mode()
+            event.accept()
+            return True
+        if key == Qt.Key_O:
+            cursor = self.textCursor()
+            cursor.movePosition(QTextCursor.EndOfLine)
+            indent = re.match(r"\s*", cursor.block().text() or "")[0]
+            cursor.beginEditBlock()
+            cursor.insertBlock()
+            cursor.insertText(indent)
+            cursor.endEditBlock()
+            self.setTextCursor(cursor)
+            self._enter_vi_insert_mode()
+            event.accept()
+            return True
+        if key == Qt.Key_O and mods == Qt.ShiftModifier:
+            cursor = self.textCursor()
+            indent = re.match(r"\s*", cursor.block().text() or "")[0]
+            cursor.beginEditBlock()
+            cursor.movePosition(QTextCursor.StartOfLine)
+            cursor.insertBlock()
+            cursor.insertText(indent)
+            cursor.endEditBlock()
+            self.setTextCursor(cursor)
+            self._enter_vi_insert_mode()
+            event.accept()
+            return True
+
+        # Edits
+        if key == Qt.Key_X:
+            def delete_char():
+                cursor = self.textCursor()
+                if cursor.hasSelection():
+                    cursor.clearSelection()
+                if not cursor.atEnd():
+                    cursor.deleteChar()
+                self.setTextCursor(cursor)
+
+            delete_char()
+            self._vi_last_edit_action = delete_char
+            event.accept()
+            return True
+        if key == Qt.Key_S:
+            def substitute_char():
+                cursor = self.textCursor()
+                if not cursor.atEnd():
+                    cursor.deleteChar()
+                self.setTextCursor(cursor)
+                self._enter_vi_insert_mode()
+
+            substitute_char()
+            self._vi_last_edit_action = substitute_char
+            event.accept()
+            return True
+        if key == Qt.Key_R:
+            self._vi_replace_pending = ""
+            event.accept()
+            return True
+        if key == Qt.Key_D:
+            def delete_line():
+                cursor = self.textCursor()
+                cursor.beginEditBlock()
+                cursor.select(QTextCursor.LineUnderCursor)
+                cursor.removeSelectedText()
+                cursor.deleteChar()
+                cursor.endEditBlock()
+                self.setTextCursor(cursor)
+
+            delete_line()
+            self._vi_last_edit_action = delete_line
+            event.accept()
+            return True
+        if key == Qt.Key_U:
+            self.undo()
+            event.accept()
+            return True
+        if key == Qt.Key_Period:
+            if self._vi_last_edit_action:
+                self._vi_last_edit_action()
+                event.accept()
+                return True
+            return False
+
+        # Navigation keys
+        if key == Qt.Key_H:
+            self._vi_move_cursor(QTextCursor.Left, keep_anchor=keep)
+            event.accept()
+            return True
+        if key == Qt.Key_L:
+            self._vi_move_cursor(QTextCursor.Right, keep_anchor=keep)
+            event.accept()
+            return True
+        if key == Qt.Key_J:
+            self._vi_move_cursor(QTextCursor.Down, keep_anchor=keep)
+            event.accept()
+            return True
+        if key == Qt.Key_K:
+            self._vi_move_cursor(QTextCursor.Up, keep_anchor=keep)
+            event.accept()
+            return True
+        if key == Qt.Key_W:
+            self._vi_move_cursor(QTextCursor.NextWord, keep_anchor=keep)
+            event.accept()
+            return True
+        if key == Qt.Key_B:
+            self._vi_move_cursor(QTextCursor.PreviousWord, keep_anchor=keep)
+            event.accept()
+            return True
+        if key == Qt.Key_E:
+            self._vi_move_cursor(QTextCursor.EndOfWord, keep_anchor=keep)
+            event.accept()
+            return True
+        if key == Qt.Key_0:
+            self._vi_move_cursor(QTextCursor.StartOfLine, keep_anchor=keep)
+            event.accept()
+            return True
+        if key == Qt.Key_Dollar:
+            self._vi_move_cursor(QTextCursor.EndOfLine, keep_anchor=keep)
+            event.accept()
+            return True
+        if key == Qt.Key_AsciiCircum:
+            cursor = self.textCursor()
+            cursor.movePosition(
+                QTextCursor.StartOfLine,
+                QTextCursor.KeepAnchor if keep else QTextCursor.MoveAnchor,
+            )
+            line = cursor.block().text()
+            leading = len(line) - len(line.lstrip())
+            cursor.movePosition(
+                QTextCursor.Right,
+                QTextCursor.KeepAnchor if keep else QTextCursor.MoveAnchor,
+                leading,
+            )
+            self.setTextCursor(cursor)
+            event.accept()
+            return True
+        if key == Qt.Key_G:
+            if mods == Qt.ShiftModifier:
+                self._vi_move_cursor(QTextCursor.End, keep_anchor=keep)
+            else:
+                self._vi_move_cursor(QTextCursor.Start, keep_anchor=keep)
+            event.accept()
+            return True
+
+        return False
+
     def keyPressEvent(self, event):  # type: ignore[override]
         if self._dialog_block_input:
             event.ignore()
@@ -1567,6 +1786,9 @@ class MarkdownEditor(QTextEdit):
                 self._toggle_highlight()
                 event.accept()
                 return
+
+        if self.handle_vi_strict_key(event):
+            return
         
         # Vi-mode: Shift+H selects left, Shift+L selects right (like Shift+Arrow)
         if self._vi_mode_active:
@@ -2496,11 +2718,24 @@ class MarkdownEditor(QTextEdit):
         if self._vi_mode_active:
             self._update_vi_cursor()
 
+    def set_vi_strict_mode_enabled(self, enabled: bool) -> None:
+        """Enable or disable strict vi-mode state machine (navigation vs insert)."""
+        self._vi_strict_enabled = enabled
+        if not enabled:
+            self._vi_strict_insert_mode = False
+            self._vi_replace_pending = None
+
+    def is_vi_strict_mode_enabled(self) -> bool:
+        return self._vi_strict_enabled
+
     def set_vi_mode(self, active: bool) -> None:
         """Enable or disable vi-mode cursor styling (pink block)."""
         if self._vi_mode_active == active:
             return
         self._vi_mode_active = active
+        if self._vi_strict_enabled:
+            self._vi_strict_insert_mode = False
+            self._vi_replace_pending = None
         # Disable cursor blinking while in vi-mode to avoid flicker with overlay (only if block cursor enabled)
         if active and self._vi_block_cursor_enabled:
             if self._vi_saved_flash_time is None:
