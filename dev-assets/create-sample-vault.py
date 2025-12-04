@@ -2,20 +2,27 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import random
 import textwrap
 from pathlib import Path
 from datetime import date, timedelta
 
+from faker import Faker
+
 PAGE_SUFFIX = ".txt"
-LOREM_WORDS = (
-    "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor "
-    "incididunt ut labore et dolore magna aliqua ut enim ad minim veniam quis nostrud "
-    "exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat duis aute "
-    "irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla "
-    "pariatur excepteur sint occaecat cupidatat non proident sunt in culpa qui officia "
-    "deserunt mollit anim id est laborum"
-).split()
+SECTION_DEFS = [
+    ("Overview", "overview"),
+    ("Ideas", "ideas"),
+    ("Tasks", "tasks"),
+    ("Workflow", "workflow"),
+    ("Graph", "graph"),
+    ("API", "api"),
+    ("Performance", "perf"),
+    ("FAQ", "faq"),
+]
+
+FAKER = Faker()
 
 
 def main() -> None:
@@ -33,6 +40,7 @@ def main() -> None:
     dest = Path(args.destination).resolve()
     dest.mkdir(parents=True, exist_ok=True)
     random.seed(42)
+    FAKER.seed_instance(42)
 
     root_name = dest.name
     pages: list[list[str]] = []
@@ -62,23 +70,40 @@ def main() -> None:
         chain = [topic] + [f"{topic}Sub{idx}" for idx in range(1, depth + 1)]
         pages.extend(_build_chain(chain))
 
-    # Precompute colon names for linking
+    # Precompute colon names and hierarchy info for linking
     colon_map = {tuple(parts): _colon_name(parts, root_name) for parts in pages}
+    hierarchy = _build_hierarchy(pages)
     all_colon_targets = list(colon_map.values())
 
     for parts in pages:
         title = root_name if not parts else parts[-1]
-        colon_path = colon_map[tuple(parts)]
-        links = _pick_links(colon_path, all_colon_targets, count=4)
+        key = tuple(parts)
+        colon_path = colon_map[key]
+        link_groups, ordered_links = _pick_links(
+            key,
+            hierarchy,
+            colon_map,
+            all_colon_targets,
+            desired_total=8,
+        )
         tasks = _sample_tasks()
-        paragraphs = random.randint(2, 5)
+        paragraphs = random.randint(3, 6)
         long_bonus = 0
         if len(parts) == 0:
             long_bonus = 2
         elif parts[:1] == [deep_root] and len(parts) > 5:
             long_bonus = 2
-        content = _build_content(title, colon_path, links, tasks, paragraphs + long_bonus)
+        content = _build_content(
+            title,
+            colon_path,
+            link_groups,
+            ordered_links,
+            tasks,
+            paragraphs + long_bonus,
+        )
         _write_page(dest, root_name, parts, content)
+
+    _generate_journal_calendar(dest)
 
     print(f"Sample vault created at: {dest}")
 
@@ -99,14 +124,82 @@ def _colon_name(parts: list[str], root_name: str) -> str:
     return ":".join(parts)
 
 
-def _pick_links(current: str, all_targets: list[str], count: int = 3) -> list[str]:
-    pool = [t for t in all_targets if t != current]
-    random.shuffle(pool)
-    return pool[:count]
+def _build_hierarchy(pages: list[list[str]]) -> dict[tuple[str, ...], dict[str, list[tuple[str, ...]] | tuple[str, ...] | None]]:
+    """Build parent/child relationships for every page."""
+    info: dict[tuple[str, ...], dict[str, list[tuple[str, ...]] | tuple[str, ...] | None]] = {}
+    for parts in pages:
+        key = tuple(parts)
+        parent = tuple(parts[:-1]) if parts else None
+        info[key] = {"parent": parent, "children": []}
+    for key, meta in info.items():
+        parent = meta["parent"]
+        if parent is not None and parent in info:
+            info[parent]["children"].append(key)
+    return info
 
 
-def _sample_tasks() -> list[str]:
-    today = date.today()
+def _pick_links(
+    current_key: tuple[str, ...],
+    hierarchy: dict[tuple[str, ...], dict[str, list[tuple[str, ...]] | tuple[str, ...] | None]],
+    colon_map: dict[tuple[str, ...], str],
+    all_targets: list[str],
+    desired_total: int = 6,
+) -> tuple[dict[str, list[str]], list[str]]:
+    groups = {"parent": [], "children": [], "siblings": [], "cross": []}
+    current_meta = hierarchy[current_key]
+    parent = current_meta["parent"]
+    if parent is not None:
+        groups["parent"].append(colon_map[parent])
+
+    children = list(current_meta["children"])
+    random.shuffle(children)
+    groups["children"].extend(colon_map[ch] for ch in children[:3])
+
+    if parent is not None and parent in hierarchy:
+        siblings = [child for child in hierarchy[parent]["children"] if child != current_key]
+        random.shuffle(siblings)
+        groups["siblings"].extend(colon_map[sib] for sib in siblings[:3])
+
+    seen: set[str] = {colon_map[current_key]}
+    for label in ("parent", "children", "siblings"):
+        seen.update(groups[label])
+
+    # Cross-level picks: mix of deep nodes and random entries
+    candidates = [key for key in hierarchy.keys() if key not in {current_key, parent}]
+    random.shuffle(candidates)
+    for key in candidates:
+        colon = colon_map[key]
+        if colon in seen:
+            continue
+        groups["cross"].append(colon)
+        seen.add(colon)
+        if len(groups["cross"]) >= max(4, desired_total // 2):
+            break
+
+    flat_links: list[str] = []
+    flattened_order = ("parent", "children", "siblings", "cross")
+    seen_flat: set[str] = set()
+    for label in flattened_order:
+        for link in groups[label]:
+            if link in seen_flat:
+                continue
+            flat_links.append(link)
+            seen_flat.add(link)
+
+    extras = [t for t in all_targets if t not in seen_flat and t != colon_map[current_key]]
+    random.shuffle(extras)
+    for link in extras:
+        flat_links.append(link)
+        groups["cross"].append(link)
+        seen_flat.add(link)
+        if len(flat_links) >= desired_total:
+            break
+
+    return groups, flat_links
+
+
+def _sample_tasks(reference_date: date | None = None) -> list[str]:
+    today = reference_date or date.today()
     due_dates = [
         today - timedelta(days=7),
         today - timedelta(days=1),
@@ -115,11 +208,8 @@ def _sample_tasks() -> list[str]:
         today + timedelta(days=45),
     ]
     templates = [
-        ("Review link graph edges", "@backlog", 1),
-        ("Refine backlink queries", "@research", 2),
-        ("Write UI polish notes", "@ui", 0),
-        ("Benchmark reindexing", "@perf", 3),
-        ("Document task flow", "@docs", 1),
+        (_generate_task_text(), f"@{FAKER.word().lower()}", random.randint(0, 3))
+        for _ in range(6)
     ]
     tasks: list[str] = []
     for text, tag, priority in templates:
@@ -132,15 +222,31 @@ def _sample_tasks() -> list[str]:
     return tasks
 
 
+def _generate_task_text() -> str:
+    buzz = "-".join(FAKER.words(nb=random.randint(2, 4)))
+    action = FAKER.bs()
+    color = FAKER.color_name()
+    cipher = FAKER.lexify(text="??-??")
+    phrase = FAKER.catch_phrase()
+    mashup = f"{buzz} {action} {color} {cipher} {phrase}"
+    return mashup.strip().capitalize()
+
+
 def _build_content(
-    title: str, colon_path: str, links: list[str], tasks: list[str], paragraphs: int
+    title: str,
+    colon_path: str,
+    link_groups: dict[str, list[str]],
+    ordered_links: list[str],
+    tasks: list[str],
+    paragraphs: int,
 ) -> str:
-    anchor_slugs = ["overview", "ideas", "tasks", "workflow", "graph", "api", "perf", "faq"]
+    anchor_slugs = [slug for _, slug in SECTION_DEFS]
+    section_labels = {slug: label for label, slug in SECTION_DEFS}
     rich_links: list[str] = []
-    for target in links:
+    for target in ordered_links:
         rich_links.append(target)
-        if random.random() > 0.5:
-            slug = random.choice(anchor_slugs)
+        samples = random.sample(anchor_slugs, k=random.randint(1, min(3, len(anchor_slugs))))
+        for slug in samples:
             rich_links.append(f"{target}#{slug}")
     # Ensure uniqueness but keep order
     seen = set()
@@ -153,17 +259,34 @@ def _build_content(
 
     inline_refs = []
     if len(dedup_links) >= 2:
+        slug_a = random.choice(anchor_slugs)
         inline_refs.append(
-            f"See also :{dedup_links[0]} for background and :{dedup_links[1]} for related notes."
+            f"See also :{dedup_links[0]}#{slug_a} for background and related context."
         )
     if len(dedup_links) >= 3:
-        inline_refs.append(f"Jump to :{dedup_links[2]} for the task breakdown.")
+        slug_b = random.choice(anchor_slugs)
+        inline_refs.append(f"Jump to :{dedup_links[2]}#{slug_b} for the task breakdown.")
 
-    section_headings = [
-        "## Overview",
-        "## Ideas",
-        "## Tasks",
-    ]
+    group_summaries: list[str] = []
+    label_map = {
+        "parent": "Parent",
+        "children": "Children",
+        "siblings": "Siblings",
+        "cross": "Cross-level",
+    }
+    for key in ("parent", "children", "siblings", "cross"):
+        entries = link_groups.get(key, [])
+        if not entries:
+            continue
+        refs = ", ".join(f":{entry}" for entry in entries[:5])
+        group_summaries.append(f"- **{label_map[key]}:** {refs}")
+
+    anchor_examples: list[str] = []
+    for link in ordered_links[: min(6, len(ordered_links))]:
+        slug = random.choice(anchor_slugs)
+        anchor_examples.append(
+            f"- Deep link to :{link}#{slug} for {section_labels[slug].lower()} insights."
+        )
 
     intro = [
         f"# {title}",
@@ -174,22 +297,57 @@ def _build_content(
         "Links to explore:",
         *[f"- [:{link}|{link}]" for link in dedup_links],
         "",
+        "Relationship map:",
+        *group_summaries,
+        "",
+        "Anchor quick links:",
+        *anchor_examples,
+        "",
         "Tasks:",
         *tasks,
         "",
-        "Notes:",
-        *section_headings,
+        "Notes roadmap includes:",
+        *[f"- {label}" for label, _ in SECTION_DEFS],
+        "",
         *inline_refs,
     ]
-    body = "\n\n".join(_paragraph() for _ in range(paragraphs))
+    section_counts = {slug: 1 for _, slug in SECTION_DEFS}
+    extra = max(0, paragraphs - len(SECTION_DEFS))
+    for _ in range(extra):
+        slug = random.choice(anchor_slugs)
+        section_counts[slug] += 1
+
+    body_sections: list[str] = []
+    paragraph_counter = 0
+    for label, slug in SECTION_DEFS:
+        count = section_counts[slug]
+        paragraphs_for_section = []
+        for idx in range(count):
+            extra_note = None
+            if (paragraph_counter + idx) % 2 == 0 and ordered_links:
+                target = random.choice(ordered_links)
+                extra_note = (
+                    f"Cross-reference :{target}#{slug} for aligned {label.lower()} notes."
+                )
+            level = ((paragraph_counter + idx) % 5) + 1
+            paragraphs_for_section.append(_headered_paragraph(level, extra_note))
+        paragraph_counter += count
+        section_body = "\n\n".join(paragraphs_for_section)
+        body_sections.append(f"## {label}\n\n{section_body}")
+
+    body = "\n\n".join(body_sections)
     return "\n".join(intro) + "\n\n" + body + "\n"
 
 
-def _paragraph(word_count: int | None = None) -> str:
-    words = word_count or random.randint(80, 160)
-    chosen = [random.choice(LOREM_WORDS) for _ in range(words)]
-    text = " ".join(chosen)
-    return textwrap.fill(text, width=86)
+def _headered_paragraph(header_level: int, extra_note: str | None = None) -> str:
+    level = max(1, min(5, header_level))
+    heading_words = " ".join(word.capitalize() for word in FAKER.words(nb=random.randint(2, 4)))
+    heading = f"{'#' * level} {heading_words}"
+    sentences = " ".join(FAKER.sentences(nb=random.randint(5, 9)))
+    body = textwrap.fill(sentences, width=86)
+    if extra_note:
+        body = f"{body}\n\n{extra_note}"
+    return f"{heading}\n\n{body}"
 
 
 def _write_page(root: Path, root_name: str, parts: list[str], content: str) -> None:
@@ -203,6 +361,211 @@ def _write_page(root: Path, root_name: str, parts: list[str], content: str) -> N
     folder.mkdir(parents=True, exist_ok=True)
     file_path = folder / f"{parts[-1]}{PAGE_SUFFIX}"
     file_path.write_text(content, encoding="utf-8")
+
+
+def _generate_journal_calendar(root: Path) -> None:
+    today = date.today()
+    offsets = (-1, 0, 1)
+    months = [_shift_month(today, offset) for offset in offsets]
+    journal_root = root / "Journal"
+    journal_root.mkdir(parents=True, exist_ok=True)
+
+    grouped: dict[int, list[int]] = {}
+    for year, month in months:
+        grouped.setdefault(year, []).append(month)
+
+    for year in sorted(grouped):
+        year_dir = journal_root / f"{year:04d}"
+        year_dir.mkdir(parents=True, exist_ok=True)
+        month_details: list[tuple[int, list[date]]] = []
+        for month in sorted(set(grouped[year])):
+            day_dates = _write_journal_month(year_dir, year, month)
+            month_details.append((month, day_dates))
+        year_page = year_dir / f"{year:04d}{PAGE_SUFFIX}"
+        year_page.write_text(
+            _build_journal_year_content(year, month_details),
+            encoding="utf-8",
+        )
+
+
+def _shift_month(base: date, offset: int) -> tuple[int, int]:
+    month = base.month + offset
+    year = base.year
+    while month < 1:
+        month += 12
+        year -= 1
+    while month > 12:
+        month -= 12
+        year += 1
+    return year, month
+
+
+def _write_journal_month(year_dir: Path, year: int, month: int) -> list[date]:
+    month_dir = year_dir / f"{month:02d}"
+    month_dir.mkdir(parents=True, exist_ok=True)
+    day_count = calendar.monthrange(year, month)[1]
+    day_dates: list[date] = []
+    for day in range(1, day_count + 1):
+        entry_date = date(year, month, day)
+        day_dir = month_dir / f"{day:02d}"
+        day_dir.mkdir(parents=True, exist_ok=True)
+        day_page = day_dir / f"{day:02d}{PAGE_SUFFIX}"
+        day_page.write_text(_build_journal_day_content(entry_date), encoding="utf-8")
+        day_dates.append(entry_date)
+    month_page = month_dir / f"{month:02d}{PAGE_SUFFIX}"
+    month_page.write_text(
+        _build_journal_month_content(year, month, day_dates),
+        encoding="utf-8",
+    )
+    return day_dates
+
+
+def _build_journal_year_content(
+    year: int, month_details: list[tuple[int, list[date]]]
+) -> str:
+    colon_path = f"Journal:{year:04d}:{year:04d}"
+    lines = [
+        f"# {year} Journal Overview",
+        "",
+        f"Annual tracker anchored at :{colon_path}.",
+        "Covered months:",
+    ]
+    for month, day_dates in month_details:
+        name = date(year, month, 1).strftime("%B")
+        lines.append(
+            f"- {name}: :Journal:{year:04d}:{month:02d}:{month:02d} ({len(day_dates)} entries)"
+        )
+    lines.extend(
+        [
+            "",
+            "## Themes",
+            "",
+            textwrap.fill(
+                " ".join(FAKER.sentences(nb=random.randint(5, 7))),
+                width=86,
+            ),
+        ]
+    )
+    if month_details:
+        focus_month = month_details[0][0]
+        lines.extend(
+            [
+                "",
+                _headered_paragraph(
+                    3,
+                    f"Cross-check :Journal:{year:04d}:{focus_month:02d}:{focus_month:02d} for kickoff context.",
+                ),
+            ]
+        )
+    return "\n".join(lines).strip() + "\n"
+
+
+def _build_journal_month_content(year: int, month: int, day_dates: list[date]) -> str:
+    month_name = date(year, month, 1).strftime("%B")
+    colon_path = f"Journal:{year:04d}:{month:02d}:{month:02d}"
+    focus_blurbs = ", ".join(FAKER.words(nb=4))
+    lines = [
+        f"# {month_name} {year}",
+        "",
+        f"Monthly tracker anchored at :{colon_path}.",
+        f"This span includes {len(day_dates)} daily entries focused on {focus_blurbs}.",
+        "",
+        "Daily links:",
+    ]
+    for entry in day_dates:
+        summary = FAKER.sentence(nb_words=12)
+        lines.append(
+            f"- {entry:%Y-%m-%d}: :Journal:{entry:%Y}:{entry:%m}:{entry:%d}:{entry:%d} — {summary}"
+        )
+    lines.extend(
+        [
+            "",
+            "## Highlights",
+            "",
+            textwrap.fill(
+                " ".join(FAKER.sentences(nb=random.randint(4, 6))),
+                width=86,
+            ),
+        ]
+    )
+    sample_days = random.sample(day_dates, k=min(3, len(day_dates))) if day_dates else []
+    for sample in sample_days:
+        lines.extend(
+            [
+                "",
+                _headered_paragraph(
+                    3,
+                    f"Review :Journal:{sample:%Y}:{sample:%m}:{sample:%d}:{sample:%d} for supporting notes.",
+                ),
+            ]
+        )
+    return "\n".join(lines).strip() + "\n"
+
+
+def _build_journal_day_content(entry_date: date) -> str:
+    colon_path = f"Journal:{entry_date:%Y}:{entry_date:%m}:{entry_date:%d}:{entry_date:%d}"
+    mood = random.choice(["calm", "focused", "energized", "curious", "heads-down"])
+    energy = random.choice(["steady", "peaking", "variable", "recharging"])
+    focus = FAKER.bs().capitalize()
+    weather = random.choice(["clear", "rainy", "cloudy", "stormy", "crisp"])
+    tasks = _sample_tasks(reference_date=entry_date)
+    day_tasks = random.sample(tasks, k=min(4, len(tasks)))
+    timeline = _generate_journal_timeline()
+
+    intro_lines = [
+        f"# {entry_date:%A, %B %d, %Y}",
+        "",
+        f"Tracked at :{colon_path}.",
+        "",
+        "Daily context:",
+        f"- Mood: {mood}",
+        f"- Energy: {energy}",
+        f"- Focus: {focus}",
+        f"- Weather: {weather}",
+        "",
+        "Timeline:",
+        *timeline,
+        "",
+        "Tasks:",
+        *day_tasks,
+    ]
+
+    sections = []
+    anchors = [
+        "Morning Focus",
+        "Midday Collaboration",
+        "Afternoon Delivery",
+        "Evening Reflection",
+    ]
+    for label in anchors:
+        sentences = " ".join(FAKER.sentences(nb=random.randint(3, 5)))
+        body = textwrap.fill(sentences, width=86)
+        sections.append(f"## {label}\n\n{body}")
+
+    reflection = textwrap.fill(
+        " ".join(FAKER.sentences(nb=random.randint(4, 6))),
+        width=86,
+    )
+
+    base = "\n".join(intro_lines)
+    body = "\n\n".join(sections)
+    return f"{base}\n\n{body}\n\n## Reflection\n\n{reflection}\n"
+
+
+def _generate_journal_timeline() -> list[str]:
+    events = [
+        f"Stand-up on {FAKER.word()} deliverables",
+        f"Deep work sprint for {FAKER.bs()}",
+        f"Pairing with {FAKER.first_name()} on {FAKER.word()} decisions",
+        f"Retrospective and notes for {FAKER.catch_phrase().lower()}",
+    ]
+    hour = 8
+    timeline: list[str] = []
+    for summary in events:
+        minute = random.choice([0, 15, 30, 45])
+        timeline.append(f"- {hour:02d}:{minute:02d} — {summary}")
+        hour = min(20, hour + random.randint(1, 3))
+    return timeline
 
 
 if __name__ == "__main__":

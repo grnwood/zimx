@@ -1,4 +1,5 @@
-Task: You are given a conversation transcript between a user and an AI assistant. Your job is to condense this history into a concise “context seed” that can be used to initialize a future conversation.
+Task: You are given a conversation transcript between a user and an AI assistant. Your job is to condense this history into 
+a concise context seed that can be used to initialize a future conversation.
 
 Goal: Extract only the durable, session-relevant information — not the transient details — so the next session starts with the right awareness of the user’s needs, preferences, and ongoing threads.
 Requirements:
