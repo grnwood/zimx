@@ -34,7 +34,6 @@ class PageEditorWindow(QMainWindow):
         self._read_only = read_only
         self._open_in_main = open_in_main_callback
         self.http = httpx.Client(base_url=self.api_base, timeout=10.0)
-        self._vi_mode_active = False
         self._badge_base_style = "border: 1px solid #666; padding: 2px 6px; border-radius: 3px;"
         self._font_size = config.load_popup_font_size(14)
 
@@ -43,6 +42,8 @@ class PageEditorWindow(QMainWindow):
         self.editor.setContextMenuPolicy(Qt.NoContextMenu)
         self.editor.set_context(self.vault_root, self._source_path)
         self.editor.set_font_point_size(self._font_size)
+        self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
+        self.editor.set_vi_mode_enabled(config.load_vi_mode_enabled())
         self.editor.linkActivated.connect(self._forward_link_to_main)
         self.editor.focusLost.connect(lambda: self._save_current_file(auto=True))
         self.setCentralWidget(self.editor)

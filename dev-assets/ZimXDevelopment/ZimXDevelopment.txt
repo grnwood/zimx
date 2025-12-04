@@ -18,12 +18,13 @@ Logbook of all the development efforts on zim. yes!
 (x)  should i use fast api locally if server and ui are in the same place?  @edit
 (x)  when you click a link from a floating editor to a anchor, show the animation  @edit
 (x)  found the vi ; key bug, when i'm in caps it works, when lower it doesn't (maybe win32 only)  @edit
-  ( )  figure out a way to not allow crazy links to get generated and pasted @edit				￼
+( )  figure out a way to not allow crazy links to get generated and pasted @edit				￼
   			![paste_image_001](./paste_image_001.png)make colon-link (: somelink) processing smarter, like if its in a the middle of the sentence
  		or 8 : 56pm
  		of  This : That  <-- not a link.		
 ( )  add find and replace functionality @edit
 ( ) implement the full text search with your chatgpt vetted feature @edit
+( )  when i paste a link i copied from a header or toc bar and paste into page it doesnt create the link in link navigator @edit
 
 ### Git
 ( )  git support: simple 'version this vault' @edit

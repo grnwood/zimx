@@ -30,9 +30,13 @@ Tasks / Vi Mode
 ---------------
 - `F12`: Toggle task checkbox at cursor.
 - `Ctrl+\` or `Ctrl+Backslash`: Focus Tasks search.
-- Vi-mode toggle: `Alt+Space`.
-  - Esc exits vi-mode.
-  - Vim-style navigation applies when vi-mode is on; Ctrl shortcuts still work as usual.
+- Vi Mode: enable globally from **Preferences → Editing → Enable Vi Mode** (default: off).
+  - Editors open in vi navigation mode with an `INS` badge in the status bar; the badge turns yellow only while insert mode is active.
+  - Navigation keys: `h` `j` `k` `l`, `0` or `q` (line start), `;` or `$` (line end), `^` (first nonblank), `g`/`G` (file top/bottom), `w`/`b` (next/previous word).
+  - Selection helpers map to Shift+Arrow behavior: `Shift+N` selects down, `Shift+U` selects up, `Shift+;` selects to end-of-line.
+  - Insert commands: `i` (before cursor), `a` (after cursor), `o`/`O` (new line below/above). `Esc` returns to navigation mode and clears insert highlighting.
+  - Editing clipboard: `c` copies the current selection (or whole line) into the vi buffer, `x` cuts the selection/character into that buffer, `p` pastes from it. `d` deletes the current line, `r` replaces the character under the cursor once, `u` undoes, and `.` repeats the last edit.
+  - Standard `Ctrl+` shortcuts (links, jump, formatting, etc.) still work regardless of vi mode.
 
 ToC / Headings
 --------------

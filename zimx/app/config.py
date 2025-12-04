@@ -134,6 +134,17 @@ def save_vi_block_cursor_enabled(enabled: bool) -> None:
     _update_global_config({"vi_block_cursor": enabled})
 
 
+def load_vi_mode_enabled() -> bool:
+    """Return whether vi-mode navigation/editing is enabled globally (default: False)."""
+    payload = _read_global_config()
+    return bool(payload.get("enable_vi_mode", False))
+
+
+def save_vi_mode_enabled(enabled: bool) -> None:
+    """Persist the vi-mode enablement flag to the global config."""
+    _update_global_config({"enable_vi_mode": bool(enabled)})
+
+
 def load_ai_chat_font_size(default: int = 13) -> int:
     """Load preferred font size for AI chat panel."""
     if not GLOBAL_CONFIG.exists():

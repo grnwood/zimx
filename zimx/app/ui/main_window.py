@@ -32,7 +32,6 @@ from PySide6.QtGui import (
     QStandardItem,
     QStandardItemModel,
     QTextCursor,
-    QKeyEvent,
     QPainter,
     QColor,
     QFont,
@@ -93,8 +92,6 @@ TYPE_ROLE = PATH_ROLE + 1
 OPEN_ROLE = TYPE_ROLE + 1
 FILTER_BANNER = "__NAV_FILTER_BANNER__"
 _DETAILED_LOGGING = os.getenv("ZIMX_DETAILED_LOGGING", "0") not in ("0", "false", "False", "", None)
-_VI_KEY_LOGGING = os.getenv("VI_KEY_DETAILED", "0") not in ("0", "false", "False", "", None)
-
 class InlineNameEdit(QLineEdit):
     submitted = Signal(str)
     cancelled = Signal()
@@ -195,18 +192,8 @@ class VaultTreeView(QTreeView):
 
 class MainWindow(QMainWindow):
 
-    # --- Vi-mode dialog lockout ---
-    def _lock_vi_mode_toggle(self):
-        """Prevent vi mode from being toggled while a dialog is open."""
-        self._vi_mode_locked = True
-
-    def _unlock_vi_mode_toggle(self):
-        """Allow vi mode to be toggled again after dialog closes."""
-        self._vi_mode_locked = False
-
     def __init__(self, api_base: str) -> None:
         super().__init__()
-        self._vi_debug =  _VI_KEY_LOGGING
         self.setWindowTitle("ZimX Desktop")
         self.api_base = api_base.rstrip("/")
         self.http = httpx.Client(base_url=self.api_base, timeout=10.0)
@@ -231,8 +218,11 @@ class MainWindow(QMainWindow):
         # Remember cursor positions for history navigation
         # Track last-saved content to detect dirty buffers
         self._last_saved_content: Optional[str] = None
-        self._vi_suspended_for_tasks: bool = False
         self._scroll_anim: Optional[QPropertyAnimation] = None
+        self._vi_enabled: bool = False
+        self._vi_insert_active: bool = False
+        self._vi_initial_page_loaded: bool = False
+        self._vi_enable_pending: bool = False
         
         # Track virtual (unsaved) pages
         self.virtual_pages: set[str] = set()
@@ -317,8 +307,8 @@ class MainWindow(QMainWindow):
         self.editor.set_filter_nav_callback(self._set_nav_filter)
         self.font_size = 14
         self.editor.set_font_point_size(self.font_size)
-        # Load vi-mode block cursor preference
-        self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
+        self.editor.viInsertModeChanged.connect(self._on_vi_insert_state_changed)
+        self._apply_vi_preferences()
         self.toc_widget = TableOfContentsWidget(self.editor.viewport())
         self.toc_widget.set_headings([])
         self.toc_widget.set_base_path("")
@@ -373,7 +363,6 @@ class MainWindow(QMainWindow):
         self.geometry_save_timer.timeout.connect(self._save_geometry)
 
         # Vi-mode state
-        self._vi_mode_active = False
        
         self.editor_split = QSplitter()
         self.editor_split.addWidget(self.editor)
@@ -468,12 +457,14 @@ class MainWindow(QMainWindow):
         vault_menu.addAction(ai_window_action)
 
         self._register_shortcuts()
-        self._vi_filter_targets: list[QObject] = []
-        self._install_vi_mode_filters()
         self._focus_recent = ["editor", "tree", "right"]
         # Update focus borders and focus history when focus moves between widgets
         app = QApplication.instance()
         if app is not None:
+            try:
+                app.installEventFilter(self)
+            except Exception:
+                pass
             try:
                 app.focusChanged.connect(lambda old, now: self._on_focus_changed(now))
             except Exception:
@@ -493,11 +484,12 @@ class MainWindow(QMainWindow):
         self._dirty_status_label.setToolTip("Unsaved changes")
         self.statusBar().addPermanentWidget(self._dirty_status_label, 0)
 
-        self._vi_status_label = QLabel("VI")
+        self._vi_status_label = QLabel("INS")
         self._vi_status_label.setObjectName("viStatusLabel")
         self._vi_badge_base_style = self._badge_base_style
-        self._vi_status_label.setStyleSheet(self._vi_badge_base_style + " background-color: transparent;")
+        self._vi_status_label.setToolTip("Shows when vi insert mode is active")
         self.statusBar().addPermanentWidget(self._vi_status_label, 0)
+        self._update_vi_badge_visibility()
 
         self._detached_panels: list[QMainWindow] = []
         self._detached_link_panels: list[LinkNavigatorPanel] = []
@@ -652,7 +644,6 @@ class MainWindow(QMainWindow):
         open_vault_shortcut.activated.connect(lambda: self._select_vault(spawn_new_process=False))
         open_vault_new_win_shortcut = QShortcut(QKeySequence("Ctrl+Shift+O"), self)
         open_vault_new_win_shortcut.activated.connect(lambda: self._select_vault(spawn_new_process=True))
-        # Focus toggle moved to Ctrl+Shift+Space; Alt+Space now toggles vi-mode
         focus_toggle = QShortcut(QKeySequence("Ctrl+Shift+Space"), self)
         focus_toggle.activated.connect(self._toggle_focus_between_tree_and_editor)
         # Explicit heading popup shortcut (Ctrl+Shift+Tab)
@@ -1002,6 +993,10 @@ class MainWindow(QMainWindow):
             self.show_journal_button.setChecked(show_journal)
         self.editor.set_context(self.vault_root, None)
         self.editor.set_markdown("")
+        self._vi_initial_page_loaded = False
+        if self._vi_enabled:
+            self._vi_enable_pending = True
+            self.editor.set_vi_mode_enabled(False)
         self.current_path = None
         self.right_panel.set_current_page(None, None)
         self.statusBar().showMessage(f"Vault: {self.vault_root}")
@@ -1587,6 +1582,7 @@ class MainWindow(QMainWindow):
         else:
             self.right_panel.set_current_page(None, None)
             self.editor.set_ai_chat_available(False)
+        self._mark_initial_page_loaded()
         if tracer:
             tracer.end("ready for edit")
             # Set up a defensive stack dump if the Qt loop does not resume quickly.
@@ -1875,7 +1871,6 @@ class MainWindow(QMainWindow):
         if not config.has_active_vault():
             return
         
-        vi_was_active = self._suspend_vi_mode_for_dialog()
         filter_prefix = self._nav_filter_path
         filter_label = path_to_colon(filter_prefix) if filter_prefix else None
         dlg = JumpToPageDialog(
@@ -1892,7 +1887,6 @@ class MainWindow(QMainWindow):
                 self._select_tree_path(target)
                 self._open_file(target)
         
-        self._restore_vi_mode_after_dialog(vi_was_active)
 
     def _insert_link(self) -> None:
         """Open insert link dialog and insert selected link at cursor."""
@@ -1901,8 +1895,6 @@ class MainWindow(QMainWindow):
         # Save current page before inserting link to ensure it's indexed
         if self.current_path:
             self._save_current_file(auto=True)
-        
-        vi_was_active = self._suspend_vi_mode_for_dialog()
         
         # Get selected text if any
         editor_cursor = self.editor.textCursor()
@@ -1949,14 +1941,12 @@ class MainWindow(QMainWindow):
                 self.editor.insert_link(colon_path, label)
                 inserted = True
 
-        self._restore_vi_mode_after_dialog(vi_was_active)
 
     def _insert_date(self) -> None:
         """Show calendar/date dialog and insert selected date."""
         if not self.vault_root:
             self._alert("Select a vault before inserting dates.")
             return
-        vi_was_active = self._suspend_vi_mode_for_dialog()
         cursor_rect = self.editor.cursorRect()
         anchor = self.editor.viewport().mapToGlobal(cursor_rect.bottomRight() + QPoint(0, 4))
         dlg = DateInsertDialog(self, anchor_pos=anchor)
@@ -1968,7 +1958,7 @@ class MainWindow(QMainWindow):
                 cursor.insertText(text)
                 self.editor.setTextCursor(cursor)
                 self.statusBar().showMessage(f"Inserted date: {text}", 3000)
-        self._restore_vi_mode_after_dialog(vi_was_active)
+        
 
     def _copy_current_page_link(self) -> None:
         """Copy the current page's link to clipboard (Ctrl+Shift+L)."""
@@ -1997,7 +1987,6 @@ class MainWindow(QMainWindow):
         if not self._ensure_writable("create new pages"):
             return
         
-        vi_was_active = self._suspend_vi_mode_for_dialog()
         dlg = NewPageDialog(self)
         if dlg.exec() == QDialog.Accepted:
             page_name = dlg.get_page_name()
@@ -2043,7 +2032,6 @@ class MainWindow(QMainWindow):
             self._pending_selection = file_path
             self._populate_vault_tree()
             self._open_file(file_path, cursor_at_end=True)
-        self._restore_vi_mode_after_dialog(vi_was_active)
 
     def _get_current_parent_path(self) -> str:
         """Get the parent path for creating new pages based on current selection."""
@@ -2058,27 +2046,20 @@ class MainWindow(QMainWindow):
 
     def _open_preferences(self) -> None:
         """Open the preferences dialog."""
-        vi_was_active = self._suspend_vi_mode_for_dialog()
         dlg = PreferencesDialog(self)
         dlg.rebuildIndexRequested.connect(lambda: self._reindex_vault(show_progress=True))
         if dlg.exec() == QDialog.Accepted:
-            # Reload vi-mode cursor setting and apply to editor
-            self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
-            # Re-apply vi-mode state to refresh cursor
-            if self._vi_mode_active:
-                self.editor.set_vi_mode(True)
+            self._apply_vi_preferences()
             self.right_panel.set_ai_enabled(config.load_enable_ai_chats())
             self.editor.set_ai_actions_enabled(config.load_enable_ai_chats())
             # Apply vault read-only preference immediately
             self._apply_vault_read_only_pref()
-        self._restore_vi_mode_after_dialog(vi_was_active)
 
     def _open_task_from_panel(self, path: str, line: int) -> None:
         self._select_tree_path(path)
         self._open_file(path)
         # Focus first, then go to line so the selection isn't cleared
         self.editor.setFocus()
-        self._restore_vi_if_suspended()
         self._goto_line(line, select_line=True)
 
     def _open_link_from_panel(self, path: str) -> None:
@@ -2760,8 +2741,6 @@ class MainWindow(QMainWindow):
         try:
             # Switch to Tasks tab
             self.right_panel.tabs.setCurrentIndex(0)
-            # Suspend vi-mode while interacting with tasks
-            self._suspend_vi_for_tasks()
             # Explicitly focus the search box
             if hasattr(self.right_panel.task_panel, "focus_search"):
                 self.right_panel.task_panel.focus_search()
@@ -2769,20 +2748,6 @@ class MainWindow(QMainWindow):
                 self.right_panel.task_panel.search.setFocus(Qt.ShortcutFocusReason)
         except Exception:
             pass
-
-    def _suspend_vi_for_tasks(self) -> None:
-        """Turn off vi-mode while interacting with Tasks, remembering prior state."""
-        if getattr(self, "_vi_mode_active", False):
-            self._vi_suspended_for_tasks = True
-            self._vi_mode_active = False
-            self._apply_vi_mode_statusbar_style()
-
-    def _restore_vi_if_suspended(self) -> None:
-        """Restore vi-mode if it was suspended for task interactions."""
-        if self._vi_suspended_for_tasks:
-            self._vi_suspended_for_tasks = False
-            self._vi_mode_active = True
-            self._apply_vi_mode_statusbar_style()
 
     def _mark_tree_arrow_nav(self) -> None:
         """Flag that tree navigation via arrow keys should keep focus on the tree."""
@@ -3337,15 +3302,8 @@ class MainWindow(QMainWindow):
 
     def _navigate_history_back(self) -> None:
         """Navigate to previous page in history (Alt+Left)."""
-        import traceback
-        print(f"[DEBUG] _navigate_history_back called from:")
-        for line in traceback.format_stack()[-4:-1]:
-            print(line.strip())
         if not self.page_history or self.history_index <= 0:
             return
-        # Remember vi mode state before navigation - check MAIN WINDOW's state, not editor's
-        print(f"[DEBUG] self._vi_mode_active = {getattr(self, '_vi_mode_active', 'ATTRIBUTE_MISSING')}")
-        vi_mode_was_active = self._vi_mode_active
         self._remember_history_cursor()
         self.history_index -= 1
         target_path = self.page_history[self.history_index]
@@ -3355,16 +3313,12 @@ class MainWindow(QMainWindow):
         finally:
             self._suspend_selection_open = False
         self._open_file(target_path, add_to_history=False, restore_history_cursor=True)
-        # Restore vi mode flag if set (no delayed timers needed anymore)
-        self._restore_vi_mode_after_nav = False
         QTimer.singleShot(0, self.editor.setFocus)
 
     def _navigate_history_forward(self) -> None:
         """Navigate to next page in history (Alt+Right)."""
         if not self.page_history or self.history_index >= len(self.page_history) - 1:
             return
-        # Remember vi mode state before navigation - check MAIN WINDOW's state, not editor's
-        vi_mode_was_active = self._vi_mode_active
         self._remember_history_cursor()
         self.history_index += 1
         target_path = self.page_history[self.history_index]
@@ -3374,8 +3328,6 @@ class MainWindow(QMainWindow):
         finally:
             self._suspend_selection_open = False
         self._open_file(target_path, add_to_history=False, restore_history_cursor=True)
-        # Clear vi mode restore flag; no timer needed now that vi-mode stays stable
-        self._restore_vi_mode_after_nav = False
         QTimer.singleShot(0, self.editor.setFocus)
 
     def _history_can_go_back(self) -> bool:
@@ -3829,384 +3781,21 @@ class MainWindow(QMainWindow):
         title = " | ".join(parts + [suffix]) if parts else suffix
         self.setWindowTitle(title)
 
-    def _suspend_vi_mode_for_dialog(self) -> bool:
-        """Temporarily disable vi-mode while a modal dialog is open.
-
-        Returns:
-            True if vi-mode was active and was turned off, False otherwise.
-        """
-        was_active = self._vi_mode_active
-        if was_active:
-            self._vi_mode_active = False
-            self.editor.set_vi_mode(False)
-            self._apply_vi_mode_statusbar_style()
-        self._lock_vi_mode_toggle()
-        return was_active
-
-    def _restore_vi_mode_after_dialog(self, was_active: bool) -> None:
-        """Re-enable vi-mode if it was active before a dialog was shown."""
-        self._unlock_vi_mode_toggle()
-        if was_active:
-            self._vi_mode_active = True
-            self.editor.set_vi_mode(True)
-            self._apply_vi_mode_statusbar_style()
-
-    def _toggle_vi_mode(self) -> None:
-        """Toggle vi-mode navigation on/off with visual status bar indicator."""
-        if getattr(self, '_vi_mode_locked', False):
-            # Ignore toggle requests while locked for dialog
-            return
-        prev_focus = self.focusWidget()
-        self._vi_mode_active = not self._vi_mode_active
-        self._apply_vi_mode_statusbar_style()
-        # Restore focus to whichever widget had it before toggling (avoid forcing editor focus)
-        try:
-            if prev_focus:
-                prev_focus.setFocus(Qt.OtherFocusReason)
-        except Exception:
-            pass
-
-    def _install_vi_mode_filters(self) -> None:
-        for target in getattr(self, "_vi_filter_targets", []):
-            target.removeEventFilter(self)
-        self._vi_filter_targets = []
-        app = QApplication.instance()
-        if app is not None:
-            app.installEventFilter(self)
-            self._vi_filter_targets.append(app)
-
     def eventFilter(self, obj, event):  # type: ignore[override]
-        # (Removed overlay repositioning logic; using status bar indicator)
         if event.type() == QEvent.KeyPress:
-            # Ctrl+Tab history popup
             if event.key() == Qt.Key_Tab and (event.modifiers() & Qt.ControlModifier):
-                # With Shift: cycle headings; without: history
                 if event.modifiers() & Qt.ShiftModifier:
                     reverse = event.key() == Qt.Key_Backtab
                     self._cycle_popup("heading", reverse=reverse)
                 else:
                     self._cycle_popup("history", reverse=event.key() == Qt.Key_Backtab)
                 return True
-            # Allow Esc to exit vi-mode explicitly
-            if event.key() == Qt.Key_Escape:
-                try:
-                    if getattr(self, "editor", None) and self.editor.is_ai_overlay_visible():
-                        return False
-                except Exception:
-                    pass
-                if self._vi_mode_active:
-                    self._vi_mode_active = False
-                    self._apply_vi_mode_statusbar_style()
-                    return True
-            if event.key() == Qt.Key_Semicolon:
-                mods = event.modifiers()
-                base_mods = mods & ~Qt.KeypadModifier
-                try:
-                    base_mods &= ~Qt.GroupSwitchModifier  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-                if base_mods == Qt.AltModifier:
-                    if getattr(self, "_vi_mode_locked", False):
-                        return True
-                    self._toggle_vi_mode()
-                    return True
-            if self._vi_mode_active:
-                # Always let Control-modified shortcuts through (bold/italic/strike/etc.)
-                if event.modifiers() & Qt.ControlModifier:
-                    return super().eventFilter(obj, event)
-
-                # Handle Alt+H and Alt+L for history navigation while preserving vi mode
-                key = event.key()
-                alt = bool(event.modifiers() & Qt.AltModifier)
-                shift = bool(event.modifiers() & Qt.ShiftModifier) 
-                
-
-                
-                if alt and not shift:
-                    if key == Qt.Key_H:
-                        if self._history_can_go_back():
-                            self._restore_vi_mode_after_nav = True
-                            self._navigate_history_back()
-                        return True
-                    elif key == Qt.Key_L:
-                        if self._history_can_go_forward():
-                            self._restore_vi_mode_after_nav = True
-                            self._navigate_history_forward()
-                        return True
-                    elif key == Qt.Key_K:
-                        self._restore_vi_mode_after_nav = True
-                        self._navigate_hierarchy_up()
-                        return True
-                    elif key == Qt.Key_J:
-                        self._restore_vi_mode_after_nav = True
-                        self._navigate_hierarchy_down()
-                        return True
-                
-                target = self._vi_mode_target_widget()
-                if target:
-                    mapping = self._translate_vi_key_event(event)
-                    if mapping:
-                        key_name = chr(event.key()) if Qt.Key_A <= event.key() <= Qt.Key_Z else f"Key_{event.key()}"
-                        if self._vi_debug:
-                           self._debug(f"Vi-mode: {key_name} -> {mapping[0]} with mods {mapping[1]}")
-                        self._dispatch_vi_navigation(target, mapping)
-                        return True
-                    # Block unmapped letter keys ONLY if they don't have Control modifier
-                    # (Control+key are commands that should be allowed through)
-                    if Qt.Key_A <= event.key() <= Qt.Key_Z:
-                        has_ctrl = bool(event.modifiers() & Qt.ControlModifier)
-                        if not has_ctrl:
-                            if self._vi_debug:
-                                self._debug(f"Vi-mode: blocking unmapped key {chr(event.key())}")
-                            return True
         elif event.type() == QEvent.KeyRelease:
             if event.key() == Qt.Key_Control and self._popup_items:
                 self._activate_history_popup_selection()
                 return True
         return super().eventFilter(obj, event)
 
-
-    # Removed overlay helpers
-
-    def _vi_mode_target_widget(self) -> QWidget | None:
-        widget = self.focusWidget()
-        if widget is None:
-            return None
-        if widget is self.editor or (self.editor and self.editor.isAncestorOf(widget)):
-            return widget
-        if widget is self.tree_view or self.tree_view.isAncestorOf(widget):
-            return widget
-        if widget is self.right_panel or self.right_panel.isAncestorOf(widget):
-            return widget
-        return None
-
-    def _translate_vi_key_event(self, event: QKeyEvent) -> tuple[int, Qt.KeyboardModifiers] | None:
-        # Check for disallowed modifiers (but allow keys with only Shift or no modifiers)
-        key = event.key()
-        text = event.text()
-        mods = event.modifiers()
-        shift = bool(mods & Qt.ShiftModifier)
-        alt = bool(mods & Qt.AltModifier)
-        if self._vi_debug:
-            mods_val = mods
-            try:
-                mods_val = int(mods)  # type: ignore[arg-type]
-            except Exception:
-                try:
-                    mods_val = int(getattr(mods, "value", mods))  # type: ignore[arg-type]
-                except Exception:
-                    pass
-            self._debug(f"Vi-mode key event: key={key} text='{text}' shift={shift} alt={alt} mods={mods_val}")
-        # AltGr on Windows sends Ctrl+Alt; if this produced ";" / ":" we should still map End.
-        altgr_semicolon = text in (";", ":") and bool(mods & Qt.ControlModifier) and bool(mods & Qt.AltModifier)
-
-
-
-        # Allow Alt (for Alt+h / Alt+l mappings) plus Shift; block everything else
-        disallowed_mask = Qt.ShiftModifier | Qt.KeypadModifier | Qt.AltModifier
-        if altgr_semicolon:
-            # Allow Ctrl too when AltGr was used to type ";" / ":".
-            disallowed_mask |= Qt.ControlModifier
-        # Some layouts set GroupSwitchModifier; allow it.
-        try:
-            disallowed_mask |= Qt.GroupSwitchModifier  # type: ignore[attr-defined]
-        except Exception:
-            pass
-        disallowed = mods & ~disallowed_mask
-        if disallowed:
-            print(f"[DEBUG] _translate_vi_key_event: Blocking key {key} due to disallowed modifiers: {disallowed}")
-            return None
-
-        target_key = None
-        target_modifiers = Qt.KeyboardModifiers(Qt.NoModifier)
-
-        # Basic motion (j/k/h/l) + shifted variants
-        if key == Qt.Key_J:
-            if alt and not shift:
-                # Alt+J is handled directly in eventFilter for history navigation
-                return None
-            elif shift:
-                # Shift+J -> Shift+Down (line selection)
-                target_key = Qt.Key_Down
-                target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
-            else:
-                target_key = Qt.Key_Down
-        elif key == Qt.Key_K:
-            if alt and not shift:
-                # Alt+K is handled directly in eventFilter for history navigation
-                return None
-            elif shift:
-                # Shift+K -> Shift+Up (line selection)
-                target_key = Qt.Key_Up
-                target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
-            else:
-                target_key = Qt.Key_Up
-        elif key == Qt.Key_H:
-            if shift:
-                # Shift+H -> Shift+Left (select one char left)
-                target_key = Qt.Key_Left
-                target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
-            else:
-                target_key = Qt.Key_Left
-        elif key == Qt.Key_L:
-            if shift:
-                # Shift+L -> Shift+Right (select one char right)
-                target_key = Qt.Key_Right
-                target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
-            else:
-                target_key = Qt.Key_Right
-        # Line selection helper keys (+U/+N) for Shift+Up / Shift+Down
-        elif key == Qt.Key_N and shift:
-            target_key = Qt.Key_Down
-            target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
-        elif key == Qt.Key_U and shift:
-            target_key = Qt.Key_Up
-            target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
-        # Undo / Redo / Copy / Cut / Paste
-        elif key == Qt.Key_U and not shift:
-            target_key = Qt.Key_Z
-            target_modifiers = Qt.KeyboardModifiers(Qt.ControlModifier)
-        elif key == Qt.Key_R and not shift:
-            target_key = Qt.Key_Y
-            target_modifiers = Qt.KeyboardModifiers(Qt.ControlModifier)
-        elif key == Qt.Key_C and not shift:
-            target_key = Qt.Key_C
-            target_modifiers = Qt.KeyboardModifiers(Qt.ControlModifier)
-        elif key == Qt.Key_X and not shift:
-            target_key = Qt.Key_X
-            target_modifiers = Qt.KeyboardModifiers(Qt.ControlModifier)
-        elif key == Qt.Key_P and not shift:
-            target_key = Qt.Key_V
-            target_modifiers = Qt.KeyboardModifiers(Qt.ControlModifier)
-        # Word motions (w forward, b backward)
-        elif key == Qt.Key_W and not shift:
-            target_key = Qt.Key_Right
-            target_modifiers = Qt.KeyboardModifiers(Qt.ControlModifier)
-        elif key == Qt.Key_B and not shift:
-            target_key = Qt.Key_Left
-            target_modifiers = Qt.KeyboardModifiers(Qt.ControlModifier)
-        # Home/End and selection variants
-        elif key == Qt.Key_A:
-            target_key = Qt.Key_Home
-            if shift:
-                target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
-        elif key in (Qt.Key_Semicolon, Qt.Key_Colon) or text in (";", ":"):
-            # Some Windows layouts report this physical key as Key_Colon, and some layouts
-            # require Shift to produce ";" which would otherwise force Shift+End. Drive
-            # selection only when the character is ":" so ";" always maps to a plain End.
-            is_colon = key == Qt.Key_Colon or text == ":"
-            target_key = Qt.Key_End
-            if is_colon:
-                target_modifiers = Qt.KeyboardModifiers(Qt.ShiftModifier)
-            if self._vi_debug:
-                mods_val = mods
-                try:
-                    mods_val = int(mods)  # type: ignore[arg-type]
-                except Exception:
-                    try:
-                        mods_val = int(getattr(mods, "value", mods))  # type: ignore[arg-type]
-                    except Exception:
-                        pass
-                self._debug(f"Vi-mode: ';' key mapping -> End (colon={is_colon}, key={key}, text='{text}', mods={mods_val})")
-        # Delete variants
-        elif key == Qt.Key_D:
-            if shift:
-                # Shift+D -> delete whole line
-                target_key = Qt.Key_Delete
-                target_modifiers = Qt.KeyboardModifiers(Qt.AltModifier | Qt.ShiftModifier)
-            else:
-                # Plain 'd' -> Delete key
-                target_key = Qt.Key_Delete
-                target_modifiers = Qt.KeyboardModifiers(Qt.NoModifier)
-
-        if target_key is None:
-            return None
-
-        return target_key, target_modifiers
-
-    def _dispatch_vi_navigation(self, target: QWidget, mapping: tuple[int, Qt.KeyboardModifiers]) -> None:
-        key, modifiers = mapping
-
-        # Special handling for delete variants
-        if key == Qt.Key_Delete and hasattr(target, 'textCursor'):
-            # Shift+D: line delete (we encoded modifiers with Alt|Shift) OR Alt+Delete legacy
-            is_line_delete = bool(modifiers & Qt.ShiftModifier) or bool(modifiers & Qt.AltModifier and modifiers & Qt.ShiftModifier)
-            cursor = target.textCursor()
-            if is_line_delete:
-                # Delete whole current line
-                if cursor.hasSelection():
-                    cursor.removeSelectedText()
-                    target.setTextCursor(cursor)
-                    return
-                cursor.movePosition(QTextCursor.StartOfLine)
-                cursor.movePosition(QTextCursor.EndOfLine, QTextCursor.KeepAnchor)
-                cursor.removeSelectedText()
-                target.setTextCursor(cursor)
-                return
-            else:
-                # Plain delete
-                if cursor.hasSelection():
-                    cursor.removeSelectedText()
-                else:
-                    cursor.deleteChar()
-                target.setTextCursor(cursor)
-                return
-
-        # Prefer direct cursor operations for the editor to reduce repaint churn
-        if target is self.editor or (hasattr(target, 'textCursor') and hasattr(target, 'setTextCursor')):
-            try:
-                cur = target.textCursor()
-                keep = QTextCursor.KeepAnchor if (modifiers & Qt.ShiftModifier) else QTextCursor.MoveAnchor
-                if key == Qt.Key_Down:
-                    cur.movePosition(QTextCursor.Down, keep)
-                    target.setTextCursor(cur)
-                    return
-                if key == Qt.Key_Up:
-                    cur.movePosition(QTextCursor.Up, keep)
-                    target.setTextCursor(cur)
-                    return
-                # DON'T intercept Left/Right for the editor - let them pass through to editor's keyPressEvent
-                # so the special link boundary handling works correctly. The editor has logic to skip
-                # over hidden null bytes in display-format links.
-                # We'll let these fall through to synthetic event generation below.
-                if key == Qt.Key_Home:
-                    cur.movePosition(QTextCursor.StartOfLine, keep)
-                    target.setTextCursor(cur)
-                    return
-                if key == Qt.Key_End:
-                    cur.movePosition(QTextCursor.EndOfLine, keep)
-                    target.setTextCursor(cur)
-                    return
-                if key == Qt.Key_Z and (modifiers & Qt.ControlModifier):
-                    try:
-                        target.undo()
-                        return
-                    except Exception:
-                        pass
-                if key == Qt.Key_X and (modifiers & Qt.ControlModifier):
-                    try:
-                        target.cut()
-                        return
-                    except Exception:
-                        pass
-                if key == Qt.Key_V and (modifiers & Qt.ControlModifier):
-                    try:
-                        target.paste()
-                        return
-                    except Exception:
-                        pass
-            except Exception:
-                # Fallback to synthetic below
-                pass
-
-        # Fallback: synthesize key events for non-editor targets or unhandled keys
-        # Use the full QKeyEvent constructor for cross-platform compatibility
-        # QKeyEvent(type, key, modifiers, nativeScanCode, nativeVirtualKey, nativeModifiers, text, autorep, count)
-        # For synthetic events, we pass empty string for text and defaults for native parameters
-        press_event = QKeyEvent(QEvent.KeyPress, key, modifiers, "", False, 1)
-        release_event = QKeyEvent(QEvent.KeyRelease, key, modifiers, "", False, 1)
-        QApplication.sendEvent(target, press_event)
-        QApplication.sendEvent(target, release_event)
 
     def _update_dirty_indicator(self) -> None:
         """Refresh the dirty badge next to the VI indicator."""
@@ -4233,28 +3822,59 @@ class MainWindow(QMainWindow):
             )
             self._dirty_status_label.setToolTip("All changes saved")
 
-    def _apply_vi_mode_statusbar_style(self) -> None:
-        # Switch editor cursor styling for vi-mode; no banners/overlays
-        self.editor.set_vi_mode(self._vi_mode_active)
-        # Show a brief status message when vi-mode toggles
-        try:
-            state = "ON" if self._vi_mode_active else "OFF"
-            self.statusBar().showMessage(f"Vi mode: {state}", 2000)
-            # Update permanent VI indicator badge background color
-            if hasattr(self, "_vi_status_label"):
-                if self._vi_mode_active:
-                    # Yellow background with dark text for visibility
-                    self._vi_status_label.setStyleSheet(
-                        self._vi_badge_base_style + " background-color: #ffd54d; color: #000;"
-                    )
-                else:
-                    # Transparent background (normal status bar look)
-                    self._vi_status_label.setStyleSheet(
-                        self._vi_badge_base_style + " background-color: transparent;"
-                    )
-        except Exception:
-            # Avoid breaking if status bar not yet initialized
-            pass
+    def _apply_vi_preferences(self) -> None:
+        self._vi_enabled = config.load_vi_mode_enabled()
+        self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
+        if not self._vi_enabled:
+            self._vi_enable_pending = False
+            self.editor.set_vi_mode_enabled(False)
+        elif self._vi_initial_page_loaded:
+            self.editor.set_vi_mode_enabled(True)
+            self._vi_enable_pending = False
+        else:
+            self._vi_enable_pending = True
+            self.editor.set_vi_mode_enabled(False)
+        self._update_vi_badge_visibility()
+
+    def _mark_initial_page_loaded(self) -> None:
+        if self._vi_initial_page_loaded:
+            return
+        self._vi_initial_page_loaded = True
+        if self._vi_enable_pending and self._vi_enabled:
+            QTimer.singleShot(0, self._activate_deferred_vi_mode)
+
+    def _activate_deferred_vi_mode(self) -> None:
+        if not (self._vi_enable_pending and self._vi_enabled):
+            self._vi_enable_pending = False
+            return
+        self.editor.set_vi_mode_enabled(True)
+        self._vi_enable_pending = False
+
+    def _on_vi_insert_state_changed(self, insert_active: bool) -> None:
+        self._vi_insert_active = insert_active
+        self._update_vi_badge_style(insert_active)
+
+    def _update_vi_badge_visibility(self) -> None:
+        if not hasattr(self, "_vi_status_label"):
+            return
+        if self._vi_enabled:
+            self._vi_status_label.show()
+            self._update_vi_badge_style(self._vi_insert_active)
+        else:
+            self._vi_status_label.hide()
+
+    def _update_vi_badge_style(self, insert_active: bool) -> None:
+        if not hasattr(self, "_vi_status_label"):
+            return
+        if not self._vi_enabled:
+            self._vi_status_label.hide()
+            return
+        style = self._vi_badge_base_style
+        if insert_active:
+            style += " background-color: #ffd54d; color: #000;"
+        else:
+            style += " background-color: transparent;"
+        self._vi_status_label.setStyleSheet(style)
 
     # (Removed move/resize overlays; not used)
 

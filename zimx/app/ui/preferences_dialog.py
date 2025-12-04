@@ -31,6 +31,13 @@ class PreferencesDialog(QDialog):
         # Vi-mode block cursor setting
         vi_section = QLabel("<b>Vi Mode</b>")
         self.layout.addWidget(vi_section)
+
+        self.vi_enable_checkbox = QCheckBox("Enable Vi Mode")
+        self.vi_enable_checkbox.setChecked(config.load_vi_mode_enabled())
+        self.vi_enable_checkbox.setToolTip(
+            "Turn on vi-style navigation keys in the Markdown editor."
+        )
+        self.layout.addWidget(self.vi_enable_checkbox)
         
         self.vi_block_cursor_checkbox = QCheckBox("Use Vi Mode Block Cursor")
         self.vi_block_cursor_checkbox.setChecked(config.load_vi_block_cursor_enabled())
@@ -220,6 +227,7 @@ class PreferencesDialog(QDialog):
     
     def accept(self):
         """Save preferences when OK is clicked."""
+        config.save_vi_mode_enabled(self.vi_enable_checkbox.isChecked())
         config.save_vi_block_cursor_enabled(self.vi_block_cursor_checkbox.isChecked())
         print(f"[DEBUG] Saving enable_ai_chats: {self.enable_ai_chats_checkbox.isChecked()}")
         config.save_enable_ai_chats(self.enable_ai_chats_checkbox.isChecked())
