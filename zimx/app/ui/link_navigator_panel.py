@@ -211,6 +211,9 @@ class LinkGraphView(QGraphicsView):
         self._treemap_mode = False
         self._ring_items: list[QGraphicsEllipseItem] = []
         self._center_path: str = ""
+        self._node_depths: dict[_LinkNodeItem, int] = {}
+        self._ring_layout: dict[int, list[_LinkNodeItem]] = {}
+        self._ring_depths: list[int] = []
 
     def set_graph(
         self,
@@ -223,6 +226,9 @@ class LinkGraphView(QGraphicsView):
         self._nodes.clear()
         self._incoming_items.clear()
         self._outgoing_items.clear()
+        self._node_depths.clear()
+        self._ring_layout.clear()
+        self._ring_depths.clear()
         self._focused_item = None
         self._center_item = None
         center_radius = 42
@@ -232,6 +238,7 @@ class LinkGraphView(QGraphicsView):
         self._nodes.append(center_item)
         self._base_positions[center_item] = QPointF(0, 0)
         self._center_item = center_item
+        self._node_depths[center_item] = 0
 
         self._center_path = center.path
         neighbors = list(incoming) + list(outgoing)
@@ -281,6 +288,8 @@ class LinkGraphView(QGraphicsView):
         self._scene.addItem(item)
         self._nodes.append(item)
         self._base_positions[item] = QPointF(pos.x(), pos.y())
+        depth = self._depth_hint(node.path)
+        self._node_depths[item] = depth
 
         line = QGraphicsLineItem()
         pen = QPen(QColor("#777777"), 1.5)
@@ -314,6 +323,8 @@ class LinkGraphView(QGraphicsView):
         self._clear_rings()
         nodes = self._incoming_items + self._outgoing_items
         if self._treemap_mode:
+            self._ring_layout.clear()
+            self._ring_depths.clear()
             for item in nodes:
                 self._base_positions[item] = QPointF(item.pos())
             rects = self._compute_treemap_rects()
@@ -325,6 +336,9 @@ class LinkGraphView(QGraphicsView):
                 line.setVisible(False)
             self._labels_congested = False
         else:
+            if not self._layered_mode:
+                self._ring_layout.clear()
+                self._ring_depths.clear()
             positions: dict[_LinkNodeItem, QPointF] = {}
             for item in nodes:
                 item.hide_rect_overlay()
@@ -332,7 +346,9 @@ class LinkGraphView(QGraphicsView):
             for line, _, _ in self._edges:
                 line.setVisible(True)
             if self._layered_mode:
-                positions, radii = self._compute_layered_positions()
+                positions, radii, ring_layout = self._compute_layered_positions()
+                self._ring_layout = ring_layout
+                self._ring_depths = sorted(self._ring_layout.keys())
                 self._render_layer_rings(radii)
             else:
                 positions = self._compute_arc_positions()
@@ -357,18 +373,21 @@ class LinkGraphView(QGraphicsView):
             positions[item] = pos
         return positions
 
-    def _compute_layered_positions(self) -> tuple[dict[_LinkNodeItem, QPointF], list[float]]:
+    def _compute_layered_positions(
+        self,
+    ) -> tuple[dict[_LinkNodeItem, QPointF], list[float], dict[int, list[_LinkNodeItem]]]:
         positions: dict[_LinkNodeItem, QPointF] = {}
         nodes = self._incoming_items + self._outgoing_items
         if not nodes:
-            return positions, []
+            return positions, [], {}
         ring_gap = 130.0
         base_radius = 140.0
         ring_map: dict[int, list[_LinkNodeItem]] = {}
         for node in nodes:
-            depth = self._depth_hint(node.page_path)
+            depth = self._node_depths.get(node, self._depth_hint(node.page_path))
             ring_map.setdefault(depth, []).append(node)
         radii: list[float] = []
+        angle_cache: dict[_LinkNodeItem, float] = {}
         for depth in sorted(ring_map):
             ring_nodes = ring_map[depth]
             radius = base_radius + (depth - 1) * ring_gap
@@ -385,9 +404,14 @@ class LinkGraphView(QGraphicsView):
                 x = radius * math.cos(angle)
                 y = radius * math.sin(angle)
                 positions[node] = QPointF(x, y)
+                angle_cache[node] = angle
                 fade = max(0.45, 1.0 - (depth - 1) * 0.22)
                 node.setOpacity(fade)
-        return positions, radii
+        ordered_rings: dict[int, list[_LinkNodeItem]] = {}
+        for depth, ring_nodes in ring_map.items():
+            ordered = sorted(ring_nodes, key=lambda node: angle_cache.get(node, 0.0))
+            ordered_rings[depth] = ordered
+        return positions, radii, ordered_rings
 
     def _render_layer_rings(self, radii: list[float]) -> None:
         for radius in radii:
@@ -508,6 +532,9 @@ class LinkGraphView(QGraphicsView):
         self._update_opacity_effect()
         self._clear_rings()
         self._center_path = ""
+        self._node_depths.clear()
+        self._ring_layout.clear()
+        self._ring_depths.clear()
 
     def wheelEvent(self, event):  # type: ignore[override]
         if event.modifiers() & Qt.ControlModifier:
@@ -977,6 +1004,14 @@ class LinkGraphView(QGraphicsView):
     def _move_focus(self, key: int) -> bool:
         # Mark that keyboard navigation is in use so focus animation can engage
         self._keyboard_nav_used = True
+        if self._treemap_mode:
+            moved = self._move_focus_treemap(key)
+            if moved:
+                return True
+        if self._layered_mode and not self._treemap_mode and self._ring_layout:
+            moved = self._move_focus_layered(key)
+            if moved:
+                return True
         group, idx = self._current_group_and_index()
         def pick(lst: list[_LinkNodeItem], new_idx: int, prefer_left: bool = False, prefer_right: bool = False) -> bool:
             if not lst:
@@ -1033,6 +1068,188 @@ class LinkGraphView(QGraphicsView):
                     self._set_focused_item(self._center_item)
                     return True
         return False
+
+    def _move_focus_treemap(self, key: int) -> bool:
+        direction_map = {
+            Qt.Key_Left: QPointF(-1.0, 0.0),
+            Qt.Key_Right: QPointF(1.0, 0.0),
+            Qt.Key_Up: QPointF(0.0, -1.0),
+            Qt.Key_Down: QPointF(0.0, 1.0),
+        }
+        direction = direction_map.get(key)
+        if direction is None:
+            return False
+        current = self._focused_item or self._center_item
+        if not current:
+            return False
+        target = self._directional_neighbor(current, direction, strict=True)
+        if not target:
+            target = self._directional_neighbor(current, direction, strict=False)
+        if target:
+            self._set_focused_item(target)
+            return True
+        return False
+
+    def _directional_neighbor(
+        self,
+        current: _LinkNodeItem,
+        direction: QPointF,
+        strict: bool,
+    ) -> Optional[_LinkNodeItem]:
+        candidates = [
+            node
+            for node in (self._incoming_items + self._outgoing_items)
+            if node is not current
+        ]
+        if current is not self._center_item and self._center_item:
+            candidates.append(self._center_item)
+        if not candidates:
+            return None
+        dir_length = math.hypot(direction.x(), direction.y())
+        if dir_length <= 0.0:
+            return None
+        dx = direction.x() / dir_length
+        dy = direction.y() / dir_length
+        base = self._base_positions.get(current, current.pos())
+        best_node = None
+        best_dot = -float("inf")
+        best_distance = float("inf")
+        min_dot = 0.3 if strict else -1.0
+        for node in candidates:
+            pos = self._base_positions.get(node, node.pos())
+            vec_x = pos.x() - base.x()
+            vec_y = pos.y() - base.y()
+            distance = math.hypot(vec_x, vec_y)
+            if distance <= 1e-3:
+                continue
+            vx = vec_x / distance
+            vy = vec_y / distance
+            dot = vx * dx + vy * dy
+            if dot < min_dot:
+                continue
+            if dot > best_dot + 1e-4 or (abs(dot - best_dot) <= 1e-4 and distance < best_distance):
+                best_dot = dot
+                best_distance = distance
+                best_node = node
+        return best_node
+
+    def _move_focus_layered(self, key: int) -> bool:
+        current = self._focused_item or self._center_item
+        if not current:
+            return False
+        depth = self._node_depths.get(current, 0)
+        direction_vectors = {
+            Qt.Key_Left: QPointF(-1.0, 0.0),
+            Qt.Key_Right: QPointF(1.0, 0.0),
+            Qt.Key_Up: QPointF(0.0, -1.0),
+            Qt.Key_Down: QPointF(0.0, 1.0),
+        }
+
+        if depth == 0 and key in direction_vectors:
+            next_depth = self._nearest_outer_depth(0)
+            if next_depth is None:
+                return False
+            candidates = self._ring_layout.get(next_depth, [])
+            target = self._closest_in_direction(candidates, direction_vectors[key])
+            if target:
+                self._set_focused_item(target)
+                return True
+            return False
+
+        if key in (Qt.Key_Left, Qt.Key_Right) and depth > 0:
+            ring_nodes = self._ring_layout.get(depth, [])
+            if len(ring_nodes) <= 1 or current not in ring_nodes:
+                return False
+            idx = ring_nodes.index(current)
+            delta = 1 if key == Qt.Key_Right else -1
+            target = ring_nodes[(idx + delta) % len(ring_nodes)]
+            self._set_focused_item(target)
+            return True
+
+        if key == Qt.Key_Up and depth > 0:
+            if depth == 1 and self._center_item:
+                self._set_focused_item(self._center_item)
+                return True
+            inner_depth = self._nearest_inner_depth(depth)
+            if inner_depth is None:
+                return False
+            if inner_depth == 0 and self._center_item:
+                self._set_focused_item(self._center_item)
+                return True
+            ring_nodes = self._ring_layout.get(inner_depth, [])
+            target = self._closest_by_angle(ring_nodes, self._node_angle(current))
+            if target:
+                self._set_focused_item(target)
+                return True
+            return False
+
+        if key == Qt.Key_Down:
+            next_depth = self._nearest_outer_depth(depth)
+            if next_depth is None:
+                return False
+            ring_nodes = self._ring_layout.get(next_depth, [])
+            if not ring_nodes:
+                return False
+            if depth == 0:
+                target = self._closest_in_direction(ring_nodes, direction_vectors[Qt.Key_Down])
+            else:
+                target = self._closest_by_angle(ring_nodes, self._node_angle(current))
+            if target:
+                self._set_focused_item(target)
+                return True
+            return False
+        return False
+
+    def _node_angle(self, node: _LinkNodeItem) -> float:
+        pos = self._base_positions.get(node, node.pos())
+        return math.atan2(pos.y(), pos.x())
+
+    def _closest_by_angle(self, nodes: list[_LinkNodeItem], target_angle: float) -> Optional[_LinkNodeItem]:
+        if not nodes:
+            return None
+        best_node = None
+        best_delta = float("inf")
+        for node in nodes:
+            delta = abs((self._node_angle(node) - target_angle + math.pi) % (2 * math.pi) - math.pi)
+            if delta < best_delta:
+                best_delta = delta
+                best_node = node
+        return best_node
+
+    def _closest_in_direction(self, nodes: list[_LinkNodeItem], direction: QPointF) -> Optional[_LinkNodeItem]:
+        if not nodes:
+            return None
+        dir_length = math.hypot(direction.x(), direction.y())
+        if dir_length <= 0.0:
+            return None
+        dx = direction.x() / dir_length
+        dy = direction.y() / dir_length
+        best_node = None
+        best_score = -float("inf")
+        for node in nodes:
+            pos = self._base_positions.get(node, node.pos())
+            length = math.hypot(pos.x(), pos.y())
+            if length <= 0.0:
+                continue
+            vx = pos.x() / length
+            vy = pos.y() / length
+            score = vx * dx + vy * dy
+            if score > best_score:
+                best_score = score
+                best_node = node
+        return best_node
+
+    def _nearest_inner_depth(self, depth: int) -> Optional[int]:
+        inner = [d for d in self._ring_depths if d < depth]
+        if not inner:
+            return None
+        return inner[-1]
+
+    def _nearest_outer_depth(self, depth: int) -> Optional[int]:
+        for candidate in self._ring_depths:
+            if candidate > depth:
+                return candidate
+        return None
 
     def reset_keyboard_focus_state(self) -> None:
         """Reset keyboard navigation effects (used after opening a new page)."""
@@ -1309,6 +1526,8 @@ class LinkNavigatorPanel(QWidget):
             self.treemap_checkbox.setChecked(False)
             self.treemap_checkbox.blockSignals(False)
         self.graph_view.set_layered_mode(checked)
+        if self.mode == "graph":
+            self.graph_view.setFocus()
 
     def _on_treemap_toggled(self, checked: bool) -> None:
         if checked and self.layered_checkbox.isChecked():
@@ -1316,6 +1535,8 @@ class LinkNavigatorPanel(QWidget):
             self.layered_checkbox.setChecked(False)
             self.layered_checkbox.blockSignals(False)
         self.graph_view.set_treemap_mode(checked)
+        if self.mode == "graph":
+            self.graph_view.setFocus()
 
     def _refresh_and_reset_zoom(self) -> None:
         self.refresh()
