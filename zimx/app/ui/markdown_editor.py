@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import logging
+import os
 import re
 from pathlib import Path
 from typing import Optional, Callable
 from html.parser import HTMLParser
-import os
 
 from PySide6.QtCore import QEvent, QMimeData, Qt, QRegularExpression, Signal, QUrl, QPoint, QTimer
 from PySide6.QtGui import (
@@ -40,11 +41,15 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QLabel,
 )
+from shiboken6 import Shiboken
 from .path_utils import path_to_colon, colon_to_path, ensure_root_colon_link
 from .heading_utils import heading_slug
 from .page_load_logger import PageLoadLogger
 from .ai_actions_data import AI_ACTION_GROUPS
 from zimx.app import config
+
+
+logger = logging.getLogger(__name__)
 
 
 TAG_PATTERN = QRegularExpression(r"@(\w+)")
@@ -898,39 +903,128 @@ class MarkdownEditor(QTextEdit):
         self._ai_action_overlay.sendSelection.connect(self._emit_ai_chat_send)
         self._ai_action_overlay.closed.connect(self._restore_vi_after_overlay)
         self._overlay_vi_mode_before: Optional[bool] = None
+        self._document_alive = True
+        self._editor_alive = True
+        self._layout_alive = True
+        self._viewport_alive = True
+        self.destroyed.connect(self._on_editor_destroyed)
+        self._connect_document_signals(self.document())
+        viewport = self.viewport()
+        if viewport is not None:
+            viewport.destroyed.connect(self._on_viewport_destroyed)
 
     def is_ai_overlay_visible(self) -> bool:
         return self._ai_action_overlay.is_visible()
 
+    def _connect_document_signals(self, document: Optional[QTextDocument]) -> None:
+        if document is None:
+            self._document_alive = False
+            return
+        if not self._is_alive(document):
+            self._document_alive = False
+            return
+        document.destroyed.connect(self._on_document_destroyed)
+        self._document_alive = True
+        layout = document.documentLayout()
+        if layout is not None:
+            try:
+                layout.destroyed.connect(self._on_layout_destroyed)
+                self._layout_alive = True
+            except Exception:
+                pass
+
+    def _on_layout_destroyed(self) -> None:
+        self._layout_alive = False
+
+    def _on_document_destroyed(self) -> None:
+        self._document_alive = False
+
+    def _on_editor_destroyed(self) -> None:
+        self._editor_alive = False
+
+    def _on_viewport_destroyed(self) -> None:
+        self._viewport_alive = False
+
+    def _is_alive(self, obj) -> bool:
+        return bool(obj) and Shiboken.isValid(obj)
+
     def paintEvent(self, event):  # type: ignore[override]
         """Custom paint to draw horizontal rules as visual lines."""
         self._vi_paint_in_progress = True
+        painter: Optional[QPainter] = None
         try:
             super().paintEvent(event)
             if not self._vi_has_painted:
                 self._vi_has_painted = True
 
-            painter = QPainter(self.viewport())
-            pen = QPen(QColor("#555555"))
-            pen.setWidth(2)
-            painter.setPen(pen)
-            layout = self.document().documentLayout()
-            vsb = self.verticalScrollBar().value()
-            block = self.document().begin()
-            while block.isValid():
-                if block.text().strip() == "---":
-                    br = layout.blockBoundingRect(block)
-                    y = int(br.top() - vsb + br.height() / 2)
-                    if 0 <= y <= self.viewport().height():
-                        painter.drawLine(0, y, self.viewport().width(), y)
-                block = block.next()
-            painter.end()
+            try:
+                if not self._editor_alive or not self._document_alive or not self._is_alive(self):
+                    return
+                document = self.document()
+                if not self._is_alive(document):
+                    return
+                layout = document.documentLayout()
+                if not self._layout_alive or not self._is_alive(layout):
+                    return
+                viewport = self.viewport()
+                if not self._is_alive(viewport):
+                    return
+                if not self._viewport_alive:
+                    try:
+                        viewport.destroyed.connect(self._on_viewport_destroyed)
+                        self._viewport_alive = True
+                    except Exception:
+                        return
+                painter = QPainter(viewport)
+                pen = QPen(QColor("#555555"))
+                pen.setWidth(2)
+                painter.setPen(pen)
+                scroll_bar = self.verticalScrollBar()
+                vsb = scroll_bar.value() if self._is_alive(scroll_bar) else 0
+                block = document.begin()
+                while block.isValid():
+                    if not self._document_alive or not self._editor_alive:
+                        break
+                    if not self._is_alive(document) or not self._is_alive(layout):
+                        break
+                    if block.text().strip() == "---":
+                        try:
+                            br = layout.blockBoundingRect(block)
+                        except RuntimeError as exc:
+                            logger.warning("Aborting markdown rule overlay; layout gone: %s", exc)
+                            break
+                        viewport_height = viewport.height() if self._is_alive(viewport) else 0
+                        y = int(br.top() - vsb + br.height() / 2)
+                        if 0 <= y <= viewport_height:
+                            painter.drawLine(0, y, viewport.width(), y)
+                    block = block.next()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Skipping Markdown paint overlay due to error: %s", exc, exc_info=True)
+            finally:
+                if painter is not None and painter.isActive():
+                    painter.end()
         finally:
             self._vi_paint_in_progress = False
 
     def set_context(self, vault_root: Optional[str], relative_path: Optional[str]) -> None:
         self._vault_root = Path(vault_root) if vault_root else None
         self._current_path = relative_path
+
+    def setDocument(self, document: QTextDocument) -> None:  # type: ignore[override]
+        old_document = self.document()
+        if old_document is not None:
+            try:
+                old_document.destroyed.disconnect(self._on_document_destroyed)
+            except (TypeError, RuntimeError):
+                pass
+            old_layout = old_document.documentLayout()
+            if old_layout is not None:
+                try:
+                    old_layout.destroyed.disconnect(self._on_layout_destroyed)
+                except (TypeError, RuntimeError):
+                    pass
+        super().setDocument(document)
+        self._connect_document_signals(document)
 
     def current_relative_path(self) -> Optional[str]:
         return self._current_path
