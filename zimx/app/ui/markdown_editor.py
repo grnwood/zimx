@@ -321,6 +321,8 @@ def heading_level_from_char(char: str) -> int:
     return 0
 
 class MarkdownHighlighter(QSyntaxHighlighter):
+    CODE_BLOCK_STATE = 1
+
     def __init__(self, parent) -> None:  # type: ignore[override]
         super().__init__(parent)
         # Precompile regex patterns (avoid per-block construction)
@@ -416,26 +418,187 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.bold_italic_format.setFontWeight(QFont.Weight.Bold)
         self.bold_italic_format.setFontItalic(True)
 
+        self._reset_code_block_cache()
+        self._init_pygments(config.load_pygments_style("monokai"))
+
+    def _reset_code_block_cache(self) -> None:
+        self._code_block_spans: dict[int, list[tuple[int, int, QTextCharFormat]]] = {}
+        self._active_code_lang: Optional[str] = None
+
+    def _init_pygments(self, style_name: Optional[str] = None) -> None:
+        self._pygments_enabled = False
+        try:
+            from pygments.formatters.html import HtmlFormatter
+            from pygments.lexers import get_lexer_by_name, TextLexer
+            from pygments import lex
+        except Exception as exc:
+            logger.warning("Pygments unavailable; code fences stay monospace only: %s", exc)
+            return
+
+        self._pygments_enabled = True
+        chosen_style = style_name or "monokai"
+        self._pygments_style_name = chosen_style
+        self._pygments_lex = lex
+        try:
+            self._pygments_formatter = HtmlFormatter(style=chosen_style)
+        except Exception:
+            self._pygments_formatter = HtmlFormatter(style="monokai")
+            self._pygments_style_name = "monokai"
+        self._pygments_get_lexer = get_lexer_by_name
+        self._pygments_text_lexer = TextLexer
+        self._pygments_format_cache: dict[str, QTextCharFormat] = {}
+        self._pygments_lexer_cache: dict[str, object] = {}
+
+    def set_pygments_style(self, style_name: str) -> None:
+        """Update the Pygments style and rehighlight."""
+        self._init_pygments(style_name)
+        self._reset_code_block_cache()
+        try:
+            self.rehighlight()
+        except Exception:
+            pass
+
+    def _extract_fence_language(self, text: str) -> Optional[str]:
+        if not text.startswith("```"):
+            return None
+        lang = text[3:].strip()
+        return lang or None
+
+    def _lexer_for_language(self, lang: Optional[str]):
+        if not self._pygments_enabled:
+            return None
+        cache_key = (lang or "").lower()
+        if cache_key in self._pygments_lexer_cache:
+            return self._pygments_lexer_cache[cache_key]
+        try:
+            lexer = self._pygments_get_lexer(cache_key) if cache_key else self._pygments_text_lexer()
+        except Exception:
+            lexer = self._pygments_text_lexer()
+        self._pygments_lexer_cache[cache_key] = lexer
+        return lexer
+
+    def _format_for_token(self, token) -> QTextCharFormat:
+        if not self._pygments_enabled:
+            return self.code_block
+
+        key = str(token)
+        fmt = self._pygments_format_cache.get(key)
+        if fmt:
+            return fmt
+
+        style = self._pygments_formatter.style.style_for_token(token)
+        fmt = QTextCharFormat(self.code_block)
+        if style.get("color"):
+            fmt.setForeground(QColor(f"#{style['color']}"))
+        if style.get("bgcolor"):
+            fmt.setBackground(QColor(f"#{style['bgcolor']}"))
+        if style.get("bold"):
+            fmt.setFontWeight(QFont.Weight.Bold)
+        if style.get("italic"):
+            fmt.setFontItalic(True)
+        if style.get("underline"):
+            fmt.setFontUnderline(True)
+        self._pygments_format_cache[key] = fmt
+        return fmt
+
+    def _cache_code_block_spans(self, start_block, lang: Optional[str]) -> None:
+        if not self._pygments_enabled:
+            return
+        lexer = self._lexer_for_language(lang)
+        if lexer is None:
+            return
+
+        blocks = []
+        lines = []
+        block = start_block
+        while block.isValid():
+            text = block.text()
+            if text.startswith("```"):
+                break
+            blocks.append(block)
+            lines.append(text)
+            block = block.next()
+
+        if not blocks:
+            return
+
+        code = "\n".join(lines)
+        try:
+            tokens = self._pygments_lex(code, lexer)
+        except Exception as exc:
+            logger.debug("Pygments lexing failed for %s: %s", lang or "plain", exc)
+            return
+
+        line_idx = 0
+        col = 0
+        for token_type, value in tokens:
+            remaining = value
+            while remaining:
+                newline = remaining.find("\n")
+                if newline == -1:
+                    part = remaining
+                    remaining = ""
+                else:
+                    part = remaining[:newline]
+                    remaining = remaining[newline + 1 :]
+                if line_idx >= len(blocks):
+                    break
+                if part:
+                    fmt = self._format_for_token(token_type)
+                    block_number = blocks[line_idx].blockNumber()
+                    self._code_block_spans.setdefault(block_number, []).append((col, len(part), fmt))
+                    col += len(part)
+                if newline != -1:
+                    line_idx += 1
+                    col = 0
+
+    def _ensure_code_block_cache(self, block) -> None:
+        """If a rehighlight starts mid-block, rebuild cached spans by scanning backward to the fence."""
+        if not self._pygments_enabled or block.blockNumber() in self._code_block_spans:
+            return
+        fence = block.previous()
+        while fence.isValid():
+            text = fence.text()
+            if text.startswith("```"):
+                lang = self._extract_fence_language(text)
+                self._cache_code_block_spans(fence.next(), lang)
+                break
+            fence = fence.previous()
+
     def highlightBlock(self, text: str) -> None:  # type: ignore[override]
         import time
         t0 = time.perf_counter() if self._timing_enabled else 0.0
 
-        # Block states: 0 = normal, 1 = inside code block
+        block = self.currentBlock()
+        if not block.previous().isValid():
+            self._reset_code_block_cache()
+
         prev_state = self.previousBlockState()
-        in_code_block = (prev_state == 1)
+        in_code_block = (prev_state == self.CODE_BLOCK_STATE)
         
         # Check if this line starts or ends a code block
         if text.startswith("```"):
+            if in_code_block:
+                self._active_code_lang = None
+            else:
+                self._active_code_lang = self._extract_fence_language(text)
+                self._cache_code_block_spans(block.next(), self._active_code_lang)
             in_code_block = not in_code_block
-            self.setCurrentBlockState(1 if in_code_block else 0)
+            self.setCurrentBlockState(self.CODE_BLOCK_STATE if in_code_block else 0)
             self.setFormat(0, len(text), self.code_fence_format)
             if self._timing_enabled:
                 self._timing_blocks += 1
                 self._timing_total += time.perf_counter() - t0
             return
         elif in_code_block:
-            self.setCurrentBlockState(1)
+            self.setCurrentBlockState(self.CODE_BLOCK_STATE)
             self.setFormat(0, len(text), self.code_block)
+            self._ensure_code_block_cache(block)
+            spans = self._code_block_spans.get(block.blockNumber())
+            if spans:
+                for start, length, fmt in spans:
+                    if length > 0 and start < len(text):
+                        self.setFormat(start, min(length, len(text) - start), fmt)
             if self._timing_enabled:
                 self._timing_blocks += 1
                 self._timing_total += time.perf_counter() - t0
@@ -912,6 +1075,13 @@ class MarkdownEditor(QTextEdit):
         viewport = self.viewport()
         if viewport is not None:
             viewport.destroyed.connect(self._on_viewport_destroyed)
+
+    def set_pygments_style(self, style: str) -> None:
+        """Update the code-fence highlighting style."""
+        try:
+            self.highlighter.set_pygments_style(style)
+        except Exception:
+            pass
 
     def is_ai_overlay_visible(self) -> bool:
         return self._ai_action_overlay.is_visible()
@@ -2570,15 +2740,23 @@ class MarkdownEditor(QTextEdit):
             clipboard = QGuiApplication.clipboard()
             clipboard.setText(colon_path)
             self.linkCopied.emit(colon_path)
+            # Keep vi clipboard in sync so 'p' in vi mode pastes this link
+            self._vi_clipboard = colon_path
             return colon_path
         return None
 
     def _copy_link_or_heading(self) -> Optional[str]:
         """Copy link under cursor, otherwise current heading slugged link."""
         cursor = self.textCursor()
-        link = self._link_under_cursor(cursor)
-        if link:
-            return self._copy_link_to_location(link_text=link)
+        # Prefer the raw link under cursor (preserves anchors)
+        plain_link = self._link_under_cursor(cursor)
+        if plain_link:
+            return self._copy_link_to_location(link_text=plain_link)
+        md_link = self._markdown_link_at_cursor(cursor)
+        if md_link:
+            # md_link = (start, end, text, link_target)
+            target = md_link[3]
+            return self._copy_link_to_location(link_text=target)
         heading_text = self.current_heading_text()
         if heading_text:
             return self._copy_link_to_location(link_text=None, anchor_text=heading_text)
@@ -2686,7 +2864,9 @@ class MarkdownEditor(QTextEdit):
             return False
         mods = event.modifiers() & ~Qt.KeypadModifier
         # Copy link/heading (Ctrl+Shift+L) even in vi navigation mode
-        if mods == (Qt.ControlModifier | Qt.ShiftModifier) and event.key() == Qt.Key_L:
+        key = event.key()
+        text_char = event.text() or ""
+        if mods == (Qt.ControlModifier | Qt.ShiftModifier) and key == Qt.Key_L:
             copied = self._copy_link_or_heading()
             window = self.window()
             try:
@@ -2694,10 +2874,11 @@ class MarkdownEditor(QTextEdit):
                     window.statusBar().showMessage(f"Copied link: {copied}", 2000)
             except Exception:
                 pass
+            if copied:
+                self._vi_clipboard = copied
             return True
         # Allow Alt+H/J/K/L navigation even in vi mode
         if mods == Qt.AltModifier:
-            key = event.key()
             if key == Qt.Key_H:
                 self._trigger_history_navigation(Qt.Key_Left)
                 return True
@@ -2713,7 +2894,6 @@ class MarkdownEditor(QTextEdit):
             return False
         if mods & Qt.ControlModifier:
             return False
-        key = event.key()
         shift = bool(mods & Qt.ShiftModifier)
         other_mods = mods & ~(Qt.ShiftModifier)
         if other_mods:
@@ -2809,7 +2989,7 @@ class MarkdownEditor(QTextEdit):
                 self._vi_open_line_below()
             return True
 
-        if key == Qt.Key_P and not shift:
+        if (key == Qt.Key_P or text_char.lower() == "p") and not shift:
             inserted = self._vi_paste_buffer()
             if inserted:
                 self._vi_last_edit = lambda text=inserted: self._vi_insert_text(text)
@@ -2938,6 +3118,16 @@ class MarkdownEditor(QTextEdit):
         self.setTextCursor(cursor)
 
     def _vi_paste_buffer(self) -> Optional[str]:
+        if not self._vi_clipboard:
+            # Fallback to system clipboard if vi clipboard is empty
+            try:
+                from PySide6.QtGui import QGuiApplication
+
+                clip_text = QGuiApplication.clipboard().text()
+                if clip_text:
+                    self._vi_clipboard = clip_text
+            except Exception:
+                return None
         if not self._vi_clipboard:
             return None
         self._vi_insert_text(self._vi_clipboard)

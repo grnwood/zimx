@@ -2054,6 +2054,10 @@ class MainWindow(QMainWindow):
             self.editor.set_ai_actions_enabled(config.load_enable_ai_chats())
             # Apply vault read-only preference immediately
             self._apply_vault_read_only_pref()
+            try:
+                self.editor.set_pygments_style(config.load_pygments_style("monokai"))
+            except Exception:
+                pass
 
     def _open_task_from_panel(self, path: str, line: int) -> None:
         self._select_tree_path(path)
@@ -3456,7 +3460,9 @@ class MainWindow(QMainWindow):
         editor_rect = self.editor.rect()
         top_left = self.editor.mapToGlobal(editor_rect.topLeft())
         popup_width = max(self._history_popup.sizeHint().width(), editor_rect.width() // 3)
-        popup_height = self._history_popup.sizeHint().height()
+        # Make popup at least half the editor height for easier scanning
+        min_height = int(editor_rect.height() * 0.5)
+        popup_height = max(self._history_popup.sizeHint().height(), min_height)
         x = top_left.x() + editor_rect.width() // 2 - popup_width // 2
         y = top_left.y() + 24
         self._history_popup.resize(popup_width, popup_height)

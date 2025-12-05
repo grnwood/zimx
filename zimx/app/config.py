@@ -171,6 +171,18 @@ def load_enable_ai_chats() -> bool:
         return False
     return bool(payload.get("enable_ai_chats", False))
 
+def load_pygments_style(default: str = "monokai") -> str:
+    """Load preferred Pygments style for code fences (global, not per-vault)."""
+    payload = _read_global_config()
+    style = payload.get("pygments_style")
+    if isinstance(style, str) and style.strip():
+        return style.strip()
+    return default
+
+def save_pygments_style(style: str) -> None:
+    """Persist preferred Pygments style for code fences (global, not per-vault)."""
+    _update_global_config({"pygments_style": style})
+
 
 def save_enable_ai_chats(enabled: bool) -> None:
     """Save preference for enabling AI Chats tab."""

@@ -91,6 +91,17 @@ class PreferencesDialog(QDialog):
 
         self._load_default_server_model()
 
+        # Code highlighting
+        self.layout.addSpacing(10)
+        code_label = QLabel("<b>Code Highlighting</b>")
+        self.layout.addWidget(code_label)
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("Pygments style:"))
+        self.pygments_style_combo = QComboBox()
+        self._load_pygments_styles()
+        row3.addWidget(self.pygments_style_combo, 1)
+        self.layout.addLayout(row3)
+
         # Vault behavior
         vault_label = QLabel("<b>Vault</b>")
         self.layout.addWidget(vault_label)
@@ -218,6 +229,20 @@ class PreferencesDialog(QDialog):
 
     def _on_default_server_changed(self):
         self._refresh_default_models()
+
+    def _load_pygments_styles(self) -> None:
+        styles = ["monokai"]
+        try:
+            from pygments.styles import get_all_styles
+
+            styles = sorted(set(get_all_styles())) or styles
+        except Exception:
+            pass
+        current = config.load_pygments_style("monokai")
+        self.pygments_style_combo.clear()
+        self.pygments_style_combo.addItems(styles)
+        if current in styles:
+            self.pygments_style_combo.setCurrentText(current)
     
     def _on_rebuild_clicked(self):
         """Handle rebuild index button click."""
@@ -235,6 +260,10 @@ class PreferencesDialog(QDialog):
         config.save_default_ai_model(self.default_model_combo.currentText() or None)
         config.save_vault_force_read_only(self.force_read_only_checkbox.isChecked())
         config.save_non_actionable_task_tags(self.non_actionable_tags_edit.text())
+        try:
+            config.save_pygments_style(self.pygments_style_combo.currentText() or "monokai")
+        except Exception:
+            pass
         super().accept()
 
     def _warn_restart_required(self) -> None:
