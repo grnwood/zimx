@@ -2192,6 +2192,16 @@ class MarkdownEditor(QTextEdit):
         window = self.window()
         if not window:
             return
+        # Prefer calling the navigation helpers directly to avoid focus edge cases
+        try:
+            if qt_key == Qt.Key_Left and hasattr(window, "_navigate_history_back"):
+                window._navigate_history_back()
+                return
+            if qt_key == Qt.Key_Right and hasattr(window, "_navigate_history_forward"):
+                window._navigate_history_forward()
+                return
+        except Exception:
+            pass
         press = QKeyEvent(QEvent.KeyPress, qt_key, Qt.AltModifier)
         release = QKeyEvent(QEvent.KeyRelease, qt_key, Qt.AltModifier)
         QApplication.sendEvent(window, press)
@@ -2563,6 +2573,17 @@ class MarkdownEditor(QTextEdit):
             return colon_path
         return None
 
+    def _copy_link_or_heading(self) -> Optional[str]:
+        """Copy link under cursor, otherwise current heading slugged link."""
+        cursor = self.textCursor()
+        link = self._link_under_cursor(cursor)
+        if link:
+            return self._copy_link_to_location(link_text=link)
+        heading_text = self.current_heading_text()
+        if heading_text:
+            return self._copy_link_to_location(link_text=None, anchor_text=heading_text)
+        return None
+
     def copy_current_page_link(self) -> Optional[str]:
         """Copy current page (or heading) link and return the copied text."""
         heading_text = self.current_heading_text()
@@ -2664,9 +2685,33 @@ class MarkdownEditor(QTextEdit):
         if not self._vi_feature_enabled:
             return False
         mods = event.modifiers() & ~Qt.KeypadModifier
-        if mods & Qt.ControlModifier:
+        # Copy link/heading (Ctrl+Shift+L) even in vi navigation mode
+        if mods == (Qt.ControlModifier | Qt.ShiftModifier) and event.key() == Qt.Key_L:
+            copied = self._copy_link_or_heading()
+            window = self.window()
+            try:
+                if copied and window and hasattr(window, "statusBar"):
+                    window.statusBar().showMessage(f"Copied link: {copied}", 2000)
+            except Exception:
+                pass
+            return True
+        # Allow Alt+H/J/K/L navigation even in vi mode
+        if mods == Qt.AltModifier:
+            key = event.key()
+            if key == Qt.Key_H:
+                self._trigger_history_navigation(Qt.Key_Left)
+                return True
+            if key == Qt.Key_L:
+                self._trigger_history_navigation(Qt.Key_Right)
+                return True
+            if key == Qt.Key_J:
+                self._trigger_history_navigation(Qt.Key_Down)
+                return True
+            if key == Qt.Key_K:
+                self._trigger_history_navigation(Qt.Key_Up)
+                return True
             return False
-        if mods & Qt.AltModifier:
+        if mods & Qt.ControlModifier:
             return False
         key = event.key()
         shift = bool(mods & Qt.ShiftModifier)
@@ -2793,6 +2838,12 @@ class MarkdownEditor(QTextEdit):
             return True
 
         if key in (Qt.Key_Backspace, Qt.Key_Delete, Qt.Key_Return, Qt.Key_Enter):
+            if key in (Qt.Key_Return, Qt.Key_Enter):
+                cursor = self.textCursor()
+                if self._is_cursor_at_link_activation_point(cursor):
+                    link = self._link_under_cursor(cursor)
+                    if link:
+                        self.linkActivated.emit(link)
             return True
 
         if key in (Qt.Key_Tab, Qt.Key_Backtab):
@@ -2808,6 +2859,9 @@ class MarkdownEditor(QTextEdit):
         mode = QTextCursor.KeepAnchor if select else QTextCursor.MoveAnchor
         cursor.movePosition(op, mode, max(1, count))
         self.setTextCursor(cursor)
+        if not select and op in (QTextCursor.Left, QTextCursor.Right):
+            # Skip hidden link sentinels so vi-mode can enter/exit links cleanly
+            self._handle_link_boundary_navigation(Qt.Key_Left if op == QTextCursor.Left else Qt.Key_Right)
 
     def _vi_move_to_line_start(self) -> None:
         self._vi_move_cursor(QTextCursor.StartOfLine)

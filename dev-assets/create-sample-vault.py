@@ -32,7 +32,7 @@ def main() -> None:
     parser.add_argument(
         "destination",
         nargs="?",
-        default="vault-sample",
+        default="./vault-sample",
         help="Path where the vault should be created (default: vault-sample)",
     )
     args = parser.parse_args()
