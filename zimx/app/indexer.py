@@ -132,7 +132,23 @@ def _normalize_page_link(link: str) -> Optional[str]:
 
     Returns None for external URLs or non-page resources.
     """
-    cleaned = normalize_link_target(link or "").strip()
+    # Check raw link first before normalization to detect external file paths
+    raw_link = (link or "").strip()
+    if not raw_link:
+        return None
+    
+    # Detect external file paths before normalization
+    # Windows: C:/ or C:\ (drive letter followed by colon)
+    if len(raw_link) > 1 and raw_link[1] == ':' and raw_link[0].isalpha():
+        return None
+    # Contains backslashes (Windows path)
+    if '\\' in raw_link:
+        return None
+    # Linux/Mac absolute path with deep nesting (more than 2 slashes suggests absolute path)
+    if raw_link.startswith('/') and raw_link.count('/') > 2:
+        return None
+    
+    cleaned = normalize_link_target(raw_link)
     if not cleaned:
         return None
     if cleaned.startswith(("http://", "https://", "mailto:", "ftp://")):
@@ -144,7 +160,7 @@ def _normalize_page_link(link: str) -> Optional[str]:
     # Colon notation (PageA:PageB) is the preferred storage format
     if ":" in base and not base.startswith("/"):
         return colon_to_path(base)
-
+    
     # Slash paths - ensure they are anchored at root
     path = base if base.startswith("/") else f"/{base}"
     path_obj = Path(path)
