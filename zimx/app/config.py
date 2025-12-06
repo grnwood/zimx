@@ -140,6 +140,76 @@ def load_vi_mode_enabled() -> bool:
     return bool(payload.get("enable_vi_mode", False))
 
 
+def load_minimal_font_scan_enabled() -> bool:
+    """Return whether minimal font scanning is enabled globally (default: True)."""
+    payload = _read_global_config()
+    val = payload.get("minimal_font_scan")
+    if val is None:
+        return True
+    if isinstance(val, bool):
+        return val
+    return bool(val)
+
+
+def save_minimal_font_scan_enabled(enabled: bool) -> None:
+    """Persist preference for enabling minimal font scanning."""
+    _update_global_config({"minimal_font_scan": bool(enabled)})
+
+
+def load_application_font() -> Optional[str]:
+    """Return preferred application font family (None for system default)."""
+    payload = _read_global_config()
+    font = payload.get("application_font")
+    if isinstance(font, str) and font.strip():
+        return font.strip()
+    return None
+
+
+def save_application_font(font: Optional[str]) -> None:
+    """Persist preferred application font family."""
+    value = font.strip() if isinstance(font, str) and font.strip() else None
+    _update_global_config({"application_font": value})
+
+
+def load_application_font_size() -> Optional[int]:
+    """Return preferred application font size (None for system default)."""
+    payload = _read_global_config()
+    size = payload.get("application_font_size")
+    if size is None:
+        return None
+    try:
+        return max(6, int(size))
+    except (TypeError, ValueError):
+        return None
+
+
+def save_application_font_size(size: Optional[int]) -> None:
+    """Persist preferred application font size (None to use system default)."""
+    if size is None:
+        _update_global_config({"application_font_size": None})
+        return
+    try:
+        value = max(6, int(size))
+    except (TypeError, ValueError):
+        value = None
+    _update_global_config({"application_font_size": value})
+
+
+def load_default_markdown_font() -> Optional[str]:
+    """Return preferred Markdown editor font family (None for default)."""
+    payload = _read_global_config()
+    font = payload.get("default_markdown_font")
+    if isinstance(font, str) and font.strip():
+        return font.strip()
+    return None
+
+
+def save_default_markdown_font(font: Optional[str]) -> None:
+    """Persist preferred Markdown editor font family."""
+    value = font.strip() if isinstance(font, str) and font.strip() else None
+    _update_global_config({"default_markdown_font": value})
+
+
 def save_vi_mode_enabled(enabled: bool) -> None:
     """Persist the vi-mode enablement flag to the global config."""
     _update_global_config({"enable_vi_mode": bool(enabled)})

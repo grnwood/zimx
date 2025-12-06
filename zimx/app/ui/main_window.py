@@ -195,6 +195,8 @@ class MainWindow(QMainWindow):
     def __init__(self, api_base: str) -> None:
         super().__init__()
         self.setWindowTitle("ZimX Desktop")
+        # Ensure standard window controls (including maximize) are present.
+        self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint)
         self.api_base = api_base.rstrip("/")
         self.http = httpx.Client(base_url=self.api_base, timeout=10.0)
         self.vault_root: Optional[str] = None
@@ -305,6 +307,15 @@ class MainWindow(QMainWindow):
         self.editor.linkActivated.connect(self._open_link_in_context)
         self.editor.set_open_in_window_callback(self._open_page_editor_window)
         self.editor.set_filter_nav_callback(self._set_nav_filter)
+        try:
+            md_font = config.load_default_markdown_font()
+            if md_font:
+                font = self.editor.font()
+                font.setFamily(md_font)
+                self.editor.setFont(font)
+                self.editor.document().setDefaultFont(font)
+        except Exception:
+            pass
         self.font_size = 14
         self.editor.set_font_point_size(self.font_size)
         self.editor.viInsertModeChanged.connect(self._on_vi_insert_state_changed)

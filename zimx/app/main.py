@@ -93,14 +93,23 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _should_use_minimal_font_scan() -> bool:
+    """Determine whether minimal font scanning should be used."""
+    try:
+        return config.load_minimal_font_scan_enabled()
+    except Exception:
+        return False
+
+
 def _maybe_use_minimal_fonts() -> None:
     """Optionally force Qt to see only a small font set to avoid long font scans.
 
-    Enable via ZIMX_MINIMAL_FONT_SCAN=1. This writes a tiny fontconfig file under
-    ~/.cache/zimx/fonts-minimal and points FONTCONFIG_FILE/FONTCONFIG_PATH/QT_QPA_FONTDIR
-    to it, copying a single known font if needed.
+    Enable via the global preference or ZIMX_MINIMAL_FONT_SCAN=1. This writes a tiny
+    fontconfig file under ~/.cache/zimx/fonts-minimal and points
+    FONTCONFIG_FILE/FONTCONFIG_PATH/QT_QPA_FONTDIR to it, copying a single known font
+    if needed.
     """
-    if os.getenv("ZIMX_MINIMAL_FONT_SCAN", "0") in ("0", "false", "False", "", None):
+    if not _should_use_minimal_font_scan():
         return
     cache_root = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")) / "zimx" / "fonts-minimal"
     font_dir = cache_root / "fonts"
@@ -153,6 +162,23 @@ def _maybe_use_minimal_fonts() -> None:
     os.environ["FONTCONFIG_PATH"] = str(cache_root)
     os.environ["QT_QPA_FONTDIR"] = str(font_dir)
     print(f"[ZimX] Minimal font scan enabled; using {dest} via {fonts_conf}", file=sys.stderr)
+
+
+def _apply_application_font(app: QApplication) -> None:
+    """Apply user-preferred application font family/size, if configured."""
+    try:
+        family = config.load_application_font()
+        size = config.load_application_font_size()
+    except Exception:
+        return
+    if not family and size is None:
+        return
+    font = app.font()
+    if family:
+        font.setFamily(family)
+    if size is not None:
+        font.setPointSize(max(6, size))
+    app.setFont(font)
 
 
 def _find_open_port(host: str, preferred: int) -> int:
@@ -210,14 +236,15 @@ def main() -> None:
     args = _parse_args(sys.argv[1:])
     start_ts = time.time()
     _diag("Application starting.")
-    _maybe_use_minimal_fonts()
     config.init_settings()
+    _maybe_use_minimal_fonts()
     # Install custom message handler to suppress harmless Qt warnings
     qInstallMessageHandler(_qt_message_handler)
     port, server = _start_api_server(args.host, args.port)
     _diag(f"API server started on {args.host}:{port}.")
     qt_app = QApplication(sys.argv)
     qt_app.aboutToQuit.connect(lambda: _diag("QApplication aboutToQuit emitted."))
+    _apply_application_font(qt_app)
     # Set window/app icon if available (especially needed on Linux)
     _set_app_icon(qt_app)
     # Ensure server shutdown when the UI exits

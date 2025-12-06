@@ -12,7 +12,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QComboBox,
     QLineEdit,
+    QSpinBox,
 )
+from PySide6.QtGui import QFontDatabase
+from PySide6.QtWidgets import QApplication
 
 from zimx.app import config
 
@@ -63,6 +66,60 @@ class PreferencesDialog(QDialog):
         self.layout.addSpacing(10)
         features_label = QLabel("<b>Features</b>")
         self.layout.addWidget(features_label)
+        fonts_label = QLabel("<b>Fonts</b>")
+        self.layout.addWidget(fonts_label)
+        self._font_families = sorted(QFontDatabase().families())
+
+        row_fonts_app = QHBoxLayout()
+        row_fonts_app.addWidget(QLabel("Application font:"))
+        self.application_font_combo = self._build_font_combo("System Default")
+        try:
+            app_font = config.load_application_font()
+        except Exception:
+            app_font = None
+        self._select_font(self.application_font_combo, app_font)
+        self.application_font_combo.currentIndexChanged.connect(self._warn_restart_required)
+        row_fonts_app.addWidget(self.application_font_combo, 1)
+        self.layout.addLayout(row_fonts_app)
+
+        row_fonts_size = QHBoxLayout()
+        row_fonts_size.addWidget(QLabel("Application font size:"))
+        self.application_font_size_spin = QSpinBox()
+        self.application_font_size_spin.setRange(0, 72)
+        try:
+            size_val = config.load_application_font_size()
+        except Exception:
+            size_val = None
+        default_size = QApplication.instance().font().pointSize() if QApplication.instance() else 12
+        self.application_font_size_spin.setValue(size_val or max(6, default_size))
+        self.application_font_size_spin.setToolTip("Set 0 to use system default size.")
+        self.application_font_size_spin.editingFinished.connect(self._warn_restart_required)
+        row_fonts_size.addWidget(self.application_font_size_spin, 1)
+        self.layout.addLayout(row_fonts_size)
+
+        row_fonts_md = QHBoxLayout()
+        row_fonts_md.addWidget(QLabel("Default Markdown font:"))
+        self.markdown_font_combo = self._build_font_combo("Editor default")
+        try:
+            md_font = config.load_default_markdown_font()
+        except Exception:
+            md_font = None
+        self._select_font(self.markdown_font_combo, md_font)
+        self.markdown_font_combo.currentIndexChanged.connect(self._warn_restart_required)
+        row_fonts_md.addWidget(self.markdown_font_combo, 1)
+        self.layout.addLayout(row_fonts_md)
+
+        self.layout.addSpacing(6)
+        self.minimal_font_scan_checkbox = QCheckBox("Use Minimal Font Scan (For Fast Window Startup)")
+        try:
+            self.minimal_font_scan_checkbox.setChecked(config.load_minimal_font_scan_enabled())
+        except Exception:
+            self.minimal_font_scan_checkbox.setChecked(True)
+        self.minimal_font_scan_checkbox.setToolTip(
+            "Limit Qt to a tiny font set to reduce startup time. Requires restart to take effect."
+        )
+        self.minimal_font_scan_checkbox.stateChanged.connect(self._warn_restart_required)
+        self.layout.addWidget(self.minimal_font_scan_checkbox)
         self.enable_ai_chats_checkbox = QCheckBox("Enable AI Chats")
         self.enable_ai_chats_checkbox.setChecked(config.load_enable_ai_chats())
         self.enable_ai_chats_checkbox.stateChanged.connect(self._warn_restart_required)
@@ -254,6 +311,13 @@ class PreferencesDialog(QDialog):
         """Save preferences when OK is clicked."""
         config.save_vi_mode_enabled(self.vi_enable_checkbox.isChecked())
         config.save_vi_block_cursor_enabled(self.vi_block_cursor_checkbox.isChecked())
+        app_font = self._font_value(self.application_font_combo)
+        config.save_application_font(app_font)
+        size_val = self.application_font_size_spin.value()
+        config.save_application_font_size(size_val if size_val > 0 else None)
+        md_font = self._font_value(self.markdown_font_combo)
+        config.save_default_markdown_font(md_font)
+        config.save_minimal_font_scan_enabled(self.minimal_font_scan_checkbox.isChecked())
         print(f"[DEBUG] Saving enable_ai_chats: {self.enable_ai_chats_checkbox.isChecked()}")
         config.save_enable_ai_chats(self.enable_ai_chats_checkbox.isChecked())
         config.save_default_ai_server(self.default_server_combo.currentText() or None)
@@ -268,3 +332,30 @@ class PreferencesDialog(QDialog):
 
     def _warn_restart_required(self) -> None:
         QMessageBox.information(self, "Restart Required", "This setting requires a restart.")
+
+    def _build_font_combo(self, default_label: str) -> QComboBox:
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.addItem(default_label, "")
+        for family in self._font_families:
+            combo.addItem(family, family)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        return combo
+
+    def _select_font(self, combo: QComboBox, family: str | None) -> None:
+        if not family:
+            combo.setCurrentIndex(0)
+            return
+        idx = combo.findData(family)
+        if idx == -1:
+            combo.addItem(family, family)
+            idx = combo.findData(family)
+        combo.setCurrentIndex(max(0, idx))
+
+    def _font_value(self, combo: QComboBox) -> str | None:
+        value = combo.currentData()
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        # Fall back to text if user typed a custom font
+        text = combo.currentText().strip()
+        return text or None
