@@ -1609,10 +1609,11 @@ class MarkdownEditor(QTextEdit):
                 processed = self._process_pasted_link(plain_from_html.strip())
                 if processed:
                     self.textCursor().insertText(processed)
+                    self._refresh_display()
                 else:
                     self.textCursor().insertText(plain_from_html)
-                if "[" in plain_from_html and "|" in plain_from_html:
-                    self._refresh_display()
+                    if "[" in plain_from_html and "|" in plain_from_html:
+                        self._refresh_display()
                 return
 
         # 4) Default paste without auto-link munging
