@@ -75,7 +75,12 @@ WIKI_FILE_LINK_PATTERN = QRegularExpression(
 # Plain HTTP URL pattern (for highlighting plain URLs without labels)
 HTTP_URL_PATTERN = QRegularExpression(r"(?P<url>https?://[^\s<>\"{}|\\^`\[\]]+)")
 # Plain colon link pattern (for highlighting plain colon links without labels)
-COLON_LINK_PATTERN = QRegularExpression(r"(?P<link>:[^\s\[\]]+(?:#[^\s\[\]]+)?)")
+# This pattern matches :Page:SubPage but needs additional context checking
+# to avoid false positives like times (8:56pm) or colons in sentences.
+# The validation should ensure:
+# 1. Not a time pattern (digit:digit followed by am/pm)
+# 2. Colon is at word boundary or start of line (not in middle of sentence)
+COLON_LINK_PATTERN = QRegularExpression(r"(?P<link>:[A-Z][A-Za-z0-9_]*(?::[A-Z][A-Za-z0-9_]*)*(?:#[A-Za-z0-9_-]+)?)")
 
 # Unified wiki-style link storage format: [link|label]
 # Matches both HTTP and page links (label can be empty)
@@ -565,6 +570,33 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                 break
             fence = fence.previous()
 
+    def _is_valid_colon_link_context(self, text: str, start: int, end: int) -> bool:
+        """Check if a colon link match is valid based on surrounding context.
+        
+        Rejects false positives like:
+        - Times: "8:56pm" - not preceded by space/start-of-line
+        - Inline colons: "text: hope" - preceded by letter/word and followed by lowercase
+        """
+        # Must be at start of line or preceded by space/special char
+        if start > 0:
+            before = text[start - 1]
+            # If preceded by a word character or digit, it's likely not a link
+            if before.isalnum() or before == "_":
+                return False
+            # If preceded by lowercase letter, it's likely a sentence colon or part of a word
+            if before.isalpha() and before.islower():
+                return False
+        
+        # Check what comes after the link
+        if end < len(text):
+            after = text[end]
+            # If immediately followed by lowercase letter, it's likely not a link
+            # (wiki links should either end with space or special chars)
+            if after.isalpha() and after.islower():
+                return False
+        
+        return True
+
     def highlightBlock(self, text: str) -> None:  # type: ignore[override]
         import time
         t0 = time.perf_counter() if self._timing_enabled else 0.0
@@ -881,14 +913,21 @@ class MarkdownHighlighter(QSyntaxHighlighter):
             self.setFormat(start, end - start, link_format)
 
         # Plain colon links: :Page:Name
+        # Additional context checking to avoid false positives
         colon_iter = COLON_LINK_PATTERN.globalMatch(text)
         while colon_iter.hasNext():
             match = colon_iter.next()
             s = match.capturedStart(); e = s + match.capturedLength()
             inside_wiki = any(ws <= s and e <= we for (ws, we) in wiki_spans)
             inside_display = any(ds <= s and e <= de for (ds, de) in display_link_spans)
-            if not inside_wiki and not inside_display:
-                self.setFormat(s, e - s, link_format)
+            if inside_wiki or inside_display:
+                continue
+            
+            # Additional context check: skip if this looks like a false positive
+            if not self._is_valid_colon_link_context(text, s, e):
+                continue
+            
+            self.setFormat(s, e - s, link_format)
 
         # File links: [text](./file.ext)
         file_iter = WIKI_FILE_LINK_PATTERN.globalMatch(text)
@@ -1550,6 +1589,12 @@ class MarkdownEditor(QTextEdit):
         if source.hasHtml() and source.hasText():
             plain = source.text()
             if plain:
+                # Check if plain text is a file path or wiki link
+                processed = self._process_pasted_link(plain.strip())
+                if processed:
+                    self.textCursor().insertText(processed)
+                    self._refresh_display()
+                    return
                 self.textCursor().insertText(plain)
                 return
 
@@ -1560,13 +1605,74 @@ class MarkdownEditor(QTextEdit):
             if not plain_from_html and source.hasText():
                 plain_from_html = source.text()
             if plain_from_html:
-                self.textCursor().insertText(plain_from_html)
+                # Check if plain text from HTML is a file path or wiki link
+                processed = self._process_pasted_link(plain_from_html.strip())
+                if processed:
+                    self.textCursor().insertText(processed)
+                else:
+                    self.textCursor().insertText(plain_from_html)
                 if "[" in plain_from_html and "|" in plain_from_html:
                     self._refresh_display()
                 return
 
         # 4) Default paste without auto-link munging
         super().insertFromMimeData(source)
+
+    def _process_pasted_link(self, text: str) -> Optional[str]:
+        r"""Process pasted text to detect and convert file paths or wiki page links.
+        
+        Returns the formatted link text if detected, otherwise None.
+        
+        File path detection:
+        - Windows: C:\path\to\file.txt, C:\\path\\to\\file.txt
+        - Linux: /home/user/path/to/file.txt
+        - Returns: [/path/to/file.txt|] (without leading colon for external files)
+        
+        Wiki page link detection:
+        - Colon notation: :Page:SubPage, PageA:PageB
+        - Returns: [:Page:SubPage|] (with leading colon, writes to links table)
+        """
+        if not text or len(text) > 500:  # Skip very long pastes
+            return None
+        
+        # Check for file paths (absolute paths with separators)
+        # Windows absolute path: C:\path\to\file or C:/path/to/file or UNC path
+        windows_match = re.match(r'^[A-Za-z]:[\\\/]', text)
+        # Linux absolute path: /path/to/file
+        linux_match = text.startswith('/')
+        # UNC path: \\server\share
+        unc_match = text.startswith('\\\\')
+        
+        if windows_match or unc_match:
+            # Windows file path - normalize and create link without leading colon
+            normalized = text.replace('\\', '/')
+            # Don't add leading colon for external file paths
+            return f"[{normalized}|]"
+        elif linux_match and '/' in text:
+            # Linux file path - create link without leading colon
+            # But check if it looks like a colon-notation link first
+            # (e.g., ":Page" shouldn't be treated as "/Page")
+            if text.startswith(':'):
+                # This is a colon link, will be handled below
+                pass
+            else:
+                # This is a file path
+                return f"[{text}|]"
+        
+        # Check for wiki page links (colon notation)
+        # Pattern: :Page or :Page:SubPage or Page:SubPage (without leading colon)
+        # Also handles anchors: :Page:SubPage#anchor
+        colon_pattern = re.compile(r'^:?([A-Z][A-Za-z0-9_]*(?::[A-Z][A-Za-z0-9_]*)*(?:#[A-Za-z0-9_-]*)?)$')
+        match = colon_pattern.match(text)
+        
+        if match:
+            page_link = match.group(1)
+            # Normalize to ensure leading colon
+            normalized_link = ensure_root_colon_link(page_link)
+            # Record this as a wiki page link (will trigger link table update)
+            return f"[{normalized_link}|]"
+        
+        return None
 
     def _html_to_plaintext_with_links(self, html: str) -> str:
         """Strip HTML to plain text, converting anchors to [url|label] links."""

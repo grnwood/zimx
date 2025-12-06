@@ -2624,14 +2624,9 @@ class MainWindow(QMainWindow):
             if file_existed:
                 is_new_page = False
             else:
-                if self._read_only:
-                    self.statusBar().showMessage("Cannot create new pages while vault is read-only.", 5000)
-                    return
-                if not self._ensure_page_folder(folder_path, allow_existing=True):
-                    return
-                is_new_page = True
-                page_name = target_name.split(":")[-1]  # Get last part for page name
-                self._apply_new_page_template(target_file, page_name)
+                # For colon links that don't exist, show an error instead of auto-creating
+                self._alert(f"This link does not exist: {target_name}\n\nThe page '{target_name}' could not be found in the vault.")
+                return
             self._pending_selection = target_file
             if refresh_only and self.current_path == target_file:
                 self._open_file(target_file, add_to_history=False, force=True)

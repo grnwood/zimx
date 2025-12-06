@@ -140,15 +140,42 @@ class InsertLinkDialog(QDialog):
             self.list_widget.clear()
 
     def selected_colon_path(self) -> str | None:
-        """Return the selected page in colon notation or HTTP URL."""
+        """Return the selected page in colon notation, file path, or HTTP URL.
+        
+        - HTTP URLs are returned as-is
+        - File paths (Windows or Linux) are returned as-is (without leading colon)
+        - Wiki page links are normalized and returned with leading colon
+        """
         text = self.search.text().strip()
+        
         # Don't normalize HTTP URLs
         if text.startswith(("http://", "https://")):
             return text or None
+        
+        # Check for file paths (absolute paths)
+        # Windows: C:\path\to\file, C:/path/to/file, or UNC \\server\share
+        if self._is_file_path(text):
+            return text or None
+        
         if self._launched_with_selection and text == self._seeded_text:
             return text or None
         normalized = normalize_link_target(text)
         return normalized or None
+    
+    def _is_file_path(self, text: str) -> bool:
+        """Check if text is an absolute file path (Windows or Linux)."""
+        import re
+        # Windows absolute path: C:\path or C:/path
+        if re.match(r'^[A-Za-z]:[\\\/]', text):
+            return True
+        # UNC path: \\server\share
+        if text.startswith('\\\\'):
+            return True
+        # Linux absolute path: /path/to/file (but not just a slug)
+        # Only if it contains a path separator
+        if text.startswith('/') and '/' in text[1:]:
+            return True
+        return False
 
     def selected_link_name(self) -> str | None:
         """Return the display name for the link, or None if empty."""
@@ -179,6 +206,18 @@ class InsertLinkDialog(QDialog):
             if not self._link_name_manually_edited:
                 self.link_name.blockSignals(True)
                 self.link_name.setText(text)
+                self.link_name.blockSignals(False)
+            return
+        # If it's a file path, skip page search
+        if self._is_file_path(text):
+            self.list_widget.clear()
+            # Auto-populate link name with filename if not manually edited
+            if not self._link_name_manually_edited:
+                self.link_name.blockSignals(True)
+                # Extract just the filename from the path
+                from pathlib import Path
+                filename = Path(text).name
+                self.link_name.setText(filename)
                 self.link_name.blockSignals(False)
             return
         # Auto-populate link name with typed text if not manually edited
