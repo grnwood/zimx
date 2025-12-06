@@ -91,8 +91,9 @@ WIKI_LINK_STORAGE_PATTERN = re.compile(
 
 # Handles a rare duplication bug where a wiki link tail is re-appended after decoding,
 # e.g. [link|label]tail|label] where tail is a suffix of link.
+# Also handles [link|label]label] where the label is duplicated after the closing bracket.
 WIKI_LINK_DUPLICATE_TAIL_PATTERN = re.compile(
-    r"\[(?P<link>[^\]|]+)\|(?P<label>[^\]]*)\](?P<tail>[^\s\]]+)\|\s*(?P=label)\]"
+    r"\[(?P<link>[^\]|]+)\|(?P<label>[^\]]*)\](?:(?P<tail>[^\s\]]+)\|)?(?P=label)\]"
 )
 
 # Display pattern for rendered links (sentinel + link + sentinel + label + sentinel)
@@ -1455,14 +1456,16 @@ class MarkdownEditor(QTextEdit):
     def begin_dialog_block(self) -> None:
         """Completely freeze editor input and interaction while a modal dialog is open."""
         self._dialog_block_input = True
+        # Save the current selection before disabling
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            self._saved_selection = (cursor.selectionStart(), cursor.selectionEnd())
+        else:
+            self._saved_selection = None
         self.setReadOnly(True)
         self.setEnabled(False)
         self.setContextMenuPolicy(Qt.NoContextMenu)
         self.viewport().setCursor(Qt.ArrowCursor)
-        # Optionally, clear selection to avoid visual confusion
-        cursor = self.textCursor()
-        cursor.clearSelection()
-        self.setTextCursor(cursor)
 
     def end_dialog_block(self) -> None:
         """Re-enable editor input and interaction after a modal dialog closes."""
@@ -1471,6 +1474,14 @@ class MarkdownEditor(QTextEdit):
         self.setEnabled(True)
         self.setContextMenuPolicy(Qt.DefaultContextMenu)
         self.viewport().unsetCursor()
+        # Restore the saved selection if any
+        if hasattr(self, '_saved_selection') and self._saved_selection:
+            cursor = self.textCursor()
+            start, end = self._saved_selection
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.KeepAnchor)
+            self.setTextCursor(cursor)
+            self._saved_selection = None
 
     def insert_link(self, colon_path: str, link_name: str | None = None) -> None:
         """Insert a link at the current cursor position.
@@ -1480,8 +1491,18 @@ class MarkdownEditor(QTextEdit):
         if not colon_path:
             return
         
+        # Detect link type and normalize appropriately
         is_http_url = colon_path.startswith(("http://", "https://"))
-        target = self._normalize_external_link(colon_path) if is_http_url else ensure_root_colon_link(colon_path)
+        is_file_path = self._is_file_path(colon_path)
+        
+        if is_http_url:
+            target = self._normalize_external_link(colon_path)
+        elif is_file_path:
+            # File paths should not get a leading colon
+            target = colon_path
+        else:
+            # Wiki page links get a leading colon
+            target = ensure_root_colon_link(colon_path)
         
         cursor = self.textCursor()
         pos_before = cursor.position()
@@ -1589,12 +1610,16 @@ class MarkdownEditor(QTextEdit):
         if source.hasHtml() and source.hasText():
             plain = source.text()
             if plain:
-                # Check if plain text is a file path or wiki link
-                processed = self._process_pasted_link(plain.strip())
-                if processed:
-                    self.textCursor().insertText(processed)
-                    self._refresh_display()
-                    return
+                # Check if plain text is a file path or wiki link (strip all whitespace)
+                clean_text = plain.strip()
+                # If pasted text is a single line, try to process as link
+                if clean_text and '\n' not in clean_text and '\r' not in clean_text:
+                    processed = self._process_pasted_link(clean_text)
+                    if processed:
+                        self.textCursor().insertText(processed)
+                        self._refresh_display()
+                        return
+                # Fall back to inserting as-is
                 self.textCursor().insertText(plain)
                 return
 
@@ -1605,19 +1630,53 @@ class MarkdownEditor(QTextEdit):
             if not plain_from_html and source.hasText():
                 plain_from_html = source.text()
             if plain_from_html:
-                # Check if plain text from HTML is a file path or wiki link
-                processed = self._process_pasted_link(plain_from_html.strip())
-                if processed:
-                    self.textCursor().insertText(processed)
-                    self._refresh_display()
-                else:
-                    self.textCursor().insertText(plain_from_html)
-                    if "[" in plain_from_html and "|" in plain_from_html:
+                # Check if plain text from HTML is a file path or wiki link (single line only)
+                clean_text = plain_from_html.strip()
+                if clean_text and '\n' not in clean_text and '\r' not in clean_text:
+                    processed = self._process_pasted_link(clean_text)
+                    if processed:
+                        self.textCursor().insertText(processed)
                         self._refresh_display()
+                        return
+                # Fall back to inserting as-is
+                self.textCursor().insertText(plain_from_html)
+                if "[" in plain_from_html and "|" in plain_from_html:
+                    self._refresh_display()
                 return
 
-        # 4) Default paste without auto-link munging
+        # 4) Plain text only (no HTML) → check for file paths or wiki links
+        if source.hasText():
+            plain = source.text()
+            if plain:
+                # Only process single-line text as potential links
+                clean_text = plain.strip()
+                if clean_text and '\n' not in clean_text and '\r' not in clean_text:
+                    processed = self._process_pasted_link(clean_text)
+                    if processed:
+                        # Insert the processed link
+                        self.textCursor().insertText(processed)
+                        # Refresh display to convert raw markdown to display format
+                        self._refresh_display()
+                        return
+
+        # 5) Default paste without auto-link munging
         super().insertFromMimeData(source)
+
+    def _is_file_path(self, text: str) -> bool:
+        """Check if text is an absolute file path (Windows or Linux)."""
+        if not text:
+            return False
+        # Windows absolute path: C:\path or C:/path
+        if len(text) > 1 and text[1] == ':' and text[0].isalpha():
+            return True
+        # UNC path: \\server\share
+        if text.startswith('\\\\'):
+            return True
+        # Linux absolute path: /path/to/file (but not just a slug)
+        # Only if it contains multiple path separators
+        if text.startswith('/') and '/' in text[1:]:
+            return True
+        return False
 
     def _process_pasted_link(self, text: str) -> Optional[str]:
         r"""Process pasted text to detect and convert file paths or wiki page links.
@@ -1647,8 +1706,11 @@ class MarkdownEditor(QTextEdit):
         if windows_match or unc_match:
             # Windows file path - normalize and create link without leading colon
             normalized = text.replace('\\', '/')
+            # Extract filename for label
+            from pathlib import Path
+            filename = Path(normalized).name
             # Don't add leading colon for external file paths
-            return f"[{normalized}|]"
+            return f"[{normalized}|{filename}]"
         elif linux_match and '/' in text:
             # Linux file path - create link without leading colon
             # But check if it looks like a colon-notation link first
@@ -1657,8 +1719,10 @@ class MarkdownEditor(QTextEdit):
                 # This is a colon link, will be handled below
                 pass
             else:
-                # This is a file path
-                return f"[{text}|]"
+                # This is a file path - extract filename for label
+                from pathlib import Path
+                filename = Path(text).name
+                return f"[{text}|{filename}]"
         
         # Check for wiki page links (colon notation)
         # Pattern: :Page or :Page:SubPage or Page:SubPage (without leading colon)
@@ -3406,7 +3470,11 @@ class MarkdownEditor(QTextEdit):
             link = m.group("link")
             label = m.group("label")
             tail = m.group("tail")
+            # If there's a tail and it's a suffix of the link, dedupe
             if tail and link.endswith(tail):
+                return f"[{link}|{label}]"
+            # If there's no tail, this is just label duplication, dedupe
+            if not tail:
                 return f"[{link}|{label}]"
             return m.group(0)
 

@@ -2564,6 +2564,23 @@ class MainWindow(QMainWindow):
                 self._alert(f"Failed to open URL: {e}")
                 return
         
+        # Handle absolute file system paths - open with OS, don't create wiki pages
+        import re
+        is_windows_path = re.match(r'^[A-Za-z]:[\\/]', name)
+        is_unc_path = name.startswith('\\\\')
+        is_linux_path = name.startswith('/') and '/' in name[1:] and ':' not in name
+        
+        if is_windows_path or is_unc_path or is_linux_path:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            # Convert to proper file URL
+            file_path = Path(name)
+            if file_path.exists():
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(file_path)))
+            else:
+                self._alert(f"File not found: {name}")
+            return
+        
         if not self.current_path:
             self._alert("Open a page before following links.")
             return
