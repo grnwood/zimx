@@ -66,4 +66,5 @@ Logbook of all the development efforts on zim. yes!
 	* Chroma per chat?  or global chroma file for the whole app?
 ( )  i lost my right click ai actions in the ai chat window text, lets put them back. @ai
 ( )  when i send in ai prompts from main editor it doesn't register in that as sent, lets fix @ai
+( )  funky page load when sending to ai chat @ai
 

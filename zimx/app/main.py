@@ -178,6 +178,11 @@ def _apply_application_font(app: QApplication) -> None:
         font.setFamily(family)
     if size is not None:
         font.setPointSize(max(6, size))
+        # Persist in case minimal font scan bypasses normal apply
+        try:
+            config.save_application_font_size(size)
+        except Exception:
+            pass
     app.setFont(font)
 
 

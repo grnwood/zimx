@@ -3,6 +3,7 @@ from __future__ import annotations
 import httpx
 import os
 import time
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Signal
@@ -28,6 +29,8 @@ class TabbedRightPanel(QWidget):
     linkActivated = Signal(str)  # page path from Link Navigator
     calendarPageActivated = Signal(str)  # page path from Calendar tab
     aiChatNavigateRequested = Signal(str)  # page path from AI Chat tab
+    aiChatResponseCopied = Signal(str)  # status text when chat response copied
+    aiOverlayRequested = Signal(str, object)  # text, anchor QPoint
     openInWindowRequested = Signal(str)  # page path to open in single-page editor
     openTaskWindowRequested = Signal()
     openLinkWindowRequested = Signal()
@@ -234,9 +237,22 @@ class TabbedRightPanel(QWidget):
             return False
         if not text.strip():
             return False
-        self.tabs.setCurrentIndex(self.ai_chat_index)
         self.ai_chat_panel.send_text_message(text.strip())
         return True
+
+    def get_active_chat_path(self) -> Optional[str]:
+        """Folder path of the currently loaded chat session."""
+        if not self.ai_chat_panel:
+            return None
+        return self.ai_chat_panel.get_active_chat_path()
+
+    def is_active_chat_for_page(self, rel_path: Optional[str]) -> bool:
+        """Return True if the active chat matches the given page's folder."""
+        if not rel_path or not self.ai_chat_panel:
+            return False
+        active_path = self.get_active_chat_path() or ""
+        folder_path = "/" + Path(rel_path.lstrip("/")).parent.as_posix()
+        return folder_path == active_path
 
     def focus_ai_chat_input(self) -> None:
         if not self.ai_chat_panel or self.ai_chat_index is None:
@@ -248,6 +264,10 @@ class TabbedRightPanel(QWidget):
         """Forward AI chat navigation requests."""
         self.aiChatNavigateRequested.emit(path)
 
+    def _emit_ai_overlay_request(self, text: str, anchor) -> None:
+        """Forward AI overlay requests from the chat panel."""
+        self.aiOverlayRequested.emit(text, anchor)
+
     def _add_ai_chat_tab(self) -> None:
         if self.ai_chat_panel:
             return
@@ -255,6 +275,8 @@ class TabbedRightPanel(QWidget):
         self.tabs.addTab(self.ai_chat_panel, "AI Chat")
         self.ai_chat_index = self.tabs.indexOf(self.ai_chat_panel)
         self.ai_chat_panel.chatNavigateRequested.connect(self._emit_chat_navigation)
+        self.ai_chat_panel.responseCopied.connect(self.aiChatResponseCopied)
+        self.ai_chat_panel.aiOverlayRequested.connect(self._emit_ai_overlay_request)
 
     def _remove_ai_chat_tab(self) -> None:
         if not self.ai_chat_panel:

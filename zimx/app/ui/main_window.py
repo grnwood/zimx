@@ -459,7 +459,9 @@ class MainWindow(QMainWindow):
         self.editor.backlinksRequested.connect(
             lambda path="": self._show_link_navigator_for_path(path or self.current_path)
         )
-        self.editor.aiChatRequested.connect(lambda path="": self._open_ai_chat_for_path(path or self.current_path, create=True))
+        self.editor.aiChatRequested.connect(
+            lambda path="": self._open_ai_chat_for_path(path or self.current_path, create=True, focus_tab=True)
+        )
         self.editor.aiChatSendRequested.connect(self._send_selection_to_ai_chat)
         self.editor.aiChatPageFocusRequested.connect(self._focus_ai_chat_for_page)
         self.editor.aiActionRequested.connect(self._handle_ai_action)
@@ -481,7 +483,21 @@ class MainWindow(QMainWindow):
                 self.editor.document().setDefaultFont(font)
         except Exception:
             pass
-        self.font_size = 14
+        try:
+            app_font_size = config.load_application_font_size() or QApplication.instance().font().pointSize()
+        except Exception:
+            app_font_size = 14
+        # Apply application font size immediately (respect user preference)
+        app = QApplication.instance()
+        if app and app_font_size:
+            try:
+                font = app.font()
+                font.setPointSize(max(6, app_font_size))
+                app.setFont(font)
+                config.save_application_font_size(app_font_size)
+            except Exception:
+                pass
+        self.font_size = app_font_size
         self.editor.set_font_point_size(self.font_size)
         self.editor.viInsertModeChanged.connect(self._on_vi_insert_state_changed)
         self._apply_vi_preferences()
@@ -501,9 +517,12 @@ class MainWindow(QMainWindow):
         self.editor.verticalScrollBar().valueChanged.connect(lambda *_: (self._update_toc_visibility(), self._position_toc_widget()))
         self.editor.verticalScrollBar().rangeChanged.connect(lambda *_: (self._update_toc_visibility(), self._position_toc_widget()))
 
+        # AI chat font starts two points below application font (clamped), but honors saved override
+        base_ai_font = max(6, (self.font_size or 14) - 2)
+        ai_font_size = config.load_ai_chat_font_size(base_ai_font)
         self.right_panel = TabbedRightPanel(
             enable_ai_chats=config.load_enable_ai_chats(),
-            ai_chat_font_size=config.load_ai_chat_font_size(),
+            ai_chat_font_size=ai_font_size,
             http_client=self.http,
         )
         self.right_panel.refresh_tasks()
@@ -512,6 +531,10 @@ class MainWindow(QMainWindow):
         self.right_panel.linkActivated.connect(self._open_link_from_panel)
         self.right_panel.calendarPageActivated.connect(self._open_calendar_page)
         self.right_panel.aiChatNavigateRequested.connect(self._on_ai_chat_navigate)
+        self.right_panel.aiChatResponseCopied.connect(
+            lambda msg: self.statusBar().showMessage(msg or "Last chat response copied to buffer", 4000)
+        )
+        self.right_panel.aiOverlayRequested.connect(self._on_ai_overlay_requested)
         self.right_panel.openInWindowRequested.connect(self._open_page_editor_window)
         self.right_panel.openTaskWindowRequested.connect(self._open_task_panel_window)
         self.right_panel.openLinkWindowRequested.connect(self._open_link_panel_window)
@@ -567,6 +590,10 @@ class MainWindow(QMainWindow):
         tree_layout.addWidget(self.tree_header_widget)
         tree_layout.addWidget(self.tree_view)
         tree_container.setLayout(tree_layout)
+        try:
+            self.tree_view.setMinimumWidth(80)
+        except Exception:
+            pass
         
         self.main_splitter = QSplitter()
         self.main_splitter.addWidget(tree_container)
@@ -628,16 +655,21 @@ class MainWindow(QMainWindow):
         view_vault_disk_action.setToolTip("Open the vault folder in your system file manager")
         view_vault_disk_action.triggered.connect(self._open_vault_on_disk)
         vault_menu.addAction(view_vault_disk_action)
-        vault_menu.addSeparator()
+        view_menu = self.menuBar().addMenu("View")
+        reset_view_action = QAction("Reset View/Layout", self)
+        reset_view_action.setToolTip("Reset window size and splitter positions to defaults")
+        reset_view_action.triggered.connect(self._reset_view_layout)
+        view_menu.addAction(reset_view_action)
+        view_menu.addSeparator()
         task_window_action = QAction("Open Task Panel Window", self)
         task_window_action.triggered.connect(self._open_task_panel_window)
-        vault_menu.addAction(task_window_action)
+        view_menu.addAction(task_window_action)
         link_window_action = QAction("Open Link Navigator Window", self)
         link_window_action.triggered.connect(self._open_link_panel_window)
-        vault_menu.addAction(link_window_action)
+        view_menu.addAction(link_window_action)
         ai_window_action = QAction("Open AI Chat Window", self)
         ai_window_action.triggered.connect(self._open_ai_chat_window)
-        vault_menu.addAction(ai_window_action)
+        view_menu.addAction(ai_window_action)
 
         self._register_shortcuts()
         self._focus_recent = ["editor", "tree", "right"]
@@ -1348,6 +1380,33 @@ class MainWindow(QMainWindow):
             if _DETAILED_LOGGING:
                 print("[Geometry] No saved editor splitter state found")
 
+    def _reset_view_layout(self) -> None:
+        """Reset window geometry and splitter positions to defaults."""
+        try:
+            conn = config._get_conn()
+            if conn:
+                conn.execute(
+                    "DELETE FROM kv WHERE key IN ('window_geometry','splitter_state','editor_splitter_state')"
+                )
+                conn.commit()
+        except Exception:
+            pass
+        # Apply sane default sizes and window state
+        try:
+            self.showNormal()
+        except Exception:
+            pass
+        try:
+            self.resize(1100, 720)
+        except Exception:
+            pass
+        try:
+            self.main_splitter.setSizes([240, max(500, self.width() - 260)])
+            self.editor_split.setSizes([760, 320])
+        except Exception:
+            pass
+        self.statusBar().showMessage("View layout reset to defaults", 4000)
+
     def _on_splitter_moved(self, pos: int, index: int) -> None:
         """Save splitter positions when moved (debounced)."""
         self.geometry_save_timer.start()
@@ -1804,7 +1863,7 @@ class MainWindow(QMainWindow):
         if path:
             full_path = Path(self.vault_root) / path.lstrip("/")
             has_chat = self.right_panel.set_current_page(full_path, path)
-            self.editor.set_ai_chat_available(has_chat)
+            self.editor.set_ai_chat_available(has_chat, active=self.right_panel.is_active_chat_for_page(path))
         else:
             self.right_panel.set_current_page(None, None)
             self.editor.set_ai_chat_available(False)
@@ -2284,6 +2343,35 @@ class MainWindow(QMainWindow):
                 self.editor.set_pygments_style(config.load_pygments_style("monokai"))
             except Exception:
                 pass
+            self._apply_application_fonts_immediate()
+
+    def _apply_application_fonts_immediate(self) -> None:
+        """Apply application/editor/AI chat fonts immediately after preferences change."""
+        app = QApplication.instance()
+        try:
+            app_family = config.load_application_font()
+            app_size = config.load_application_font_size()
+        except Exception:
+            app_family = None
+            app_size = None
+        if app:
+            try:
+                font = app.font()
+                if app_family:
+                    font.setFamily(app_family)
+                if app_size:
+                    font.setPointSize(max(6, app_size))
+                app.setFont(font)
+            except Exception:
+                pass
+        # Update editor font size baseline
+        if app_size:
+            self.font_size = max(6, app_size)
+            self.editor.set_font_point_size(self.font_size)
+        # Update AI chat font baseline (two points below app, but honoring saved override)
+        base_ai_font = max(6, (self.font_size or 14) - 2)
+        ai_font_size = config.load_ai_chat_font_size(base_ai_font)
+        self.right_panel.set_font_size(ai_font_size)
 
     def _open_task_from_panel(self, path: str, line: int) -> None:
         self._select_tree_path(path)
@@ -2628,7 +2716,7 @@ class MainWindow(QMainWindow):
         if rel_path:
             full_path = Path(self.vault_root) / rel_path.lstrip("/")
             has_chat = self.right_panel.set_current_page(full_path, rel_path)
-            self.editor.set_ai_chat_available(has_chat)
+            self.editor.set_ai_chat_available(has_chat, active=self.right_panel.is_active_chat_for_page(rel_path))
         else:
             self.right_panel.set_current_page(None, None)
             self.editor.set_ai_chat_available(False)
@@ -3218,12 +3306,20 @@ class MainWindow(QMainWindow):
                 return
         self.right_panel.focus_link_tab(file_path)
 
-    def _open_ai_chat_for_path(self, file_path: Optional[str], create: bool = False) -> None:
-        """Open the AI Chat tab and sync to the given page."""
+    def _open_ai_chat_for_path(self, file_path: Optional[str], create: bool = False, *, focus_tab: bool = True) -> None:
+        """Open (or create) the AI Chat session for the given page, optionally without shifting focus."""
         if not file_path or not self.right_panel.ai_chat_panel:
             return
         self._ensure_right_panel_visible()
-        self.right_panel.focus_ai_chat(file_path, create=create)
+        if focus_tab:
+            self.right_panel.focus_ai_chat(file_path, create=create)
+        else:
+            if create:
+                self.right_panel.ai_chat_panel.open_chat_for_page(file_path)
+                if file_path == self.current_path:
+                    self.editor.set_ai_chat_available(True, active=True)
+            else:
+                self.right_panel.ai_chat_panel.set_current_page(file_path)
 
     def _focus_ai_chat_for_page(self, path: str) -> None:
         """Ensure AI tab shows the requested page and give the input focus."""
@@ -3241,12 +3337,26 @@ class MainWindow(QMainWindow):
             return
         target_path = self.current_path
         self._ensure_right_panel_visible()
-        self.right_panel.focus_ai_chat(target_path, create=True)
+        if target_path:
+            self.right_panel.focus_ai_chat(target_path, create=True)
         self.right_panel.send_ai_action(action, prompt, text)
+        if target_path:
+            self.editor.set_ai_chat_available(True, active=self.right_panel.is_active_chat_for_page(target_path))
 
     def _send_selection_to_ai_chat(self, text: str) -> None:
         if not text.strip():
             return
+        if not self.right_panel.ai_chat_panel:
+            self.statusBar().showMessage("Enable AI chats to send text from the editor.", 4000)
+            return
+        target_path = self.current_path
+        self._ensure_right_panel_visible()
+        if target_path:
+            self.right_panel.focus_ai_chat(target_path, create=True)
+            self.editor.set_ai_chat_available(True, active=self.right_panel.is_active_chat_for_page(target_path))
+        else:
+            if self.right_panel.ai_chat_index is not None:
+                self.right_panel.tabs.setCurrentIndex(self.right_panel.ai_chat_index)
         if not self.right_panel.send_text_to_chat(text):
             self.statusBar().showMessage("Enable AI chats to send text from the editor.", 4000)
 
@@ -3254,6 +3364,16 @@ class MainWindow(QMainWindow):
         """Handle 'Go To Page' from AI chat by focusing the matching page in the editor."""
         if not chat_folder:
             return
+        # Stay on the current page if it already matches this chat's folder
+        if self.current_path:
+            try:
+                current_folder = "/" + Path(self.current_path.lstrip("/")).parent.as_posix()
+            except Exception:
+                current_folder = None
+            if current_folder == chat_folder:
+                self.editor.setFocus()
+                self._apply_focus_borders()
+                return
         file_path = self._folder_to_file_path(chat_folder)
         if not file_path:
             return
@@ -3268,6 +3388,15 @@ class MainWindow(QMainWindow):
             self._open_file(file_path, force=True)
             self.editor.setFocus()
             self._apply_focus_borders()
+        except Exception:
+            return
+
+    def _on_ai_overlay_requested(self, text: str, anchor) -> None:
+        """Open AI actions overlay using chat panel context."""
+        if not text:
+            return
+        try:
+            self.editor.show_ai_overlay_with_text(text, anchor=anchor, has_chat=True, chat_active=True)
         except Exception:
             return
 

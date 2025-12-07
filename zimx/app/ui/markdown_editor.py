@@ -213,6 +213,8 @@ class AIActionOverlay(QWidget):
     """Overlay widget showing AI action categories and actions."""
 
     actionTriggered = Signal(str, str)
+    startChat = Signal()
+    loadChat = Signal()
     sendSelection = Signal()
     closed = Signal()
 
@@ -230,6 +232,8 @@ class AIActionOverlay(QWidget):
         self._current_group = None
         self._entries: list[AIActionOverlay.Entry] = []
         self._groups = AI_ACTION_GROUPS
+        self._has_chat = False
+        self._chat_active = False
         self.setStyleSheet("background: #000000; color: white; border-radius: 10px; border: 1px solid #222222;")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -258,9 +262,17 @@ class AIActionOverlay(QWidget):
     def text(self) -> str:
         return self._text
 
-    def open(self, text: str) -> None:
+    def set_chat_state(self, *, has_chat: bool, chat_active: bool) -> None:
+        self._has_chat = bool(has_chat)
+        self._chat_active = bool(chat_active)
+
+    def open(self, text: str, *, has_chat: Optional[bool] = None, chat_active: Optional[bool] = None, anchor: Optional[QPoint] = None) -> None:
         if not text:
             return
+        if has_chat is not None:
+            self._has_chat = bool(has_chat)
+        if chat_active is not None:
+            self._chat_active = bool(chat_active)
         self._text = text
         self._current_group = None
         self._update_entries()
@@ -271,9 +283,14 @@ class AIActionOverlay(QWidget):
             geo = parent.rect()
             width = min(max(420, geo.width() - 80), geo.width())
             height = min(280, max(200, geo.height() - 100))
-            center = parent.mapToGlobal(geo.center())
-            left = center.x() - width // 2
-            top = center.y() - height // 2
+            if anchor:
+                screen_geo = QGuiApplication.primaryScreen().availableGeometry()
+                left = max(screen_geo.left(), min(anchor.x() - width // 2, screen_geo.right() - width))
+                top = max(screen_geo.top(), min(anchor.y() - height // 2, screen_geo.bottom() - height))
+            else:
+                center = parent.mapToGlobal(geo.center())
+                left = center.x() - width // 2
+                top = center.y() - height // 2
             self.setGeometry(left, top, width, height)
         self._update_header()
         self.show()
@@ -285,9 +302,14 @@ class AIActionOverlay(QWidget):
     def _update_entries(self) -> None:
         self._entries = []
         if not self._current_group:
+            if not self._has_chat:
+                self._entries.append(AIActionOverlay.Entry("Start AI chat with this page", "start_chat"))
+            elif self._has_chat and not self._chat_active:
+                self._entries.append(AIActionOverlay.Entry("Load the chat for this page", "load_chat"))
             self._entries.append(AIActionOverlay.Entry("Send Selection to AI Chat", "default"))
             for group in self._groups:
-                self._entries.append(AIActionOverlay.Entry(group.title, "group", group=group))
+                label = f"{group.title}..."
+                self._entries.append(AIActionOverlay.Entry(label, "group", group=group))
         else:
             for action in self._current_group.actions:
                 self._entries.append(AIActionOverlay.Entry(action.title, "action", action=action))
@@ -300,20 +322,29 @@ class AIActionOverlay(QWidget):
             self._search.setPlaceholderText(f"Type an action in {self._current_group.title}…")
         else:
             self._selection_label.setVisible(False)
-            self._search.setPlaceholderText("Send Selection to AI Chat or type action…")
+            self._search.setPlaceholderText("Send selection, choose an action, or type a custom prompt…")
 
     def _refresh_list(self) -> None:
-        text = self._search.text().lower().strip()
+        raw_text = self._search.text()
+        search_text = raw_text.lower().strip()
+        custom_prompt = raw_text.strip()
         self._list.clear()
+        matches = 0
         for entry in self._entries:
-            if text and text not in entry.label.lower():
+            if search_text and search_text not in entry.label.lower():
                 continue
             item = QListWidgetItem(entry.label)
             item.setData(Qt.UserRole, entry)
             self._list.addItem(item)
+            matches += 1
+        if custom_prompt:
+            custom_entry = AIActionOverlay.Entry(custom_prompt, "custom_prompt")
+            custom_item = QListWidgetItem(f"Use custom prompt: {custom_prompt}")
+            custom_item.setData(Qt.UserRole, custom_entry)
+            self._list.addItem(custom_item)
         count = self._list.count()
         if count:
-            self._list.setCurrentRow(0)
+            self._list.setCurrentRow(0 if matches else count - 1)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         if obj == self._search and event.type() == QEvent.KeyPress:
@@ -344,8 +375,9 @@ class AIActionOverlay(QWidget):
                     self._refresh_list()
                     return True
             if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab, Qt.Key_Space):
-                self._activate_current_item()
-                return True
+                if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                    self._activate_current_item()
+                    return True
         return super().eventFilter(obj, event)
 
     def _move_selection(self, delta: int) -> None:
@@ -366,6 +398,12 @@ class AIActionOverlay(QWidget):
         if entry.kind == "default":
             self.sendSelection.emit()
             self.hide()
+        elif entry.kind == "start_chat":
+            self.startChat.emit()
+            self.hide()
+        elif entry.kind == "load_chat":
+            self.loadChat.emit()
+            self.hide()
         elif entry.kind == "group":
             self._current_group = entry.group
             self._update_entries()
@@ -373,9 +411,12 @@ class AIActionOverlay(QWidget):
         elif entry.kind == "action":
             self.actionTriggered.emit(entry.action.title, entry.action.prompt)
             self.hide()
+        elif entry.kind == "custom_prompt":
+            self.actionTriggered.emit("Custom Prompt", entry.label)
+            self.hide()
 
     def keyPressEvent(self, event) -> None:
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space, Qt.Key_Tab):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
             self._activate_current_item()
             return
         if event.key() == Qt.Key_Escape:
@@ -1133,6 +1174,7 @@ class MarkdownEditor(QTextEdit):
         self._dialog_block_input: bool = False
         self._ai_actions_enabled: bool = True
         self._ai_chat_available: bool = False
+        self._ai_chat_active: bool = False
         self._page_load_logger: Optional[PageLoadLogger] = None
         self._open_in_window_callback: Optional[Callable[[str], None]] = None
         self._filter_nav_callback: Optional[Callable[[str], None]] = None
@@ -1168,6 +1210,10 @@ class MarkdownEditor(QTextEdit):
         QTimer.singleShot(0, self._apply_scroll_past_end_margin)
 
         self._ai_send_shortcut = QShortcut(QKeySequence("Ctrl+Shift+P"), self)
+        try:
+            self._ai_send_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        except Exception:
+            pass
         self._ai_send_shortcut.activated.connect(self._show_ai_action_overlay)
         self._ai_focus_shortcut = QShortcut(QKeySequence("Ctrl+Shift+["), self)
         self._ai_focus_shortcut.activated.connect(self._emit_ai_chat_focus)
@@ -1175,6 +1221,8 @@ class MarkdownEditor(QTextEdit):
         self._ai_action_overlay = AIActionOverlay(self)
         self._ai_action_overlay.actionTriggered.connect(self._handle_ai_action_overlay)
         self._ai_action_overlay.sendSelection.connect(self._emit_ai_chat_send)
+        self._ai_action_overlay.startChat.connect(self._emit_ai_chat_start)
+        self._ai_action_overlay.loadChat.connect(self._emit_ai_chat_focus)
         self._ai_action_overlay.closed.connect(self._restore_vi_after_overlay)
         self._overlay_vi_mode_before: Optional[bool] = None
         self._document_alive = True
@@ -2317,19 +2365,42 @@ class MarkdownEditor(QTextEdit):
             return
         self.aiChatSendRequested.emit(payload)
 
+    def _emit_ai_chat_start(self) -> None:
+        if not self._current_path:
+            return
+        self.aiChatRequested.emit(self._current_path)
+
     def _emit_ai_chat_focus(self) -> None:
         if not self._current_path:
             return
         self.aiChatPageFocusRequested.emit(self._current_path)
 
-    def _show_ai_action_overlay(self) -> None:
+    def _show_ai_action_overlay(
+        self,
+        *,
+        anchor: Optional[QPoint] = None,
+        text_override: Optional[str] = None,
+        has_chat: Optional[bool] = None,
+        chat_active: Optional[bool] = None,
+    ) -> None:
         if not self._ai_actions_enabled or not config.load_enable_ai_chats():
             return
-        text = self._ai_chat_payload_text()
+        text = text_override if text_override is not None else self._ai_chat_payload_text()
         if not text:
             return
         self._suspend_vi_for_overlay()
-        self._ai_action_overlay.open(text)
+        self._ai_action_overlay.open(
+            text,
+            has_chat=self._ai_chat_available if has_chat is None else has_chat,
+            chat_active=getattr(self, "_ai_chat_active", False) if chat_active is None else chat_active,
+            anchor=anchor,
+        )
+
+    def show_ai_overlay_with_text(
+        self, text: str, *, anchor: Optional[QPoint] = None, has_chat: bool = True, chat_active: bool = True
+    ) -> None:
+        """Expose overlay for external callers (e.g., AI chat panel)."""
+        self._show_ai_action_overlay(anchor=anchor, text_override=text, has_chat=has_chat, chat_active=chat_active)
 
     def _handle_ai_action_overlay(self, title: str, prompt: str) -> None:
         text = self._ai_action_overlay.text()
@@ -4478,9 +4549,11 @@ class MarkdownEditor(QTextEdit):
         """Enable/disable AI actions menu entries."""
         self._ai_actions_enabled = bool(enabled)
 
-    def set_ai_chat_available(self, available: bool) -> None:
+    def set_ai_chat_available(self, available: bool, *, active: Optional[bool] = None) -> None:
         """Toggle whether a chat already exists for the current page."""
         self._ai_chat_available = bool(available)
+        if active is not None:
+            self._ai_chat_active = bool(active)
 
     def _prompt_custom_translation(self, text: str) -> None:
         lang, ok = QInputDialog.getText(self, "Custom Language", "Translate to which language?")

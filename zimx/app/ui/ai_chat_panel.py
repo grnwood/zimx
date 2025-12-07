@@ -18,8 +18,20 @@ from typing import Dict, List, Optional, Set, Tuple
 import httpx
 from PySide6 import QtCore, QtWidgets
 from PySide6.QtCore import QUrl, QSize, Qt
-from PySide6.QtGui import QCursor, QDesktopServices, QFocusEvent, QIcon, QKeyEvent, QPalette, QPixmap, QPainter, QTextCursor
-from PySide6.QtWidgets import QFrame, QLineEdit, QListWidget, QStyle, QLabel
+from PySide6.QtGui import (
+    QCursor,
+    QDesktopServices,
+    QFocusEvent,
+    QIcon,
+    QKeyEvent,
+    QPalette,
+    QPixmap,
+    QPainter,
+    QTextCursor,
+    QShortcut,
+    QKeySequence,
+)
+from PySide6.QtWidgets import QFrame, QLineEdit, QListWidget, QStyle, QLabel, QSizePolicy
 from PySide6.QtSvg import QSvgRenderer
 from zimx.rag.attachment_text import extract_attachment_text
 from markdown import markdown
@@ -735,10 +747,6 @@ class AIChatStore:
         conn.close()
         return bool(row)
 
-    def has_chat_for_path(self, rel_path: Optional[str]) -> bool:
-        """Check if a chat exists for the given page path."""
-        return self.store.has_chat_for_path(rel_path)
-
     def delete_chats_under(self, folder_path: Optional[str]) -> None:
         """Delete chats and their messages at or under the given folder path."""
         if not folder_path:
@@ -1053,8 +1061,17 @@ class AIChatPanel(QtWidgets.QWidget):
     """Lightweight AI chat panel embedded in the right rail."""
 
     chatNavigateRequested = QtCore.Signal(str)
+    responseCopied = QtCore.Signal(str)
+    aiOverlayRequested = QtCore.Signal(str, object)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
+        if not hasattr(self, "input_edit"):
+            return super().eventFilter(obj, event)
+        if event.type() == QtCore.QEvent.KeyPress and event.key() == QtCore.Qt.Key_P:
+            mods = event.modifiers()
+            if mods & QtCore.Qt.ControlModifier and mods & QtCore.Qt.ShiftModifier:
+                self._trigger_ai_overlay_from_chat()
+                return True
         if obj is self.input_edit and event.type() == QtCore.QEvent.KeyPress:
             key_event = event  # type: ignore[assignment]
             if key_event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
@@ -1119,6 +1136,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self._summary_content = None
         self._cancel_pending_send = False
         self._cancel_pending_condense = False
+        self._suppress_navigation = False
         self._build_ui()
         self._load_system_prompts()
         self._refresh_server_dropdown()
@@ -1126,6 +1144,14 @@ class AIChatPanel(QtWidgets.QWidget):
         self._load_chat_tree()
         self._select_default_chat()
         self._update_stop_button()
+        # Allow AI actions overlay from within the chat panel
+        self._ai_overlay_shortcut = QShortcut(QKeySequence("Ctrl+Shift+P"), self)
+        try:
+            self._ai_overlay_shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+        except Exception:
+            pass
+        self._ai_overlay_shortcut.activated.connect(self._trigger_ai_overlay_from_chat)
+        self._reset_warning_shown = False
 
     def _config_default_server(self) -> Optional[str]:
         try:
@@ -1185,11 +1211,17 @@ class AIChatPanel(QtWidgets.QWidget):
         self.model_combo.currentTextChanged.connect(self._on_model_selected)
         model_row.addWidget(self.model_combo, 1)
         refresh_models_btn = QtWidgets.QPushButton("Refresh Models")
-        refresh_models_btn.clicked.connect(self._refresh_models_from_server)
+        refresh_models_btn.clicked.connect(self._show_refresh_warning)
         model_row.addWidget(refresh_models_btn)
         self.prompt_btn = QtWidgets.QPushButton("System Prompts")
         self.prompt_btn.clicked.connect(self._open_prompt_dialog)
         self.prompt_btn.setVisible(False)
+        model_row.addWidget(self.prompt_btn)
+        # Use a compact font size for model/server controls
+        compact_css = "font-size: 12px;"
+        self.server_config_widget.setStyleSheet(compact_css)
+        self.prompt_btn.setStyleSheet(compact_css)
+        refresh_models_btn.setStyleSheet(compact_css)
         model_row.addWidget(self.prompt_btn)
         cfg_layout.addLayout(model_row)
         layout.addWidget(self.server_config_widget)
@@ -1197,7 +1229,7 @@ class AIChatPanel(QtWidgets.QWidget):
         context_layout = QtWidgets.QVBoxLayout(self.context_bar)
         context_layout.setContentsMargins(4, 2, 4, 2)
         self.context_summary_label = ClickableLabel("Context: —")
-        self.context_summary_label.setStyleSheet("color: #007acc; text-decoration: underline;")
+        self.context_summary_label.setStyleSheet("color: #007acc; text-decoration: underline; font-size: 9px;")
         self.context_summary_label.clicked.connect(self._show_context_popup)
         context_layout.addWidget(self.context_summary_label)
         layout.addWidget(self.context_bar)
@@ -1225,7 +1257,7 @@ class AIChatPanel(QtWidgets.QWidget):
         right_container = QtWidgets.QWidget()
         right_layout = QtWidgets.QVBoxLayout(right_container)
         right_layout.setContentsMargins(4, 4, 4, 4)
-        right_layout.setSpacing(6)
+        right_layout.setSpacing(4)
         chat_split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         right_layout.addWidget(chat_split, 1)
         self.chat_view = QtWidgets.QTextBrowser()
@@ -1235,22 +1267,25 @@ class AIChatPanel(QtWidgets.QWidget):
         self.chat_view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.chat_view.customContextMenuRequested.connect(self._on_history_context_menu)
         self.chat_view.setReadOnly(True)
-        self.chat_view.setStyleSheet("QTextBrowser { padding: 6px; }")
+        self.chat_view.setStyleSheet("QTextBrowser { padding: 6px; font-size: 10px; }")
+        self.chat_view.installEventFilter(self)
         self._apply_font_size()
         chat_split.addWidget(self.chat_view)
+        # Compact input row: two-line textbox with controls on the right
         input_container = QtWidgets.QWidget()
-        input_layout = QtWidgets.QVBoxLayout(input_container)
+        input_layout = QtWidgets.QHBoxLayout(input_container)
         input_layout.setContentsMargins(0, 0, 0, 0)
-        input_layout.setSpacing(4)
+        input_layout.setSpacing(6)
         self.input_edit = QtWidgets.QPlainTextEdit()
         self.input_edit.setPlaceholderText("Ask anything…")
         metrics = self.input_edit.fontMetrics()
         line_height = metrics.lineSpacing()
-        self.input_edit.setMinimumHeight(line_height * 5 + 12)
+        two_line_height = line_height * 2 + 6
+        self.input_edit.setFixedHeight(two_line_height)
         self.input_edit.installEventFilter(self)
         input_layout.addWidget(self.input_edit, 1)
-        btn_row = QtWidgets.QHBoxLayout()
-        btn_row.addStretch()
+        btn_col = QtWidgets.QVBoxLayout()
+        btn_col.setSpacing(4)
         self.condense_btn = QtWidgets.QToolButton()
         self.condense_btn.setToolTip("Condense Chat")
         condense_icon = _load_icon("condense.svg", QSize(10, 10))
@@ -1278,18 +1313,26 @@ class AIChatPanel(QtWidgets.QWidget):
         self.reset_btn.setToolTip("Reset chat history")
         self.reset_btn.clicked.connect(self._reset_chat_history)
         self.reset_btn.setFixedWidth(28)
-        btn_row.addWidget(self.condense_btn)
-        btn_row.addWidget(self.reset_btn)
-        btn_row.addWidget(self.send_btn)
-        btn_row.addWidget(self.stop_btn)
-        input_layout.addLayout(btn_row)
-        chat_split.addWidget(input_container)
-        chat_split.setStretchFactor(0, 3)
-        chat_split.setStretchFactor(1, 1)
+        top_btn_row = QtWidgets.QHBoxLayout()
+        top_btn_row.setSpacing(4)
+        top_btn_row.addWidget(self.condense_btn)
+        top_btn_row.addWidget(self.reset_btn)
+        top_btn_row.addStretch()
+        btn_col.addLayout(top_btn_row)
+        for btn in (self.send_btn, self.stop_btn):
+            btn_col.addWidget(btn)
+        btn_col.addStretch()
+        input_layout.addLayout(btn_col)
         self.status_label = QtWidgets.QLabel()
         right_layout.addWidget(self.status_label)
         self.model_status_label = QtWidgets.QLabel()
+        self.model_status_label.setStyleSheet("font-size: 10px; color: #888;")
+        self.model_status_label.setWordWrap(False)
+        self.model_status_label.setMinimumWidth(0)
+        self.model_status_label.setMaximumWidth(500)
+        self.model_status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         right_layout.addWidget(self.model_status_label)
+        right_layout.addWidget(input_container)
         self.splitter.addWidget(right_container)
         layout.addWidget(self.splitter, 1)
         self._toggle_chat_list(False)
@@ -1356,6 +1399,9 @@ class AIChatPanel(QtWidgets.QWidget):
         self._refresh_server_dropdown()
         super().focusInEvent(event)
         try:
+            if self._suppress_navigation:
+                self._suppress_navigation = False
+                return
             target_folder = self._current_chat_path
             if not target_folder:
                 return
@@ -2035,6 +2081,13 @@ class AIChatPanel(QtWidgets.QWidget):
         return not any(tag in rendered_html for tag in heavy_tags)
 
     def _on_history_context_menu(self, pos: QtCore.QPoint) -> None:
+        cursor = self.chat_view.textCursor()
+        if cursor.hasSelection():
+            menu = QtWidgets.QMenu(self)
+            copy_sel = menu.addAction("Copy")
+            copy_sel.triggered.connect(lambda: QtWidgets.QApplication.clipboard().setText(cursor.selectedText()))
+            menu.exec(self.chat_view.mapToGlobal(pos))
+            return
         anchor = self.chat_view.anchorAt(pos)
         msg_id = None
         if anchor:
@@ -2059,6 +2112,26 @@ class AIChatPanel(QtWidgets.QWidget):
         del_act.triggered.connect(lambda: self._delete_message(msg_id))
         menu.addSeparator()
         menu.exec(self.chat_view.mapToGlobal(pos))
+
+    def _ai_overlay_payload_text(self) -> str:
+        """Return selected text in chat view or full chat content."""
+        try:
+            cursor = self.chat_view.textCursor()
+            if cursor.hasSelection():
+                return cursor.selection().toPlainText().replace("\u2029", "\n")
+            return self.chat_view.toPlainText().replace("\u2029", "\n")
+        except Exception:
+            return ""
+
+    def _trigger_ai_overlay_from_chat(self) -> None:
+        text = (self._ai_overlay_payload_text() or "").strip()
+        if not text:
+            return
+        try:
+            anchor = self.chat_view.mapToGlobal(self.chat_view.rect().center())
+        except Exception:
+            anchor = None
+        self.aiOverlayRequested.emit(text, anchor)
 
     def _select_default_chat(self) -> None:
         chat = self.store.get_session_by_path("/", "chat")
@@ -2473,6 +2546,12 @@ class AIChatPanel(QtWidgets.QWidget):
                 self.store.update_session_last_server(self.current_session_id, self.current_server.get("name", ""))
         self._render_messages()
         self._set_status("Response received.", "#2ecc71")
+        try:
+            if full:
+                QtWidgets.QApplication.clipboard().setText(full)
+                self.responseCopied.emit("Last chat response copied to buffer.")
+        except Exception:
+            pass
         self._update_model_status()
         self.send_btn.setEnabled(True)
         self._api_worker = None
@@ -2527,6 +2606,16 @@ class AIChatPanel(QtWidgets.QWidget):
         self._update_model_status()
         self._update_stop_button()
 
+    def _show_refresh_warning(self) -> None:
+        """Insert a warning message before refreshing models."""
+        warning = (
+            "Warning! Refreshing models will wipe this chat history. "
+            "<a href='action:reset_chat:accept'>Accept</a>"
+        )
+        self.messages.append(("assistant", warning))
+        self._render_messages()
+        self.chat_view.ensureCursorVisible()
+
     def _delete_message(self, msg_id: str) -> None:
         role, content = self._message_map.get(msg_id, ("", ""))
         if not content or self.current_session_id is None:
@@ -2577,6 +2666,8 @@ class AIChatPanel(QtWidgets.QWidget):
                     self.chat_view.scrollToAnchor(msg_id)
                 elif action == "delete":
                     self._delete_message(msg_id)
+                elif action == "reset_chat":
+                    self._reset_chat_history()
             return
         if href.startswith("msg:"):
             msg_id = href.split(":", 1)[1]
@@ -2612,9 +2703,11 @@ class AIChatPanel(QtWidgets.QWidget):
             if session:
                 last_model = session.get("last_model", "") or current_model
                 last_server = session.get("last_server", "") or last_server
-        self.model_status_label.setText(
+        status_text = (
             f"current model: {current_model} | last model used: {last_model} | last server: {last_server}"
         )
+        self.model_status_label.setText(status_text)
+        self.model_status_label.setToolTip(status_text)
         # Track the page path associated with the current chat
         self._current_chat_path = None
         if self.current_session_id:
@@ -2790,6 +2883,8 @@ class AIChatPanel(QtWidgets.QWidget):
     def open_chat_for_page(self, rel_path: Optional[str]) -> None:
         """Explicitly open (and create if needed) chat for the given page."""
         self.current_page_path = rel_path
+        # Avoid triggering navigation back to the page on initial focus switch
+        self._suppress_navigation = True
         chat = self.store.get_or_create_chat_for_page(rel_path)
         if chat:
             self.current_session_id = chat["id"]
@@ -2822,6 +2917,10 @@ class AIChatPanel(QtWidgets.QWidget):
         else:
             self.load_page_chat_label.setText("")
 
+    def get_active_chat_path(self) -> Optional[str]:
+        """Return the folder path for the currently loaded chat session."""
+        return self._current_chat_path
+
     def _context_matches_page(self, page: str | None) -> bool:
         if not page:
             return False
@@ -2829,6 +2928,10 @@ class AIChatPanel(QtWidgets.QWidget):
             if item.kind == "page" and item.page_ref == page:
                 return True
         return False
+
+    def has_chat_for_path(self, rel_path: Optional[str]) -> bool:
+        """Expose store lookup for whether a chat exists for the given page path."""
+        return self.store.has_chat_for_path(rel_path)
 
     def set_vault_root(self, vault_root: Optional[str]) -> None:
         """Switch backing store to the current vault's .zimx folder."""
@@ -2865,9 +2968,11 @@ class ContextOverlay(QtWidgets.QFrame):
         layout.setSpacing(4)
         self.filter_edit = QLineEdit()
         self.filter_edit.setPlaceholderText("Filter context…")
+        self.filter_edit.setStyleSheet("font-size: 9px;")
         self.filter_edit.textChanged.connect(self._filter_items)
         layout.addWidget(self.filter_edit)
         self.list_widget = QListWidget()
+        self.list_widget.setStyleSheet("font-size: 9px;")
         self.list_widget.itemActivated.connect(self._on_item_activated)
         layout.addWidget(self.list_widget)
         self._candidates: list[ContextCandidate] = []
@@ -2982,6 +3087,7 @@ class ContextListPopup(QtWidgets.QFrame):
         layout.addWidget(header)
         self.table = QtWidgets.QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Action", "Name", "Type"])
+        self.table.setStyleSheet("font-size: 9px;")
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
