@@ -22,9 +22,11 @@ Logbook of all the development efforts on zim. yes!
   			![paste_image_001](./paste_image_001.png)make colon-link (: somelink) processing smarter, like if its in a the middle of the sentence
  		or 8 : 56pm
  		of  This : That  <-- not a link.		
-( )  add find and replace functionality @edit
+(x)  add find and replace functionality @edit
 ( ) implement the full text search with your chatgpt vetted feature @edit
 ( )  when i paste a link i copied from a header or toc bar and paste into page it doesnt create the link in link navigator @edit
+	Ai is really not handling this well, I'm going to have to debug / fix this one myself.
+( )  i added redo along with undo.  there is still something funky here but its mostly all usable, so leaving alone for now.  @edit
 
 ### Git
 ( )  git support: simple 'version this vault' @edit
@@ -36,12 +38,14 @@ Logbook of all the development efforts on zim. yes!
 		
 ### Tasks
 (x)  support hiearchy assignment  @task
-( ) if all tasks on a tag are complete, tag comes out of tags filter (unless show completed is selected)  @task
+(x) if all tasks on a tag are complete, tag comes out of tags filter (unless show completed is selected)  @task
 (x) if tree is filtered, filter the tasks panel based on tree and sub pages? @task
 	(show red filtered message next to tags label)
 ( )  need a way to AI chat with my tasks. @task
 ( ) need a way to print my tasks (esp. the current filter... print to browser?) @task
 ( )  double check the searching seems to not be filtering right (tags and tasks text?) @task
+( )  move my indicators to the right of the panel so the panel shrinks better @task
+	Or, a better treatment?
 
 ### Page Templages
 ( )  ctrl-n should default to the `New Page` template.  @page

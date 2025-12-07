@@ -103,7 +103,7 @@ def main() -> None:
         )
         _write_page(dest, root_name, parts, content)
 
-    _generate_journal_calendar(dest)
+    _generate_journal_calendar(dest, [t for t in all_colon_targets if not t.startswith("Journal")])
 
     print(f"Sample vault created at: {dest}")
 
@@ -363,7 +363,7 @@ def _write_page(root: Path, root_name: str, parts: list[str], content: str) -> N
     file_path.write_text(content, encoding="utf-8")
 
 
-def _generate_journal_calendar(root: Path) -> None:
+def _generate_journal_calendar(root: Path, cross_targets: list[str]) -> None:
     today = date.today()
     offsets = (-1, 0, 1)
     months = [_shift_month(today, offset) for offset in offsets]
@@ -379,11 +379,11 @@ def _generate_journal_calendar(root: Path) -> None:
         year_dir.mkdir(parents=True, exist_ok=True)
         month_details: list[tuple[int, list[date]]] = []
         for month in sorted(set(grouped[year])):
-            day_dates = _write_journal_month(year_dir, year, month)
+            day_dates = _write_journal_month(year_dir, year, month, cross_targets)
             month_details.append((month, day_dates))
         year_page = year_dir / f"{year:04d}{PAGE_SUFFIX}"
         year_page.write_text(
-            _build_journal_year_content(year, month_details),
+            _build_journal_year_content(year, month_details, cross_targets),
             encoding="utf-8",
         )
 
@@ -400,7 +400,7 @@ def _shift_month(base: date, offset: int) -> tuple[int, int]:
     return year, month
 
 
-def _write_journal_month(year_dir: Path, year: int, month: int) -> list[date]:
+def _write_journal_month(year_dir: Path, year: int, month: int, cross_targets: list[str]) -> list[date]:
     month_dir = year_dir / f"{month:02d}"
     month_dir.mkdir(parents=True, exist_ok=True)
     day_count = calendar.monthrange(year, month)[1]
@@ -410,20 +410,21 @@ def _write_journal_month(year_dir: Path, year: int, month: int) -> list[date]:
         day_dir = month_dir / f"{day:02d}"
         day_dir.mkdir(parents=True, exist_ok=True)
         day_page = day_dir / f"{day:02d}{PAGE_SUFFIX}"
-        day_page.write_text(_build_journal_day_content(entry_date), encoding="utf-8")
+        day_page.write_text(_build_journal_day_content(entry_date, cross_targets), encoding="utf-8")
         day_dates.append(entry_date)
     month_page = month_dir / f"{month:02d}{PAGE_SUFFIX}"
     month_page.write_text(
-        _build_journal_month_content(year, month, day_dates),
+        _build_journal_month_content(year, month, day_dates, cross_targets),
         encoding="utf-8",
     )
     return day_dates
 
 
 def _build_journal_year_content(
-    year: int, month_details: list[tuple[int, list[date]]]
+    year: int, month_details: list[tuple[int, list[date]]], cross_targets: list[str]
 ) -> str:
     colon_path = f"Journal:{year:04d}:{year:04d}"
+    cross_refs = _sample_cross_links(cross_targets, 5)
     lines = [
         f"# {year} Journal Overview",
         "",
@@ -434,6 +435,14 @@ def _build_journal_year_content(
         name = date(year, month, 1).strftime("%B")
         lines.append(
             f"- {name}: :Journal:{year:04d}:{month:02d}:{month:02d} ({len(day_dates)} entries)"
+        )
+    if cross_refs:
+        lines.extend(
+            [
+                "",
+                "Project references:",
+                *[f"- :{ref}" for ref in cross_refs],
+            ]
         )
     lines.extend(
         [
@@ -460,10 +469,13 @@ def _build_journal_year_content(
     return "\n".join(lines).strip() + "\n"
 
 
-def _build_journal_month_content(year: int, month: int, day_dates: list[date]) -> str:
+def _build_journal_month_content(
+    year: int, month: int, day_dates: list[date], cross_targets: list[str]
+) -> str:
     month_name = date(year, month, 1).strftime("%B")
     colon_path = f"Journal:{year:04d}:{month:02d}:{month:02d}"
     focus_blurbs = ", ".join(FAKER.words(nb=4))
+    cross_refs = _sample_cross_links(cross_targets, 4)
     lines = [
         f"# {month_name} {year}",
         "",
@@ -488,6 +500,14 @@ def _build_journal_month_content(year: int, month: int, day_dates: list[date]) -
             ),
         ]
     )
+    if cross_refs:
+        lines.extend(
+            [
+                "",
+                "Project references:",
+                *[f"- :{ref}" for ref in cross_refs],
+            ]
+        )
     sample_days = random.sample(day_dates, k=min(3, len(day_dates))) if day_dates else []
     for sample in sample_days:
         lines.extend(
@@ -502,7 +522,7 @@ def _build_journal_month_content(year: int, month: int, day_dates: list[date]) -
     return "\n".join(lines).strip() + "\n"
 
 
-def _build_journal_day_content(entry_date: date) -> str:
+def _build_journal_day_content(entry_date: date, cross_targets: list[str]) -> str:
     colon_path = f"Journal:{entry_date:%Y}:{entry_date:%m}:{entry_date:%d}:{entry_date:%d}"
     mood = random.choice(["calm", "focused", "energized", "curious", "heads-down"])
     energy = random.choice(["steady", "peaking", "variable", "recharging"])
@@ -511,6 +531,7 @@ def _build_journal_day_content(entry_date: date) -> str:
     tasks = _sample_tasks(reference_date=entry_date)
     day_tasks = random.sample(tasks, k=min(4, len(tasks)))
     timeline = _generate_journal_timeline()
+    cross_refs = _sample_cross_links(cross_targets, 6)
 
     intro_lines = [
         f"# {entry_date:%A, %B %d, %Y}",
@@ -529,6 +550,14 @@ def _build_journal_day_content(entry_date: date) -> str:
         "Tasks:",
         *day_tasks,
     ]
+    if cross_refs:
+        intro_lines.extend(
+            [
+                "",
+                "Cross-links:",
+                *[f"- :{ref}" for ref in cross_refs],
+            ]
+        )
 
     sections = []
     anchors = [
@@ -566,6 +595,14 @@ def _generate_journal_timeline() -> list[str]:
         timeline.append(f"- {hour:02d}:{minute:02d} — {summary}")
         hour = min(20, hour + random.randint(1, 3))
     return timeline
+
+
+def _sample_cross_links(cross_targets: list[str], count: int) -> list[str]:
+    if not cross_targets:
+        return []
+    picks = random.sample(cross_targets, k=min(count, len(cross_targets)))
+    random.shuffle(picks)
+    return picks
 
 
 if __name__ == "__main__":
