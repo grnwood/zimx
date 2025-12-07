@@ -52,6 +52,115 @@ from zimx.app import config
 logger = logging.getLogger(__name__)
 
 
+class SearchEngine:
+    """Lightweight search/replace helper bound to a MarkdownEditor."""
+
+    def __init__(self, editor: "MarkdownEditor") -> None:
+        self.editor = editor
+        self.last_query: str = ""
+        self.last_replacement: str = ""
+        self.last_forward: bool = True
+        self.last_case_sensitive: bool = False
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        return text.replace("\u2029", "\n")
+
+    def find_next(
+        self,
+        query: str,
+        *,
+        backwards: bool = False,
+        wrap: bool = True,
+        case_sensitive: bool = False,
+    ) -> tuple[bool, bool]:
+        query = query or self.last_query
+        if not query:
+            return False, False
+        doc = self.editor.document()
+        cursor = QTextCursor(self.editor.textCursor())
+        flags = QTextDocument.FindFlag(0)
+        if backwards:
+            flags |= QTextDocument.FindBackward
+        if case_sensitive:
+            flags |= QTextDocument.FindCaseSensitively
+        match = doc.find(query, cursor, flags)
+        wrapped = False
+        if match.isNull() and wrap:
+            restart = QTextCursor(doc.end() if backwards else doc.begin())
+            match = doc.find(query, restart, flags)
+            wrapped = not match.isNull()
+        if match.isNull():
+            return False, False
+        self.editor.setTextCursor(match)
+        self.editor.ensureCursorVisible()
+        self.last_query = query
+        self.last_forward = not backwards
+        self.last_case_sensitive = case_sensitive
+        return True, wrapped
+
+    def repeat_last(self, reverse: bool = False) -> tuple[bool, bool, bool]:
+        if not self.last_query:
+            return False, False, False
+        backwards = not self.last_forward
+        if reverse:
+            backwards = not backwards
+        found, wrapped = self.find_next(
+            self.last_query,
+            backwards=backwards,
+            wrap=True,
+            case_sensitive=self.last_case_sensitive,
+        )
+        return found, wrapped, backwards
+
+    def replace_current(self, replacement: str) -> bool:
+        cursor = self.editor.textCursor()
+        if not cursor.hasSelection():
+            return False
+        selected = self._normalize_text(cursor.selectedText())
+        if self.last_query and selected != self.last_query:
+            return False
+        cursor.beginEditBlock()
+        cursor.insertText(replacement)
+        cursor.endEditBlock()
+        self.last_replacement = replacement
+        return True
+
+    def replace_all(self, query: str, replacement: str, *, case_sensitive: bool = False) -> int:
+        query = query or self.last_query
+        if not query:
+            return 0
+        doc = self.editor.document()
+        edit_cursor = QTextCursor(doc)
+        cursor = QTextCursor(doc)
+        original_cursor = QTextCursor(self.editor.textCursor())
+        flags = QTextDocument.FindFlag(0)
+        if case_sensitive:
+            flags |= QTextDocument.FindCaseSensitively
+        count = 0
+        edit_cursor.beginEditBlock()
+        while True:
+            match = doc.find(query, cursor, flags)
+            if match.isNull():
+                break
+            match.insertText(replacement)
+            # Continue searching after the replacement to avoid re-visiting the same span
+            cursor = QTextCursor(doc)
+            cursor.setPosition(match.selectionStart() + len(replacement))
+            count += 1
+        edit_cursor.endEditBlock()
+        if count:
+            self.last_query = query
+            self.last_replacement = replacement
+            self.last_forward = True
+            self.last_case_sensitive = case_sensitive
+            try:
+                self.editor.setTextCursor(original_cursor)
+            except Exception:
+                pass
+        return count
+
+
 TAG_PATTERN = QRegularExpression(r"@(\w+)")
 TASK_PATTERN = QRegularExpression(r"^(?P<indent>\s*)\((?P<state>[xX ])?\)(?P<body>\s+.*)$")
 TASK_LINE_PATTERN = re.compile(r"^(\s*)\(([ xX])\)(\s+)", re.MULTILINE)
@@ -998,6 +1107,7 @@ class MarkdownEditor(QTextEdit):
     aiChatSendRequested = Signal(str)  # Send selected/whole text to the open chat
     aiChatPageFocusRequested = Signal(str)  # Request the chat tab focused on this page
     aiActionRequested = Signal(str, str, str)  # title, prompt, text
+    findBarRequested = Signal(bool, bool, str)  # replace_mode, backwards_first, seed_query
     viInsertModeChanged = Signal(bool)  # Emits True when editor is in insert mode
     _VI_EXTRA_KEY = QTextFormat.UserProperty + 1
     _FLASH_EXTRA_KEY = QTextFormat.UserProperty + 2
@@ -1026,6 +1136,7 @@ class MarkdownEditor(QTextEdit):
         self._page_load_logger: Optional[PageLoadLogger] = None
         self._open_in_window_callback: Optional[Callable[[str], None]] = None
         self._filter_nav_callback: Optional[Callable[[str], None]] = None
+        self._search_engine = SearchEngine(self)
         self.setPlaceholderText("Open a Markdown file to begin editing…")
         self.setAcceptRichText(True)
         self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(" "))
@@ -1075,6 +1186,77 @@ class MarkdownEditor(QTextEdit):
         viewport = self.viewport()
         if viewport is not None:
             viewport.destroyed.connect(self._on_viewport_destroyed)
+
+    def _status_message(self, msg: str, duration: int = 2000) -> None:
+        window = self.window()
+        try:
+            if window and hasattr(window, "statusBar"):
+                window.statusBar().showMessage(msg, duration)
+        except Exception:
+            pass
+
+    def _search_seed_query(self) -> str:
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            return cursor.selectedText().replace("\u2029", "\n")
+        return ""
+
+    def search_find_next(self, query: str, *, backwards: bool = False, wrap: bool = True, case_sensitive: bool = False) -> bool:
+        found, wrapped = self._search_engine.find_next(
+            query,
+            backwards=backwards,
+            wrap=wrap,
+            case_sensitive=case_sensitive,
+        )
+        if not found:
+            self._status_message("No match found.")
+            return False
+        if wrapped:
+            self._status_message(f"Wrapped to {'end' if backwards else 'beginning'} of document.")
+        return True
+
+    def search_replace_current(self, replacement: str) -> bool:
+        if not self._search_engine.last_query:
+            self._status_message("Find text before replacing.")
+            return False
+        replaced = self._search_engine.replace_current(replacement)
+        if not replaced:
+            self._status_message("No current match to replace.")
+        return replaced
+
+    def search_replace_all(self, query: str, replacement: str, *, case_sensitive: bool = False) -> int:
+        count = self._search_engine.replace_all(query, replacement, case_sensitive=case_sensitive)
+        if count == 0:
+            self._status_message("No matches replaced.")
+        else:
+            plural = "occurrence" if count == 1 else "occurrences"
+            self._status_message(f"Replaced {count} {plural}.", 2500)
+        return count
+
+    def search_repeat_last(self, reverse: bool = False) -> bool:
+        found, wrapped, backwards = self._search_engine.repeat_last(reverse=reverse)
+        if not found:
+            self._status_message("No previous search.")
+            return False
+        if wrapped:
+            self._status_message(f"Wrapped to {'end' if backwards else 'beginning'} of document.")
+        return True
+
+    def search_word_under_cursor(self, *, backwards: bool = False) -> bool:
+        cursor = self.textCursor()
+        cursor.select(QTextCursor.WordUnderCursor)
+        word = cursor.selectedText().replace("\u2029", "\n").strip()
+        if not word:
+            self._status_message("No word under cursor.")
+            return False
+        return self.search_find_next(word, backwards=backwards, wrap=True, case_sensitive=False)
+
+    def last_search_query(self) -> str:
+        return self._search_engine.last_query
+
+    def request_find_bar(self, *, replace: bool, backwards: bool = False, seed: Optional[str] = None) -> None:
+        query = seed if seed is not None else self._search_seed_query()
+        self.findBarRequested.emit(replace, backwards, query)
 
     def set_pygments_style(self, style: str) -> None:
         """Update the code-fence highlighting style."""
@@ -1830,7 +2012,7 @@ class MarkdownEditor(QTextEdit):
         if self._dialog_block_input:
             event.ignore()
             return
-        # Markdown formatting shortcuts (Ctrl+B, Ctrl+I, Ctrl+K, Ctrl+H)
+        # Markdown formatting shortcuts and undo/redo (Ctrl+Z/Ctrl+Y)
         if event.modifiers() == Qt.ControlModifier:
             if event.key() == Qt.Key_B:
                 self._toggle_bold()
@@ -1844,7 +2026,16 @@ class MarkdownEditor(QTextEdit):
                 self._toggle_strikethrough()
                 event.accept()
                 return
-            elif event.key() == Qt.Key_H:
+            elif event.key() == Qt.Key_Z:
+                self._undo_or_status()
+                event.accept()
+                return
+            elif event.key() == Qt.Key_Y:
+                self._redo_or_status()
+                event.accept()
+                return
+        if event.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
+            if event.key() == Qt.Key_H:
                 self._toggle_highlight()
                 event.accept()
                 return
@@ -2932,12 +3123,32 @@ class MarkdownEditor(QTextEdit):
         if shift and key == Qt.Key_N:
             self._vi_move_cursor(QTextCursor.Down, select=True)
             return True
+
+        if key == Qt.Key_Slash:
+            self.request_find_bar(replace=False, backwards=False, seed=self._search_seed_query())
+            return True
+        if key == Qt.Key_Question:
+            self.request_find_bar(replace=False, backwards=True, seed=self._search_seed_query())
+            return True
+        if key == Qt.Key_N:
+            self.search_repeat_last(reverse=False)
+            return True
+        if key == Qt.Key_Asterisk:
+            self.search_word_under_cursor(backwards=False)
+            return True
+        if key == Qt.Key_NumberSign:
+            self.search_word_under_cursor(backwards=True)
+            return True
+
         if shift and key == Qt.Key_U:
             self._vi_move_cursor(QTextCursor.Up, select=True)
             return True
 
-        if key in (Qt.Key_Semicolon, Qt.Key_Colon):
-            self._vi_move_to_line_end(select=shift or key == Qt.Key_Colon)
+        if key == Qt.Key_Semicolon:
+            self._vi_move_to_line_end(select=shift)
+            return True
+        if key == Qt.Key_Colon:
+            self._open_vi_command_prompt()
             return True
 
         if key == Qt.Key_J and not shift:
@@ -2946,11 +3157,11 @@ class MarkdownEditor(QTextEdit):
         if key == Qt.Key_K and not shift:
             self._vi_move_cursor(QTextCursor.Up)
             return True
-        if key == Qt.Key_H and not shift:
-            self._vi_move_cursor(QTextCursor.Left)
+        if key == Qt.Key_H:
+            self._vi_move_cursor(QTextCursor.Left, select=shift)
             return True
-        if key == Qt.Key_L and not shift:
-            self._vi_move_cursor(QTextCursor.Right)
+        if key == Qt.Key_L:
+            self._vi_move_cursor(QTextCursor.Right, select=shift)
             return True
 
         if key == Qt.Key_0 and not shift:
@@ -3008,10 +3219,10 @@ class MarkdownEditor(QTextEdit):
             self._enter_vi_insert_mode()
             return True
         if key == Qt.Key_U and not shift:
-            try:
-                self.undo()
-            except Exception:
-                pass
+            self._undo_or_status()
+            return True
+        if key == Qt.Key_Y and not shift:
+            self._redo_or_status()
             return True
         if key == Qt.Key_Period and not shift:
             self._vi_repeat_last_edit()
@@ -3064,15 +3275,78 @@ class MarkdownEditor(QTextEdit):
     def _vi_move_to_file_end(self) -> None:
         self._vi_move_cursor(QTextCursor.End)
 
+    def _open_vi_command_prompt(self) -> None:
+        """Handle minimal vi-style command input (:%s/old/new/g)."""
+        try:
+            cmd, ok = QInputDialog.getText(self, "Command", ":")
+        except Exception:
+            return
+        if not ok:
+            return
+        cmd_str = (cmd or "").strip()
+        if cmd_str.startswith("%s/") and cmd_str.endswith("/g"):
+            body = cmd_str[3:-2]
+            if "/" not in body:
+                self._status_message("Invalid substitution command.")
+                return
+            old, new = body.split("/", 1)
+            if not old:
+                self._status_message("Empty search pattern.")
+                return
+            self.search_replace_all(old, new)
+            return
+        self._status_message("Unknown command.")
+
     def _vi_move_word(self, forward: bool) -> None:
         op = QTextCursor.WordRight if forward else QTextCursor.WordLeft
         self._vi_move_cursor(op)
+
+    def _system_clipboard_text(self) -> str:
+        try:
+            return QGuiApplication.clipboard().text() or ""
+        except Exception:
+            return ""
+
+    def _system_clipboard_set(self, text: str) -> None:
+        try:
+            QGuiApplication.clipboard().setText(text)
+        except Exception:
+            pass
+
+    def _undo_or_status(self) -> None:
+        try:
+            doc = self.document()
+            if not doc or not doc.isUndoAvailable():
+                self._status_message("Nothing to undo.")
+                return
+            cursor_before = QTextCursor(self.textCursor())
+            self.undo()
+            if not doc.isUndoAvailable():
+                # Reached the start of the stack; keep cursor stable to avoid jumps.
+                self.setTextCursor(cursor_before)
+        except Exception:
+            pass
+
+    def _redo_or_status(self) -> None:
+        try:
+            doc = self.document()
+            if not doc or not doc.isRedoAvailable():
+                self._status_message("Nothing to redo.")
+                return
+            cursor_before = QTextCursor(self.textCursor())
+            self.redo()
+            if not doc.isRedoAvailable():
+                # Reached the end of the stack; keep cursor stable to avoid jumps.
+                self.setTextCursor(cursor_before)
+        except Exception:
+            pass
 
     def _vi_copy_to_buffer(self) -> bool:
         text = self._vi_selected_text_or_line()
         if text is None:
             return False
         self._vi_clipboard = text
+        self._system_clipboard_set(text)
         return True
 
     def _vi_selected_text_or_line(self) -> Optional[str]:
@@ -3105,6 +3379,7 @@ class MarkdownEditor(QTextEdit):
         normalized = text.replace("\u2029", "\n") if text else ""
         if normalized:
             self._vi_clipboard = normalized
+            self._system_clipboard_set(normalized)
 
     def _vi_insert_text(self, text: str) -> None:
         if not text:
@@ -3118,16 +3393,9 @@ class MarkdownEditor(QTextEdit):
         self.setTextCursor(cursor)
 
     def _vi_paste_buffer(self) -> Optional[str]:
-        if not self._vi_clipboard:
-            # Fallback to system clipboard if vi clipboard is empty
-            try:
-                from PySide6.QtGui import QGuiApplication
-
-                clip_text = QGuiApplication.clipboard().text()
-                if clip_text:
-                    self._vi_clipboard = clip_text
-            except Exception:
-                return None
+        sys_clip = self._system_clipboard_text()
+        if sys_clip:
+            self._vi_clipboard = sys_clip
         if not self._vi_clipboard:
             return None
         self._vi_insert_text(self._vi_clipboard)

@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QCheckBox,
     QSizePolicy,
     QSplitter,
     QStyle,
@@ -190,6 +191,164 @@ class VaultTreeView(QTreeView):
         super().mousePressEvent(event)
 
 
+class FindReplaceBar(QWidget):
+    findNextRequested = Signal(str, bool, bool)  # query, backwards, case_sensitive
+    replaceRequested = Signal(str)  # replacement text
+    replaceAllRequested = Signal(str, str, bool)  # query, replacement, case_sensitive
+    closed = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setVisible(False)
+        self.setStyleSheet(
+            "QWidget {"
+            "  background: palette(base);"
+            "  border-top: 1px solid #555;"
+            "}"
+            "QLineEdit {"
+            "  border: 1px solid #777;"
+            "  border-radius: 4px;"
+            "  padding: 4px 6px;"
+            "}"
+            "QLineEdit:focus {"
+            "  border: 1px solid #5aa1ff;"
+            "  box-shadow: 0 0 6px rgba(90,161,255,0.45);"
+            "}"
+            "QPushButton {"
+            "  padding: 4px 8px;"
+            "}"
+        )
+        self._pending_backwards: Optional[bool] = None
+        self._last_backwards: bool = False
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(4)
+
+        row1 = QHBoxLayout()
+        row1.setContentsMargins(0, 0, 0, 0)
+        row1.addWidget(QLabel("Find:"))
+        self.query_edit = QLineEdit()
+        row1.addWidget(self.query_edit, 1)
+        layout.addLayout(row1)
+
+        self.replace_row = QHBoxLayout()
+        self.replace_row.setContentsMargins(0, 0, 0, 0)
+        replace_label = QLabel("Replace:")
+        replace_label.setMinimumWidth(70)
+        first_label = row1.itemAt(0).widget()
+        if first_label:
+            first_label.setMinimumWidth(70)
+        self.replace_row.addWidget(replace_label)
+        self.replace_edit = QLineEdit()
+        self.replace_row.addWidget(self.replace_edit, 1)
+        self.replace_btn = QPushButton("Replace")
+        self.replace_btn.clicked.connect(self._emit_replace)
+        self.replace_row.addWidget(self.replace_btn)
+        self.replace_all_btn = QPushButton("Replace All")
+        self.replace_all_btn.clicked.connect(self._emit_replace_all)
+        self.replace_row.addWidget(self.replace_all_btn)
+        layout.addLayout(self.replace_row)
+
+        # Buttons row (keeps tab order after inputs)
+        actions_row = QHBoxLayout()
+        actions_row.setContentsMargins(0, 0, 0, 0)
+        self.find_prev_btn = QPushButton("Find Prev")
+        self.find_prev_btn.clicked.connect(lambda: self._emit_find(backwards=True))
+        actions_row.addWidget(self.find_prev_btn)
+        self.find_next_btn = QPushButton("Find Next")
+        self.find_next_btn.clicked.connect(lambda: self._emit_find(backwards=False))
+        actions_row.addWidget(self.find_next_btn)
+        self.case_checkbox = QCheckBox("Case sensitive")
+        self.case_checkbox.setChecked(False)
+        actions_row.addWidget(self.case_checkbox)
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.hide_bar)
+        actions_row.addWidget(self.close_btn)
+        actions_row.addStretch()
+        layout.addLayout(actions_row)
+
+        self.query_edit.installEventFilter(self)
+        self.replace_edit.installEventFilter(self)
+        self.setFocusPolicy(Qt.NoFocus)
+        self._set_replace_mode(False)
+
+    def _emit_find(self, backwards: Optional[bool] = None) -> None:
+        direction: bool
+        if backwards is not None:
+            direction = backwards
+        elif self._pending_backwards is not None:
+            direction = self._pending_backwards
+        else:
+            direction = self._last_backwards
+        self._pending_backwards = None
+        self._last_backwards = direction
+        self.findNextRequested.emit(self.query_edit.text(), direction, self.case_checkbox.isChecked())
+
+    def _emit_replace(self) -> None:
+        self.replaceRequested.emit(self.replace_edit.text())
+        self._emit_find()
+
+    def _emit_replace_all(self) -> None:
+        self.replaceAllRequested.emit(self.query_edit.text(), self.replace_edit.text(), self.case_checkbox.isChecked())
+
+    def show_bar(self, *, replace: bool, query: str, backwards: bool) -> None:
+        self._set_replace_mode(replace)
+        self._pending_backwards = backwards
+        self._last_backwards = backwards
+        if query:
+            self.query_edit.setText(query)
+            self.query_edit.selectAll()
+        self.setVisible(True)
+        self.query_edit.setFocus(Qt.ShortcutFocusReason)
+        self.raise_()
+
+    def hide_bar(self) -> None:
+        self.setVisible(False)
+        self.closed.emit()
+
+    def current_query(self) -> str:
+        return self.query_edit.text()
+
+    def current_replacement(self) -> str:
+        return self.replace_edit.text()
+
+    def focus_query(self) -> None:
+        self.query_edit.setFocus(Qt.ShortcutFocusReason)
+        self.query_edit.selectAll()
+
+    def _set_replace_mode(self, enabled: bool) -> None:
+        self.replace_btn.setVisible(enabled)
+        self.replace_all_btn.setVisible(enabled)
+        self.replace_edit.setVisible(enabled)
+        for i in range(self.replace_row.count()):
+            item = self.replace_row.itemAt(i)
+            widget = item.widget()
+            if widget:
+                widget.setVisible(enabled)
+        self.replace_row.setEnabled(enabled)
+
+    def eventFilter(self, obj: QObject, event: QEvent):  # type: ignore[override]
+        if event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                if obj == self.query_edit:
+                    backwards = bool(event.modifiers() & Qt.ShiftModifier)
+                    self._emit_find(backwards=backwards)
+                    return True
+                if obj == self.replace_edit:
+                    self._emit_replace()
+                    return True
+            if event.key() == Qt.Key_Escape:
+                self.hide_bar()
+                return True
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, event):  # type: ignore[override]
+        if event.key() == Qt.Key_Escape:
+            self.hide_bar()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
 class MainWindow(QMainWindow):
 
     def __init__(self, api_base: str) -> None:
@@ -307,6 +466,12 @@ class MainWindow(QMainWindow):
         self.editor.linkActivated.connect(self._open_link_in_context)
         self.editor.set_open_in_window_callback(self._open_page_editor_window)
         self.editor.set_filter_nav_callback(self._set_nav_filter)
+        self.editor.findBarRequested.connect(self._on_editor_find_requested)
+        self.find_bar = FindReplaceBar(self)
+        self.find_bar.findNextRequested.connect(self._on_find_next_requested)
+        self.find_bar.replaceRequested.connect(self._on_replace_requested)
+        self.find_bar.replaceAllRequested.connect(self._on_replace_all_requested)
+        self.find_bar.closed.connect(lambda: self.editor.setFocus(Qt.ShortcutFocusReason))
         try:
             md_font = config.load_default_markdown_font()
             if md_font:
@@ -375,8 +540,15 @@ class MainWindow(QMainWindow):
 
         # Vi-mode state
        
+        editor_container = QWidget()
+        editor_layout = QVBoxLayout(editor_container)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.setSpacing(0)
+        editor_layout.addWidget(self.editor, 1)
+        editor_layout.addWidget(self.find_bar)
+
         self.editor_split = QSplitter()
-        self.editor_split.addWidget(self.editor)
+        self.editor_split.addWidget(editor_container)
         self.editor_split.addWidget(self.right_panel)
         self.editor_split.setChildrenCollapsible(False)
         self.editor_split.setHandleWidth(8)
@@ -657,6 +829,8 @@ class MainWindow(QMainWindow):
         open_vault_new_win_shortcut.activated.connect(lambda: self._select_vault(spawn_new_process=True))
         focus_toggle = QShortcut(QKeySequence("Ctrl+Shift+Space"), self)
         focus_toggle.activated.connect(self._toggle_focus_between_tree_and_editor)
+        redo_shortcut = QShortcut(QKeySequence("Ctrl+Y"), self)
+        redo_shortcut.activated.connect(self.editor._redo_or_status)
         # Explicit heading popup shortcut (Ctrl+Shift+Tab)
         heading_popup = QShortcut(QKeySequence("Ctrl+Shift+Tab"), self)
         heading_popup.setContext(Qt.ApplicationShortcut)
@@ -668,6 +842,12 @@ class MainWindow(QMainWindow):
         # Home shortcut: Alt+Home (works regardless of vi-mode state)
         home_shortcut = QShortcut(QKeySequence("Alt+Home"), self)
         home_shortcut.activated.connect(self._go_home)
+        find_shortcut = QShortcut(QKeySequence.Find, self)
+        find_shortcut.setContext(Qt.ApplicationShortcut)
+        find_shortcut.activated.connect(lambda: self._show_find_bar(replace=False))
+        replace_shortcut = QShortcut(QKeySequence("Ctrl+H"), self)
+        replace_shortcut.setContext(Qt.ApplicationShortcut)
+        replace_shortcut.activated.connect(lambda: self._show_find_bar(replace=True))
         task_cycle = QShortcut(QKeySequence(Qt.Key_F12), self)
         task_cycle.activated.connect(self.editor.toggle_task_state)
         # Navigation shortcuts
@@ -689,6 +869,41 @@ class MainWindow(QMainWindow):
         reload_page.activated.connect(self._reload_current_page)
         toggle_left.activated.connect(self._toggle_left_panel)
         toggle_right.activated.connect(self._toggle_right_panel)
+
+    def _selected_text_for_search(self) -> str:
+        cursor = self.editor.textCursor()
+        if cursor.hasSelection():
+            return cursor.selectedText().replace("\u2029", "\n")
+        return ""
+
+    def _show_find_bar(self, *, replace: bool, backwards: bool = False, seed: Optional[str] = None) -> None:
+        query = seed if seed is not None else self._selected_text_for_search()
+        if not query:
+            query = self.editor.last_search_query()
+        self.find_bar.show_bar(replace=replace, query=query or "", backwards=backwards)
+
+    def _on_editor_find_requested(self, replace_mode: bool, backwards: bool, seed_query: str) -> None:
+        self._show_find_bar(replace=replace_mode, backwards=backwards, seed=seed_query)
+
+    def _on_find_next_requested(self, query: str, backwards: bool, case_sensitive: bool) -> None:
+        search_query = query.strip() or self.editor.last_search_query() or self._selected_text_for_search()
+        if not search_query:
+            self.statusBar().showMessage("Enter text to find.", 2000)
+            self.find_bar.focus_query()
+            return
+        self.find_bar.query_edit.setText(search_query)
+        self.editor.search_find_next(search_query, backwards=backwards, wrap=True, case_sensitive=case_sensitive)
+
+    def _on_replace_requested(self, replacement: str) -> None:
+        self.editor.search_replace_current(replacement)
+
+    def _on_replace_all_requested(self, query: str, replacement: str, case_sensitive: bool) -> None:
+        search_query = query.strip() or self.editor.last_search_query()
+        if not search_query:
+            self.statusBar().showMessage("Enter text to find.", 2000)
+            self.find_bar.focus_query()
+            return
+        self.editor.search_replace_all(search_query, replacement, case_sensitive=case_sensitive)
 
     def startup(self, vault_hint: Optional[str] = None) -> bool:
         """Handle initial vault selection before the window is shown."""
