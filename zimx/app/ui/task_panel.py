@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QLabel,
+    QToolButton,
 )
 
 from zimx.app import config
@@ -65,42 +66,55 @@ class TaskPanel(QWidget):
         self._available_tags: set[str] = set()
 
         style = self.style()
-        icon_size = QSize(18, 18)
+        icon_size = QSize(20, 20)
 
-        self.show_completed = QCheckBox()
-        self.show_completed.setChecked(False)
-        self.show_completed.toggled.connect(self._refresh_tasks)
-        self.show_completed.setToolTip("Toggle to include tasks marked as done.")
-        self.show_completed.setIcon(style.standardIcon(QStyle.SP_DialogApplyButton))
-        self.show_completed.setIconSize(icon_size)
-        self.show_completed.setAccessibleName("Completed?")
+        def _build_toggle(icon, tooltip, slot):
+            toggle = QToolButton(self)
+            toggle.setCheckable(True)
+            toggle.setIcon(icon)
+            toggle.setIconSize(icon_size)
+            toggle.setToolTip(tooltip)
+            toggle.setAutoRaise(True)
+            toggle.setFixedSize(26, 26)
+            toggle.toggled.connect(slot)
+            # Subtle styling to show pressed/depressed states
+            toggle.setStyleSheet(
+                """
+                QToolButton {
+                    border: 1px solid transparent;
+                    border-radius: 4px;
+                    padding: 2px;
+                    background: transparent;
+                }
+                QToolButton:hover {
+                    border: 1px solid #666;
+                    background: rgba(255,255,255,0.06);
+                }
+                QToolButton:checked {
+                    border: 1px solid #4a90e2;
+                    background: rgba(74,144,226,0.22);
+                }
+                """
+            )
+            return toggle
 
-        self.show_future = QCheckBox()
-        self.show_future.setChecked(False)
-        self.show_future.toggled.connect(self._on_show_future_toggled)
-        self.show_future.setToolTip(
-            "Toggle to include tasks that start in the future.\n"
-            "Ex: ( ) task not started yet >YYYY-mm-dd"
+        self.show_completed = _build_toggle(
+            style.standardIcon(QStyle.SP_DialogApplyButton),
+            "Include tasks marked as done.",
+            self._refresh_tasks,
         )
-        self.show_future.setIcon(style.standardIcon(QStyle.SP_MediaSeekForward))
-        self.show_future.setIconSize(icon_size)
-        self.show_future.setAccessibleName("Future?")
 
-        self.show_actionable = QCheckBox()
-        self.show_actionable.setChecked(False)
-        self.show_actionable.toggled.connect(self._refresh_tasks)
-        self.show_actionable.setToolTip(
-            "Show tasks you can act on now:\n"
-            "- Not done\n"
-            "- No open subtasks\n"
-            "Parents become actionable\n"
-            "once children are done;\n"
-            "due/priority inherit unless\n"
-            "overridden."
+        self.show_future = _build_toggle(
+            style.standardIcon(QStyle.SP_MediaSeekForward),
+            "Include tasks that start in the future (e.g., ( ) task >YYYY-mm-dd).",
+            self._on_show_future_toggled,
         )
-        self.show_actionable.setIcon(style.standardIcon(QStyle.SP_MediaPlay))
-        self.show_actionable.setIconSize(icon_size)
-        self.show_actionable.setAccessibleName("Actionable?")
+
+        self.show_actionable = _build_toggle(
+            style.standardIcon(QStyle.SP_MediaPlay),
+            "Show tasks you can act on now (not done, no open subtasks, parents inherit).",
+            self._refresh_tasks,
+        )
 
         self.task_tree = QTreeWidget()
         self.task_tree.setColumnCount(4)
@@ -121,6 +135,7 @@ class TaskPanel(QWidget):
         self.task_tree.setFocusPolicy(Qt.StrongFocus)
 
         sidebar = QVBoxLayout()
+        # Tags row with filter indicators
         tags_row = QHBoxLayout()
         tags_row.addWidget(QLabel("Tags"))
         self.filter_label = QLabel("Filtered")
@@ -142,14 +157,6 @@ class TaskPanel(QWidget):
         tags_row.addStretch(1)
         sidebar.addLayout(tags_row)
         sidebar.addWidget(self.tag_list)
-        toggles_row = QHBoxLayout()
-        toggles_row.addWidget(self.show_completed)
-        toggles_row.addWidget(self.show_future)
-        toggles_row.addWidget(self.show_actionable)
-        toggles_row.addStretch(1)
-        toggles_widget = QWidget()
-        toggles_widget.setLayout(toggles_row)
-        sidebar.addWidget(toggles_widget)
         sidebar_widget = QWidget()
         sidebar_widget.setLayout(sidebar)
 
@@ -158,8 +165,15 @@ class TaskPanel(QWidget):
         splitter.addWidget(self.task_tree)
         splitter.setSizes([180, 360])
 
+        # Header row with horizontal toggles then search
+        header_row = QHBoxLayout()
+        for cb in (self.show_completed, self.show_future, self.show_actionable):
+            header_row.addWidget(cb)
+        header_row.addSpacing(6)
+        header_row.addWidget(self.search, 1)
+
         layout = QVBoxLayout()
-        layout.addWidget(self.search)
+        layout.addLayout(header_row)
         layout.addWidget(splitter, 1)
         self.setLayout(layout)
         
@@ -305,11 +319,13 @@ class TaskPanel(QWidget):
             pass
 
     def eventFilter(self, obj, event):
-        if obj is self.tag_list.viewport() and event.type() == QEvent.MouseButtonPress:
-            if self.tag_list.itemAt(event.pos()) is None:
-                self.active_tags.clear()
-                self._refresh_tasks()
-                return True
+        if getattr(self, "tag_list", None):
+            viewport = self.tag_list.viewport()
+            if obj is viewport and event.type() == QEvent.MouseButtonPress:
+                if self.tag_list.itemAt(event.pos()) is None:
+                    self.active_tags.clear()
+                    self._refresh_tasks()
+                    return True
         if obj in (self.search, self.task_tree) and event.type() == QEvent.KeyPress:
             if obj is self.search and _should_suspend_nav_for_tag(
                 self.search.text(), self.search.cursorPosition(), self._available_tags

@@ -17,6 +17,8 @@ TAG_PATTERN = re.compile(r"@(\w+)")
 MARKDOWN_LINK_PATTERN = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 # Wiki-style links used by the editor's storage format: [target|label]
 WIKI_LINK_PATTERN = re.compile(r"\[(?P<link>[^\]|]+)\|[^\]]*\]")
+# Plain colon links written directly in text, e.g., :Journal:2024:01:05:05#Morning
+PLAIN_COLON_LINK_PATTERN = re.compile(r"(?<!\w):(?P<link>[^\s\[\]<>\"'()]+)")
 # Tasks: support "- [ ]", "- [x]", "( )", "(x)", "(X)", and Unicode checkboxes "☐"/"☑"
 TASK_PATTERN = re.compile(
     r"^(?P<indent>\s*)"
@@ -106,6 +108,11 @@ def _extract_link_targets(content: str, current_path: Optional[str] = None) -> S
         end = match.end()
         if end < len(content) and content[end] == "(":
             continue
+        normalized = _normalize_page_link(raw)
+        if normalized:
+            targets.add(normalized)
+    for match in PLAIN_COLON_LINK_PATTERN.finditer(content):
+        raw = match.group("link")
         normalized = _normalize_page_link(raw)
         if normalized:
             targets.add(normalized)

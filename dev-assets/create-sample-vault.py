@@ -23,6 +23,8 @@ SECTION_DEFS = [
 ]
 
 FAKER = Faker()
+TAG_POOL: list[str] = []
+_TAG_CURSOR = 0
 
 
 def main() -> None:
@@ -41,6 +43,9 @@ def main() -> None:
     dest.mkdir(parents=True, exist_ok=True)
     random.seed(42)
     FAKER.seed_instance(42)
+
+    global TAG_POOL
+    TAG_POOL = _build_tag_pool()
 
     root_name = dest.name
     pages: list[list[str]] = []
@@ -199,6 +204,8 @@ def _pick_links(
 
 
 def _sample_tasks(reference_date: date | None = None) -> list[str]:
+    """Generate a handful of tasks using a shared tag pool for even distribution."""
+    global _TAG_CURSOR
     today = reference_date or date.today()
     due_dates = [
         today - timedelta(days=7),
@@ -207,18 +214,23 @@ def _sample_tasks(reference_date: date | None = None) -> list[str]:
         today + timedelta(days=10),
         today + timedelta(days=45),
     ]
-    templates = [
-        (_generate_task_text(), f"@{FAKER.word().lower()}", random.randint(0, 3))
-        for _ in range(6)
-    ]
+    templates = [(_generate_task_text(), random.randint(0, 3)) for _ in range(6)]
     tasks: list[str] = []
-    for text, tag, priority in templates:
+    for text, priority in templates:
+        tag_count = random.randint(1, 3)
+        tags: list[str] = []
+        while len(tags) < tag_count and TAG_POOL:
+            tag = TAG_POOL[_TAG_CURSOR % len(TAG_POOL)]
+            _TAG_CURSOR += 1
+            if tag not in tags:
+                tags.append(tag)
+        tag_str = " ".join(f"@{tag}" for tag in tags) if tags else "@general"
         due = random.choice(due_dates)
         start = due - timedelta(days=random.randint(0, 5))
         state = " " if random.random() > 0.35 else "x"
         bangs = "!" * max(0, min(priority, 3))
         start_part = f" >{start.isoformat()}" if start else ""
-        tasks.append(f"({state})  {text} {bangs} {tag} <{due.isoformat()}{start_part}")
+        tasks.append(f"({state})  {text} {bangs} {tag_str} <{due.isoformat()}{start_part}")
     return tasks
 
 
@@ -230,6 +242,26 @@ def _generate_task_text() -> str:
     phrase = FAKER.catch_phrase()
     mashup = f"{buzz} {action} {color} {cipher} {phrase}"
     return mashup.strip().capitalize()
+
+
+def _build_tag_pool(min_tags: int = 30, max_tags: int = 40) -> list[str]:
+    """Build a shared pool of tags to keep distribution uniform."""
+    count = random.randint(min_tags, max_tags)
+    FAKER.unique.clear()
+    tags: list[str] = []
+    for _ in range(count * 2):  # over-generate to ensure uniqueness
+        try:
+            word = FAKER.unique.word().lower()
+        except Exception:
+            word = FAKER.word().lower()
+        if word not in tags:
+            tags.append(word)
+        if len(tags) >= count:
+            break
+    while len(tags) < count:
+        tags.append(f"tag{len(tags)+1}")
+    random.shuffle(tags)
+    return tags[:count]
 
 
 def _build_content(
@@ -400,24 +432,31 @@ def _shift_month(base: date, offset: int) -> tuple[int, int]:
     return year, month
 
 
-def _write_journal_month(year_dir: Path, year: int, month: int, cross_targets: list[str]) -> list[date]:
+def _write_journal_month(
+    year_dir: Path, year: int, month: int, cross_targets: list[str]
+) -> tuple[list[date], dict[date, list[str]]]:
     month_dir = year_dir / f"{month:02d}"
     month_dir.mkdir(parents=True, exist_ok=True)
     day_count = calendar.monthrange(year, month)[1]
     day_dates: list[date] = []
+    day_sub_links: dict[date, list[str]] = {}
     for day in range(1, day_count + 1):
         entry_date = date(year, month, day)
         day_dir = month_dir / f"{day:02d}"
         day_dir.mkdir(parents=True, exist_ok=True)
+        sub_links = _write_journal_day_subpages(day_dir, entry_date, cross_targets)
         day_page = day_dir / f"{day:02d}{PAGE_SUFFIX}"
-        day_page.write_text(_build_journal_day_content(entry_date, cross_targets), encoding="utf-8")
+        day_page.write_text(
+            _build_journal_day_content(entry_date, cross_targets, sub_links), encoding="utf-8"
+        )
+        day_sub_links[entry_date] = sub_links
         day_dates.append(entry_date)
     month_page = month_dir / f"{month:02d}{PAGE_SUFFIX}"
     month_page.write_text(
-        _build_journal_month_content(year, month, day_dates, cross_targets),
+        _build_journal_month_content(year, month, day_dates, cross_targets, day_sub_links),
         encoding="utf-8",
     )
-    return day_dates
+    return day_dates, day_sub_links
 
 
 def _build_journal_year_content(
@@ -470,7 +509,11 @@ def _build_journal_year_content(
 
 
 def _build_journal_month_content(
-    year: int, month: int, day_dates: list[date], cross_targets: list[str]
+    year: int,
+    month: int,
+    day_dates: list[date],
+    cross_targets: list[str],
+    day_sub_links: dict[date, list[str]],
 ) -> str:
     month_name = date(year, month, 1).strftime("%B")
     colon_path = f"Journal:{year:04d}:{month:02d}:{month:02d}"
@@ -489,6 +532,10 @@ def _build_journal_month_content(
         lines.append(
             f"- {entry:%Y-%m-%d}: :Journal:{entry:%Y}:{entry:%m}:{entry:%d}:{entry:%d} — {summary}"
         )
+        sub_links = day_sub_links.get(entry) or []
+        if sub_links:
+            sub_line = ", ".join(f":{ref}" for ref in sub_links[:6])
+            lines.append(f"  - Subpages: {sub_line}")
     lines.extend(
         [
             "",
@@ -522,7 +569,7 @@ def _build_journal_month_content(
     return "\n".join(lines).strip() + "\n"
 
 
-def _build_journal_day_content(entry_date: date, cross_targets: list[str]) -> str:
+def _build_journal_day_content(entry_date: date, cross_targets: list[str], sub_links: list[str]) -> str:
     colon_path = f"Journal:{entry_date:%Y}:{entry_date:%m}:{entry_date:%d}:{entry_date:%d}"
     mood = random.choice(["calm", "focused", "energized", "curious", "heads-down"])
     energy = random.choice(["steady", "peaking", "variable", "recharging"])
@@ -556,6 +603,14 @@ def _build_journal_day_content(entry_date: date, cross_targets: list[str]) -> st
                 "",
                 "Cross-links:",
                 *[f"- :{ref}" for ref in cross_refs],
+            ]
+        )
+    if sub_links:
+        intro_lines.extend(
+            [
+                "",
+                "Day subpages:",
+                *[f"- :{ref}" for ref in sub_links],
             ]
         )
 
@@ -603,6 +658,51 @@ def _sample_cross_links(cross_targets: list[str], count: int) -> list[str]:
     picks = random.sample(cross_targets, k=min(count, len(cross_targets)))
     random.shuffle(picks)
     return picks
+
+
+def _write_journal_day_subpages(day_dir: Path, entry_date: date, cross_targets: list[str]) -> list[str]:
+    """Create a handful of subpages beneath a journal day to mimic real-world notes."""
+    topics = [
+        "Meetings",
+        "Research",
+        "Decisions",
+        "Notes",
+        "Ideas",
+        "Risks",
+        "Planning",
+        "Review",
+    ]
+    count = random.randint(2, 4)
+    picks = random.sample(topics, k=count)
+    sub_links: list[str] = []
+    for topic in picks:
+        slug = topic.replace(" ", "")
+        file_path = day_dir / f"{slug}{PAGE_SUFFIX}"
+        colon_path = f"Journal:{entry_date:%Y}:{entry_date:%m}:{entry_date:%d}:{slug}"
+        cross_refs = _sample_cross_links(cross_targets, random.randint(3, 6))
+        body_parts = [
+            f"# {topic} for {entry_date:%Y-%m-%d}",
+            "",
+            f"Tracked at :{colon_path}.",
+            "",
+            "Highlights:",
+            *[f"- {FAKER.sentence(nb_words=12)}" for _ in range(random.randint(3, 6))],
+        ]
+        if cross_refs:
+            body_parts.extend(
+                [
+                    "",
+                    "Related pages:",
+                    *[f"- :{ref}" for ref in cross_refs],
+                ]
+            )
+        # A few day-specific tasks in the subpage
+        sub_tasks = _sample_tasks(reference_date=entry_date)
+        if sub_tasks:
+            body_parts.extend(["", "Tasks:", *random.sample(sub_tasks, k=min(3, len(sub_tasks)))])
+        file_path.write_text("\n".join(body_parts) + "\n", encoding="utf-8")
+        sub_links.append(colon_path)
+    return sub_links
 
 
 if __name__ == "__main__":
