@@ -221,14 +221,21 @@ def load_ai_chat_font_size(default: int = 13) -> int:
         return default
     try:
         payload = json.loads(GLOBAL_CONFIG.read_text(encoding="utf-8"))
-        return int(payload.get("ai_chat_font_size", default))
+        val = int(payload.get("ai_chat_font_size", default))
+        # Clamp to sensible range to avoid invalid values (<=0) causing Qt warnings
+        return max(6, min(24, val))
     except Exception:
         return default
 
 
 def save_ai_chat_font_size(size: int) -> None:
     """Persist preferred font size for AI chat panel."""
-    _update_global_config({"ai_chat_font_size": int(size)})
+    try:
+        val = int(size)
+    except Exception:
+        val = 13
+    val = max(6, min(24, val))
+    _update_global_config({"ai_chat_font_size": val})
 
 
 def load_enable_ai_chats() -> bool:

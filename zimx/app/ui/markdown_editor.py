@@ -307,6 +307,9 @@ class AIActionOverlay(QWidget):
             elif self._has_chat and not self._chat_active:
                 self._entries.append(AIActionOverlay.Entry("Load the chat for this page", "load_chat"))
             self._entries.append(AIActionOverlay.Entry("Send Selection to AI Chat", "default"))
+            # One-shot prompt: send selected text directly to the configured model
+            # and replace the selection with the model response (does not add to chat history).
+            self._entries.append(AIActionOverlay.Entry("One-Shot Prompt Selection", "one_shot"))
             for group in self._groups:
                 label = f"{group.title}..."
                 self._entries.append(AIActionOverlay.Entry(label, "group", group=group))
@@ -410,6 +413,10 @@ class AIActionOverlay(QWidget):
             self._refresh_list()
         elif entry.kind == "action":
             self.actionTriggered.emit(entry.action.title, entry.action.prompt)
+            self.hide()
+        elif entry.kind == "one_shot":
+            # Signal a one-shot action; main window will perform a direct API call
+            self.actionTriggered.emit("One-Shot Prompt Selection", "")
             self.hide()
         elif entry.kind == "custom_prompt":
             self.actionTriggered.emit("Custom Prompt", entry.label)
@@ -1639,8 +1646,13 @@ class MarkdownEditor(QTextEdit):
                 cursor.insertText("\n")
 
     def set_font_point_size(self, size: int) -> None:
+        # Clamp to a sensible, positive point size to avoid Qt warnings
+        try:
+            safe_size = max(6, int(size))
+        except Exception:
+            safe_size = 13
         font = self.font()
-        font.setPointSize(size)
+        font.setPointSize(safe_size)
         self.setFont(font)
 
     def begin_dialog_block(self) -> None:
@@ -3192,7 +3204,15 @@ class MarkdownEditor(QTextEdit):
             return True
 
         if shift and key == Qt.Key_N:
-            self._vi_move_cursor(QTextCursor.Down, select=True)
+            # If we're at the last line of the document, move the selection
+            # to the end of the current line instead of attempting to move down.
+            cursor = self.textCursor()
+            block = cursor.block()
+            if not block.isValid() or not block.next().isValid() or cursor.atEnd():
+                # We're at the last line: select to the absolute end of document
+                self._vi_move_cursor(QTextCursor.End, select=True)
+            else:
+                self._vi_move_cursor(QTextCursor.Down, select=True)
             return True
 
         if key == Qt.Key_Slash:
@@ -3212,7 +3232,14 @@ class MarkdownEditor(QTextEdit):
             return True
 
         if shift and key == Qt.Key_U:
-            self._vi_move_cursor(QTextCursor.Up, select=True)
+            # If we're at the first line of the document, select to the absolute
+            # start of the document (match Shift+Up behavior at top-of-file).
+            cursor = self.textCursor()
+            block = cursor.block()
+            if not block.isValid() or not block.previous().isValid() or cursor.atStart():
+                self._vi_move_cursor(QTextCursor.Start, select=True)
+            else:
+                self._vi_move_cursor(QTextCursor.Up, select=True)
             return True
 
         if key == Qt.Key_Semicolon:
@@ -3391,7 +3418,57 @@ class MarkdownEditor(QTextEdit):
                 self._status_message("Nothing to undo.")
                 return
             cursor_before = QTextCursor(self.textCursor())
+            # Perform the normal undo first
             self.undo()
+            # If a one-shot placeholder remains (it was inserted outside the undo stack),
+            # replace it with the original prompt so Undo fully restores the prior state.
+            try:
+                ph_start = getattr(self, "_one_shot_placeholder_start", None)
+                ph_len = getattr(self, "_one_shot_placeholder_len", None)
+                orig = getattr(self, "_one_shot_original_text", None)
+                if ph_start is not None and ph_len is not None:
+                    full = self.toPlainText()
+                    # Ensure indices are within range
+                    if ph_start >= 0 and ph_start + ph_len <= len(full):
+                        snippet = full[ph_start: ph_start + ph_len]
+                        if snippet == "Executing one shot prompt...":
+                            # Replace placeholder with original text without adding to undo stack
+                            try:
+                                doc.setUndoRedoEnabled(False)
+                            except Exception:
+                                pass
+                            try:
+                                sel = QTextCursor(doc)
+                                sel.setPosition(ph_start)
+                                sel.setPosition(ph_start + ph_len, QTextCursor.KeepAnchor)
+                                sel.beginEditBlock()
+                                sel.removeSelectedText()
+                                if orig:
+                                    sel.insertText(orig)
+                                sel.endEditBlock()
+                            except Exception:
+                                pass
+                            try:
+                                # restore undo state
+                                doc.setUndoRedoEnabled(True)
+                            except Exception:
+                                pass
+                            # Clear one-shot markers
+                            try:
+                                del self._one_shot_placeholder_start
+                            except Exception:
+                                pass
+                            try:
+                                del self._one_shot_placeholder_len
+                            except Exception:
+                                pass
+                            try:
+                                del self._one_shot_original_text
+                            except Exception:
+                                pass
+                            return
+            except Exception:
+                pass
             if not doc.isUndoAvailable():
                 # Reached the start of the stack; keep cursor stable to avoid jumps.
                 self.setTextCursor(cursor_before)

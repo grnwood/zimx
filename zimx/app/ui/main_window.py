@@ -32,6 +32,7 @@ from PySide6.QtGui import (
     QStandardItem,
     QStandardItemModel,
     QTextCursor,
+    QTextCharFormat,
     QPainter,
     QColor,
     QFont,
@@ -497,7 +498,11 @@ class MainWindow(QMainWindow):
                 config.save_application_font_size(app_font_size)
             except Exception:
                 pass
-        self.font_size = app_font_size
+        # Normalize and clamp the stored application font size to a safe point size
+        try:
+            self.font_size = max(6, int(app_font_size))
+        except Exception:
+            self.font_size = 14
         self.editor.set_font_point_size(self.font_size)
         self.editor.viInsertModeChanged.connect(self._on_vi_insert_state_changed)
         self._apply_vi_preferences()
@@ -2344,6 +2349,21 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self._apply_application_fonts_immediate()
+            # If AI chat panel exists, refresh its server/model selections immediately
+            try:
+                if self.right_panel.ai_chat_panel:
+                    # Refresh server dropdown (this will respect saved default server)
+                    try:
+                        self.right_panel.ai_chat_panel._refresh_server_dropdown()
+                    except Exception:
+                        pass
+                    # Refresh model dropdown and apply default model
+                    try:
+                        self.right_panel.ai_chat_panel._refresh_model_dropdown(initial=True)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
     def _apply_application_fonts_immediate(self) -> None:
         """Apply application/editor/AI chat fonts immediately after preferences change."""
@@ -3332,6 +3352,13 @@ class MainWindow(QMainWindow):
 
     def _handle_ai_action(self, action: str, prompt: str, text: str) -> None:
         """Send selected text to AI chat with the chosen action."""
+        # Special-case: One-Shot prompt — call the API directly and replace
+        # the selected text inline with the LLM response (do not add to chat history).
+        if action == "One-Shot Prompt Selection":
+            # Perform one-shot inline replacement
+            self._perform_one_shot_prompt(text)
+            return
+
         if not config.load_enable_ai_chats() or not self.right_panel.ai_chat_panel:
             QMessageBox.information(self, "AI Chat", "Enable AI Chats in Preferences to use AI actions.")
             return
@@ -3342,6 +3369,262 @@ class MainWindow(QMainWindow):
         self.right_panel.send_ai_action(action, prompt, text)
         if target_path:
             self.editor.set_ai_chat_available(True, active=self.right_panel.is_active_chat_for_page(target_path))
+
+    def _perform_one_shot_prompt(self, text: str) -> None:
+        """Send selected text as a one-shot user message to the configured server/model
+        using a lightweight system prompt, then replace the selected text with the LLM reply.
+        """
+        if not text or not text.strip():
+            self.statusBar().showMessage("Select text to run One-Shot Prompt on.", 4000)
+            return
+        panel = self.right_panel.ai_chat_panel
+        if not panel:
+            self.statusBar().showMessage("AI Chat panel not available; enable AI Chats.", 4000)
+            return
+
+        # Prefer the system default server/model from Preferences. Fall back
+        # to the AI chat panel's current server/model if no system default is set.
+        try:
+            from .ai_chat_panel import ApiWorker, ServerManager
+        except Exception:
+            self.statusBar().showMessage("API worker unavailable.", 4000)
+            return
+
+        server_config: dict = {}
+        try:
+            default_server_name = config.load_default_ai_server()
+        except Exception:
+            default_server_name = None
+        try:
+            server_mgr = ServerManager()
+            if default_server_name:
+                server_cfg = server_mgr.get_server(default_server_name)
+                if server_cfg:
+                    server_config = server_cfg
+        except Exception:
+            server_config = {}
+
+        # If no system default, fall back to panel's current server
+        if not server_config:
+            server_config = getattr(panel, "current_server", None) or {}
+
+        try:
+            default_model_name = config.load_default_ai_model()
+        except Exception:
+            default_model_name = None
+
+        if default_model_name:
+            model = default_model_name
+        else:
+            # prefer server default, then panel model combo
+            model = (server_config.get("default_model") if server_config else None) or (
+                getattr(panel, "model_combo", None).currentText() if getattr(panel, "model_combo", None) else None
+            ) or "gpt-3.5-turbo"
+        # Build messages: fixed system prompt, then user content
+        system_prompt = "you are a helpful assistent, you will respond with markdown formatting"
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": text}]
+        # ApiWorker already imported above with ServerManager
+        # Insert a greyed-out placeholder at the current selection/cursor
+        editor = self.editor
+        cursor = editor.textCursor()
+        had_selection = cursor.hasSelection()
+        # Capture the original selected text so we can restore it on undo
+        try:
+            original_text = cursor.selectedText().replace("\u2029", "\n") if had_selection else ""
+        except Exception:
+            original_text = ""
+        # We'll replace the selection (or insert at cursor) with a placeholder
+        placeholder_text = "Executing one shot prompt..."
+        char_fmt = QTextCharFormat()
+        char_fmt.setForeground(QColor(136, 136, 136))
+        # Disable undo/redo while inserting the placeholder so it doesn't pollute
+        # the user's undo history. We'll restore the previous undo state later
+        # and re-enable it before inserting the final LLM response so the
+        # replacement remains undoable as a single operation.
+        doc = editor.document()
+        try:
+            prev_undo = doc.isUndoRedoEnabled()
+        except Exception:
+            prev_undo = True
+        try:
+            doc.setUndoRedoEnabled(False)
+        except Exception:
+            pass
+        # store previous undo state to restore later
+        self._one_shot_undo_prev = prev_undo
+
+        if had_selection:
+            # replace selection with placeholder
+            start_pos = cursor.selectionStart()
+            cursor.beginEditBlock()
+            cursor.removeSelectedText()
+            cursor.insertText(placeholder_text, char_fmt)
+            cursor.endEditBlock()
+        else:
+            # insert at cursor position
+            start_pos = cursor.position()
+            cursor.beginEditBlock()
+            cursor.insertText(placeholder_text, char_fmt)
+            cursor.endEditBlock()
+        placeholder_len = len(placeholder_text)
+        # Move caret to end of placeholder and keep focus
+        sel_cursor = QTextCursor(editor.document())
+        sel_cursor.setPosition(start_pos + placeholder_len)
+        editor.setTextCursor(sel_cursor)
+        editor.setFocus()
+
+        # Start a pulsing timer to give visual feedback on the placeholder
+        self._one_shot_pulse_state = False
+        pulse_timer = QTimer(self)
+        pulse_timer.setInterval(600)
+
+        def _pulse() -> None:
+            try:
+                doc = editor.document()
+                start = getattr(self, "_one_shot_placeholder_start", None)
+                length = getattr(self, "_one_shot_placeholder_len", None)
+                if start is None or length is None:
+                    return
+                sel = QTextCursor(doc)
+                sel.setPosition(start)
+                sel.setPosition(start + length, QTextCursor.KeepAnchor)
+                fmt = QTextCharFormat()
+                if not getattr(self, "_one_shot_pulse_state", False):
+                    fmt.setForeground(QColor(96, 96, 96))
+                else:
+                    fmt.setForeground(QColor(136, 136, 136))
+                sel.mergeCharFormat(fmt)
+                self._one_shot_pulse_state = not getattr(self, "_one_shot_pulse_state", False)
+            except Exception:
+                pass
+
+        pulse_timer.timeout.connect(_pulse)
+        pulse_timer.start()
+        self._one_shot_pulse_timer = pulse_timer
+
+        # Change mouse cursor to wait state
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+
+        # Keep reference so worker doesn't get GC'd
+        self._one_shot_worker = ApiWorker(server_config, messages, model, stream=False)
+        # remember placeholder range for replacement (store on both MainWindow and editor)
+        self._one_shot_placeholder_start = start_pos
+        self._one_shot_placeholder_len = placeholder_len
+        try:
+            editor._one_shot_placeholder_start = start_pos
+            editor._one_shot_placeholder_len = placeholder_len
+            editor._one_shot_original_text = original_text
+        except Exception:
+            pass
+
+        def _cleanup_cursor_and_worker() -> None:
+            try:
+                QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
+            # stop pulse timer if running
+            try:
+                t = getattr(self, "_one_shot_pulse_timer", None)
+                if t:
+                    t.stop()
+                    try:
+                        t.deleteLater()
+                    except Exception:
+                        pass
+                    self._one_shot_pulse_timer = None
+            except Exception:
+                pass
+            # clear worker ref
+            try:
+                self._one_shot_worker = None
+            except Exception:
+                pass
+            # restore undo/redo enabled state if we changed it earlier
+            try:
+                doc = getattr(self, "editor", None).document() if getattr(self, "editor", None) else None
+                if doc is not None and hasattr(self, "_one_shot_undo_prev"):
+                    try:
+                        doc.setUndoRedoEnabled(self._one_shot_undo_prev)
+                    except Exception:
+                        pass
+                    try:
+                        del self._one_shot_undo_prev
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        def _on_finished(full: str) -> None:
+            try:
+                # Replace placeholder with the response
+                editor = self.editor
+                doc = editor.document()
+                start = getattr(self, "_one_shot_placeholder_start", None)
+                length = getattr(self, "_one_shot_placeholder_len", None)
+                # Re-enable undo/redo if it was previously enabled so the final
+                # replacement is recorded as a single undoable action.
+                try:
+                    prev = getattr(self, "_one_shot_undo_prev", True)
+                    doc.setUndoRedoEnabled(bool(prev))
+                except Exception:
+                    pass
+                if start is None or length is None:
+                    # fallback: replace current selection or whole document
+                    cursor = editor.textCursor()
+                    if not cursor.hasSelection():
+                        cursor.select(QTextCursor.Document)
+                    cursor.beginEditBlock()
+                    cursor.removeSelectedText()
+                    cursor.insertText(full)
+                    cursor.endEditBlock()
+                    start_pos = cursor.selectionStart()
+                else:
+                    # select placeholder region and replace
+                    sel_cursor = QTextCursor(doc)
+                    sel_cursor.setPosition(start)
+                    sel_cursor.setPosition(start + length, QTextCursor.KeepAnchor)
+                    editor.setTextCursor(sel_cursor)
+                    sel_cursor.beginEditBlock()
+                    sel_cursor.removeSelectedText()
+                    sel_cursor.insertText(full)
+                    sel_cursor.endEditBlock()
+                    start_pos = start
+                # Select the inserted text
+                new_end = start_pos + len(full)
+                final_cursor = QTextCursor(editor.document())
+                final_cursor.setPosition(start_pos)
+                final_cursor.setPosition(new_end, QTextCursor.KeepAnchor)
+                editor.setTextCursor(final_cursor)
+                editor.setFocus()
+                self.statusBar().showMessage("One-Shot complete.", 2500)
+            except Exception as exc:
+                self.statusBar().showMessage(f"One-Shot failed to apply response: {exc}", 4000)
+            finally:
+                _cleanup_cursor_and_worker()
+
+        def _on_failed(err: str) -> None:
+            # remove placeholder if present
+            try:
+                editor = self.editor
+                doc = editor.document()
+                start = getattr(self, "_one_shot_placeholder_start", None)
+                length = getattr(self, "_one_shot_placeholder_len", None)
+                if start is not None and length is not None:
+                    sel_cursor = QTextCursor(doc)
+                    sel_cursor.setPosition(start)
+                    sel_cursor.setPosition(start + length, QTextCursor.KeepAnchor)
+                    sel_cursor.beginEditBlock()
+                    sel_cursor.removeSelectedText()
+                    sel_cursor.endEditBlock()
+                self.statusBar().showMessage(f"One-Shot failed: {err}", 6000)
+            except Exception:
+                pass
+            finally:
+                _cleanup_cursor_and_worker()
+
+        self._one_shot_worker.finished.connect(_on_finished)
+        self._one_shot_worker.failed.connect(_on_failed)
+        self._one_shot_worker.start()
 
     def _send_selection_to_ai_chat(self, text: str) -> None:
         if not text.strip():

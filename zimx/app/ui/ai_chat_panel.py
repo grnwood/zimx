@@ -1229,7 +1229,7 @@ class AIChatPanel(QtWidgets.QWidget):
         context_layout = QtWidgets.QVBoxLayout(self.context_bar)
         context_layout.setContentsMargins(4, 2, 4, 2)
         self.context_summary_label = ClickableLabel("Context: —")
-        self.context_summary_label.setStyleSheet("color: #007acc; text-decoration: underline; font-size: 9px;")
+        self.context_summary_label.setStyleSheet("color: #007acc; text-decoration: underline;")
         self.context_summary_label.clicked.connect(self._show_context_popup)
         context_layout.addWidget(self.context_summary_label)
         layout.addWidget(self.context_bar)
@@ -1267,7 +1267,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self.chat_view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.chat_view.customContextMenuRequested.connect(self._on_history_context_menu)
         self.chat_view.setReadOnly(True)
-        self.chat_view.setStyleSheet("QTextBrowser { padding: 6px; font-size: 10px; }")
+        self.chat_view.setStyleSheet("QTextBrowser { padding: 6px;}") # font-size: 10px; }")
         self.chat_view.installEventFilter(self)
         self._apply_font_size()
         chat_split.addWidget(self.chat_view)
@@ -1397,7 +1397,18 @@ class AIChatPanel(QtWidgets.QWidget):
     def focusInEvent(self, event):  # type: ignore[override]
         # Update server dropdown to reflect latest config state
         self._refresh_server_dropdown()
+        # Re-apply the current font size to avoid focus-triggered resets
+        try:
+            self._apply_font_size()
+        except Exception:
+            pass
         super().focusInEvent(event)
+        # When the chat panel receives focus, ensure the send / input box actually receives focus
+        try:
+            if hasattr(self, "input_edit") and self.input_edit is not None:
+                self.input_edit.setFocus(Qt.OtherFocusReason)
+        except Exception:
+            pass
         try:
             if self._suppress_navigation:
                 self._suppress_navigation = False
@@ -1463,7 +1474,7 @@ class AIChatPanel(QtWidgets.QWidget):
             f"<style>body {{ background:{base_color}; color:{text_color}; }}"
             f".bubble {{ position:relative; border-radius:6px; padding:6px 8px 12px; margin-bottom:8px; }}"
             f".bubble:hover {{ background:rgba(0,0,0,0.05); }}"
-            f".actions {{ text-align:left; font-size:12px; display:none; margin-top:6px; margin-left:0; }}"
+            f".actions {{ text-align:left; display:none; margin-top:6px; margin-left:0; }}"
             f".bubble:hover .actions {{ display:block; }}"
             f".actions a {{ margin-right:12px; margin-left:0; text-decoration:none; color:{accent}; }}"
             f".user {{ background:rgba(80,120,200,0.10); }}"
