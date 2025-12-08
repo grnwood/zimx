@@ -10,7 +10,10 @@ Logbook of all the development efforts on zim. yes!
 	move tasks to its own 
 	Tasks can have just the full rail.
 	remove 'show jornal' from left nav since it's under calendar.
-
+( )  on cal panel insights for day page show all the headings in a clickable outline @cal
+( ) keep the filter across days applied, add a 'clear filter' above insight panel @cal
+	(this is great for clicking around on a filtered view or either review or context on next steps).
+	
 ### Editor
 (x)  I still see sometimes my page doesn't save, there is some kind of navigation why to lose the buffer, keep an eye out.  @edit
 	pretty sure this is VI navigation (soft keys) doing this, need to make sure it fires a write ALL the time. Gotta hitj ctrl-s for now.
@@ -36,6 +39,10 @@ Logbook of all the development efforts on zim. yes!
 		git installed in OS and on path. (or warning)
 		attempt a git init.  Setup a remote origin and auto push?  (auto push on commit?)
 		
+### Indexer
+( )  sometimes ctrl-l link adding is give bad link targets: @index
+![paste_image_002](./paste_image_002.png){width=300}
+
 ### Tasks
 (x)  support hiearchy assignment  @task
 (x) if all tasks on a tag are complete, tag comes out of tags filter (unless show completed is selected)  @task
@@ -64,7 +71,8 @@ Logbook of all the development efforts on zim. yes!
 	  * How to handle subfolders, etc?
 	* Delete has to remove from chroma or get to big.
 	* Chroma per chat?  or global chroma file for the whole app?
-( )  i lost my right click ai actions in the ai chat window text, lets put them back. @ai
+(x)  i lost my right click ai actions in the ai chat window text, lets put them back. @ai
 ( )  when i send in ai prompts from main editor it doesn't register in that as sent, lets fix @ai
 ( )  funky page load when sending to ai chat @ai
+(x)  one shot promptiong @ai
 

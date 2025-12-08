@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import calendar
 from datetime import date as Date
 from typing import Optional
 
@@ -23,6 +24,9 @@ from PySide6.QtWidgets import (
     QSplitter,
     QListWidget,
     QListWidgetItem,
+    QPushButton,
+    QCheckBox,
+    QSizePolicy,
 )
 from shiboken6 import Shiboken
 
@@ -86,18 +90,76 @@ class CalendarPanel(QWidget):
         self.day_insights_layout.setSpacing(6)
         self.insight_title = QLabel("No date selected")
         self.insight_title.setStyleSheet("font-weight: bold;")
+        # Title row with an optional Filter button when multiple days are selected
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(6)
+        self.filter_btn = QPushButton("Filtered")
+        self.filter_btn.setVisible(False)
+        self.filter_btn.setStyleSheet("background:#e53935; color:white; font-weight:bold; padding:2px 6px;")
+        self.filter_btn.setCursor(self.insight_title.cursor())
+        self.filter_btn.clicked.connect(self._clear_filter)
+        title_row.addWidget(self.insight_title)
+        title_row.addStretch(1)
+        title_row.addWidget(self.filter_btn)
         self.insight_counts = QLabel("")
         self.insight_tags = QLabel("")
         for lbl in (self.insight_title, self.insight_counts, self.insight_tags):
             lbl.setWordWrap(True)
-        self.day_insights_layout.addWidget(self.insight_title)
+        # Add title row (label + optional filter button)
+        title_container = QWidget()
+        title_container.setLayout(title_row)
+        self.day_insights_layout.addWidget(title_container)
         self.day_insights_layout.addWidget(self.insight_counts)
         self.day_insights_layout.addWidget(self.insight_tags)
         self.subpage_list = QListWidget()
         self.subpage_list.itemActivated.connect(self._open_insight_link)
         self.subpage_list.itemClicked.connect(self._open_insight_link)
-        self.day_insights_layout.addWidget(QLabel("Pages"))
-        self.day_insights_layout.addWidget(self.subpage_list, 1)
+        # Ensure items do not wrap (single-line, elide) and use uniform sizing
+        try:
+            self.subpage_list.setWordWrap(False)
+            self.subpage_list.setUniformItemSizes(True)
+        except Exception:
+            pass
+        # Pages and headings: split into two columns (Headings | Sub Pages)
+        self.headings_list = QListWidget()
+        self.headings_list.itemActivated.connect(self._open_insight_link)
+        self.headings_list.itemClicked.connect(self._open_insight_link)
+        try:
+            self.headings_list.setWordWrap(False)
+            self.headings_list.setUniformItemSizes(True)
+        except Exception:
+            pass
+
+        pages_headings_container = QWidget()
+        ph_layout = QHBoxLayout()
+        ph_layout.setContentsMargins(0, 0, 0, 0)
+        ph_layout.setSpacing(6)
+
+        # Left column: Headings
+        headings_col = QWidget()
+        headings_col_layout = QVBoxLayout()
+        headings_col_layout.setContentsMargins(0, 0, 0, 0)
+        headings_col_layout.setSpacing(4)
+        headings_col_layout.addWidget(QLabel("Headings:"))
+        headings_col_layout.addWidget(self.headings_list, 1)
+        headings_col.setLayout(headings_col_layout)
+
+        # Right column: Sub Pages
+        subpages_col = QWidget()
+        subpages_col_layout = QVBoxLayout()
+        subpages_col_layout.setContentsMargins(0, 0, 0, 0)
+        subpages_col_layout.setSpacing(4)
+        subpages_col_layout.addWidget(QLabel("Sub Pages:"))
+        subpages_col_layout.addWidget(self.subpage_list, 1)
+        subpages_col.setLayout(subpages_col_layout)
+
+        ph_layout.addWidget(headings_col, 1)
+        ph_layout.addWidget(subpages_col, 1)
+        pages_headings_container.setLayout(ph_layout)
+
+        self.day_insights_layout.addWidget(pages_headings_container, 1)
+        # Due tasks header with overdue checkbox filter
         self.tasks_due_list = QTreeWidget()
         self.tasks_due_list.setColumnCount(4)
         self.tasks_due_list.setHeaderLabels(["!", "Task", "Due", "Path"])
@@ -112,9 +174,27 @@ class CalendarPanel(QWidget):
         self.tasks_due_list.setColumnWidth(0, 24)
         self.tasks_due_list.setColumnWidth(2, 90)
         self.tasks_due_list.setColumnWidth(3, 140)
-        self.day_insights_layout.addWidget(QLabel("Due Tasks"))
-        self.day_insights_layout.addWidget(self.tasks_due_list, 1)
-        self.day_insights_layout.addStretch(1)
+        due_row = QWidget()
+        due_row_layout = QHBoxLayout()
+        due_row_layout.setContentsMargins(0, 0, 0, 0)
+        due_row_layout.setSpacing(6)
+        due_label = QLabel("Due Tasks")
+        self.overdue_checkbox = QCheckBox("Overdue?")
+        self.overdue_checkbox.setChecked(True)
+        self.overdue_checkbox.stateChanged.connect(lambda _: self._update_insights_for_selection())
+        due_row_layout.addWidget(due_label)
+        due_row_layout.addStretch(1)
+        # Future checkbox (shows future-starting tasks); checked by default
+        self.future_checkbox = QCheckBox("Future?")
+        self.future_checkbox.setChecked(True)
+        self.future_checkbox.stateChanged.connect(lambda _: self._update_insights_for_selection())
+        due_row_layout.addWidget(self.future_checkbox)
+        due_row_layout.addWidget(self.overdue_checkbox)
+        due_row.setLayout(due_row_layout)
+        self.day_insights_layout.addWidget(due_row)
+        # Make tasks list expand to fill the left rail vertical space
+        self.tasks_due_list.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self.day_insights_layout.addWidget(self.tasks_due_list, 2)
 
         self.journal_tree = QTreeWidget()
         self.journal_tree.setHeaderHidden(True)
@@ -178,6 +258,11 @@ class CalendarPanel(QWidget):
 
     def set_current_page(self, rel_path: Optional[str]) -> None:
         """Sync calendar and tree based on an opened journal page."""
+        # If a multi-day filter is active, do not change the calendar selection
+        if len(self.multi_selected_dates) > 1:
+            # only update insight selection highlight
+            self._update_insights_for_selection(rel_path)
+            return
         if not rel_path or "Journal" not in rel_path:
             return
         parts = Path(rel_path.lstrip("/")).parts
@@ -209,6 +294,14 @@ class CalendarPanel(QWidget):
         self._update_day_listing(self.calendar.selectedDate())
         self._apply_multi_selection_formats()
         self._update_insights_for_selection()
+        # Also update the due-tasks panel to reflect the visible month range
+        try:
+            first = QDate(year, month, 1)
+            last_day = first.daysInMonth()
+            last = QDate(year, month, last_day)
+            self._update_due_tasks([first, last])
+        except Exception:
+            pass
 
     def _on_date_clicked(self, date: QDate) -> None:
         """Emit selected date and sync the tree."""
@@ -441,6 +534,29 @@ class CalendarPanel(QWidget):
                     self._update_insights_for_selection()
                     self.dateActivated.emit(date.year(), date.month(), date.day())
                     return True
+            # Double-click: open/create day's page and remove any multi-day filter
+            if event.type() == QEvent.MouseButtonDblClick and event.button() == Qt.LeftButton:
+                date = self._date_from_pos(event.pos())
+                if date.isValid():
+                    # Clear multi-selection filter and select this date
+                    try:
+                        self.multi_selected_dates = {date}
+                        self.calendar.setSelectedDate(date)
+                        if hasattr(self, "filter_btn"):
+                            self.filter_btn.setVisible(False)
+                        self._apply_multi_selection_formats()
+                        self._update_day_listing(date)
+                        self._update_insights_for_selection()
+                    except Exception:
+                        pass
+                    # Ensure day page exists and open it
+                    try:
+                        rel = self._ensure_day_page_exists(date)
+                        if rel:
+                            self.pageActivated.emit(rel)
+                    except Exception:
+                        pass
+                    return True
             if event.type() == QEvent.MouseMove and self._drag_selecting and (event.buttons() & Qt.LeftButton):
                 date = self._date_from_pos(event.pos())
                 if date.isValid() and date != self._last_drag_date:
@@ -531,17 +647,73 @@ class CalendarPanel(QWidget):
         if not base_dir.exists():
             return
         subpages = self._list_day_subpages(base_dir)
-        # Main day page first
+        # Main day page first: create a main node and group headings under it
         main_path = f"/Journal/{date.year():04d}/{date.month():02d}/{date.day():02d}/{date.day():02d}{PAGE_SUFFIX}"
         main = QTreeWidgetItem([f"{date.year():04d}-{date.month():02d}-{date.day():02d} (day)"])
         main.setData(0, Qt.UserRole, date)
         main.setData(0, PATH_ROLE, main_path)
         day_item.addChild(main)
+
+        # Parse headings from the main day page (preserve order)
+        heading_texts: list[str] = []
+        try:
+            main_file = Path(self.vault_root) / main_path.lstrip("/")
+            if main_file.exists():
+                text = main_file.read_text(encoding="utf-8", errors="ignore")
+                heading_texts = self._parse_headings_from_text(text)
+        except Exception:
+            heading_texts = []
+
+        # Create heading nodes under the main node
+        heading_nodes: dict[str, QTreeWidgetItem] = {}
+        for h in heading_texts:
+            hn = QTreeWidgetItem([h])
+            hn.setData(0, Qt.UserRole, date)
+            hn.setData(0, PATH_ROLE, None)
+            main.addChild(hn)
+            heading_nodes[h.lower()] = hn
+
+        # 'Other' bucket for subpages that don't map to a heading
+        other_node = QTreeWidgetItem(["Other"])
+        other_node.setData(0, Qt.UserRole, date)
+        other_node.setData(0, PATH_ROLE, None)
+        main.addChild(other_node)
+
+        # Add subpages and attempt to associate them with headings by searching content
         for label, rel_path in subpages:
-            child = QTreeWidgetItem([label])
-            child.setData(0, Qt.UserRole, date)
-            child.setData(0, PATH_ROLE, rel_path)
-            day_item.addChild(child)
+            child_label = Path(rel_path).stem
+            child_item = QTreeWidgetItem([child_label])
+            child_item.setData(0, Qt.UserRole, date)
+            child_item.setData(0, PATH_ROLE, rel_path)
+
+            # Try to read subpage and find a heading match
+            placed = False
+            try:
+                target = Path(self.vault_root) / rel_path.lstrip("/")
+                if target.exists():
+                    sub_text = target.read_text(encoding="utf-8", errors="ignore")
+                    sub_headings = self._parse_headings_from_text(sub_text)
+                    # If any heading in subpage matches a main heading, attach there
+                    for sh in sub_headings:
+                        key = sh.strip().lower()
+                        if key in heading_nodes:
+                            heading_nodes[key].addChild(child_item)
+                            placed = True
+                            break
+                    # Otherwise, try searching page content for main heading tokens
+                    if not placed and heading_texts:
+                        txt_low = sub_text.lower()
+                        for h in heading_texts:
+                            if h.lower() in txt_low:
+                                heading_nodes[h.lower()].addChild(child_item)
+                                placed = True
+                                break
+            except Exception:
+                placed = False
+
+            if not placed:
+                other_node.addChild(child_item)
+
         day_item.setExpanded(True)
 
     def _list_day_subpages(self, base_dir: Path) -> list[tuple[str, str]]:
@@ -579,6 +751,11 @@ class CalendarPanel(QWidget):
             if len(dates) == 1:
                 self._update_insights(dates[0], current_path)
             else:
+                # For multi-day selection, show only subpages and hide headings
+                try:
+                    self.headings_list.setVisible(False)
+                except Exception:
+                    pass
                 self._update_insights_multi(dates, current_path)
             dates_for_tasks = dates
         else:
@@ -593,12 +770,20 @@ class CalendarPanel(QWidget):
             self.insight_counts.setText("")
             self.insight_tags.setText("")
             self.subpage_list.clear()
+            try:
+                self.headings_list.clear()
+            except Exception:
+                pass
             return
         tasks = 0
         tags: list[str] = []
         total_files: list[Path] = []
         day_entries = 0
         self.subpage_list.clear()
+        try:
+            self.headings_list.clear()
+        except Exception:
+            pass
         for date in dates:
             base_dir = Path(self.vault_root) / "Journal" / f"{date.year():04d}" / f"{date.month():02d}" / f"{date.day():02d}"
             date_label = date.toString("yyyy-MM-dd")
@@ -614,7 +799,12 @@ class CalendarPanel(QWidget):
                 target = Path(self.vault_root) / rel.lstrip("/")
                 if target.exists():
                     total_files.append(target)
-                self._add_insight_item(f"{date_label} • {label}", rel)
+                # Show only the page name for subpage entries
+                try:
+                    short = Path(rel).stem
+                except Exception:
+                    short = label
+                self._add_insight_item(f"{date_label} • {short}", rel)
         for file in total_files:
             try:
                 text = file.read_text(encoding="utf-8")
@@ -626,6 +816,11 @@ class CalendarPanel(QWidget):
         entries_count = len(total_files)
         subpages_count = max(0, entries_count - day_entries)
         self.insight_title.setText(f"Selected {len(dates)} days")
+        # Show the filtered indicator so user can clear the multi-day filter
+        try:
+            self.filter_btn.setVisible(True)
+        except Exception:
+            pass
         self.insight_counts.setText(f"Entries: {entries_count}  •  Subpages: {subpages_count}  •  Tasks: {tasks}")
         self.insight_tags.setText("Tags: " + (", ".join(unique_tags[:8]) if unique_tags else "—"))
         if current_path:
@@ -638,6 +833,11 @@ class CalendarPanel(QWidget):
     def _add_insight_item(self, label: str, rel_path: str) -> None:
         item = QListWidgetItem(label)
         item.setData(PATH_ROLE, rel_path)
+        # Tooltip shows full label; item text should remain single-line in the UI
+        try:
+            item.setToolTip(label)
+        except Exception:
+            pass
         self.subpage_list.addItem(item)
 
     def _clear_due_tasks(self, message: Optional[str] = None) -> None:
@@ -695,6 +895,17 @@ class CalendarPanel(QWidget):
         end_dt = max(valid_dates, key=lambda d: d.toJulianDay())
         range_start = Date(start_dt.year(), start_dt.month(), start_dt.day())
         range_end = Date(end_dt.year(), end_dt.month(), end_dt.day())
+        # If 'future' checkbox is enabled and a single date is selected,
+        # extend the end of the range to the end of that month to show
+        # future-starting tasks for the month.
+        try:
+            if getattr(self, "future_checkbox", None) and self.future_checkbox.isChecked() and len(valid_dates) == 1:
+                y = range_start.year
+                m = range_start.month
+                last = calendar.monthrange(y, m)[1]
+                range_end = Date(y, m, last)
+        except Exception:
+            pass
         try:
             tasks = config.fetch_tasks(include_done=False, include_ancestors=False)
         except Exception:
@@ -711,6 +922,10 @@ class CalendarPanel(QWidget):
             is_overdue = bool(due_dt and due_dt < range_start)
             is_due_in_range = bool(due_dt and range_start <= due_dt <= range_end)
             starts_in_range = bool(start_dt_val and range_start <= start_dt_val <= range_end)
+            # Respect overdue checkbox: if unchecked, exclude overdue items unless they start in range
+            show_overdue = bool(getattr(self, "overdue_checkbox", True) and self.overdue_checkbox.isChecked())
+            if (is_overdue and not show_overdue) and not (starts_in_range or is_due_in_range):
+                continue
             if is_overdue or is_due_in_range or starts_in_range:
                 matches.append(task)
         self.tasks_due_list.clear()
@@ -753,6 +968,10 @@ class CalendarPanel(QWidget):
             self.insight_counts.setText("")
             self.insight_tags.setText("")
             self.subpage_list.clear()
+            try:
+                self.headings_list.clear()
+            except Exception:
+                pass
             self.tasks_due_list.clear()
             return
         base_dir = Path(self.vault_root) / "Journal" / f"{date.year():04d}" / f"{date.month():02d}" / f"{date.day():02d}"
@@ -761,6 +980,10 @@ class CalendarPanel(QWidget):
             self.insight_counts.setText("No journal entry.")
             self.insight_tags.setText("")
             self.subpage_list.clear()
+            try:
+                self.headings_list.clear()
+            except Exception:
+                pass
             self.tasks_due_list.clear()
             return
         day_page = base_dir / f"{base_dir.name}{PAGE_SUFFIX}"
@@ -782,27 +1005,65 @@ class CalendarPanel(QWidget):
         unique_tags = sorted(set(tags))
         subpages_count = max(0, len(files) - 1)
         self.insight_title.setText(f"{date.toString('yyyy-MM-dd')}")
+        # Hide filter when viewing a single day
+        try:
+            self.filter_btn.setVisible(False)
+        except Exception:
+            pass
         self.insight_counts.setText(f"Entries: {len(files)}  •  Subpages: {subpages_count}  •  Tasks: {tasks}")
         self.insight_tags.setText("Tags: " + (", ".join(unique_tags[:8]) if unique_tags else "—"))
-        # Populate pages list
+        # Populate pages + headings list
         self.subpage_list.clear()
-        # Main
+        try:
+            self.headings_list.clear()
+        except Exception:
+            pass
+        # Headings only relevant for single-day view
+        try:
+            self.headings_list.setVisible(True)
+        except Exception:
+            pass
         main_path = f"/Journal/{date.year():04d}/{date.month():02d}/{date.day():02d}/{date.day():02d}{PAGE_SUFFIX}"
-        main_item = QListWidgetItem(f"{date.year():04d}-{date.month():02d}-{date.day():02d} (day)")
-        main_item.setData(PATH_ROLE, main_path)
-        self.subpage_list.addItem(main_item)
-        # Subpages (including nested folders)
+        # Add headings from the main page (in order)
+        try:
+            main_file = Path(self.vault_root) / main_path.lstrip("/")
+            main_text = main_file.read_text(encoding="utf-8", errors="ignore") if main_file.exists() else ""
+        except Exception:
+            main_text = ""
+        headings = self._parse_headings_from_text(main_text)
+        # Add heading items (anchor to main page with slug) into the Headings column
+        for h in headings:
+            slug = self._slugify(h)
+            item = QListWidgetItem(h)
+            item.setData(PATH_ROLE, f"{main_path}#{slug}")
+            try:
+                item.setToolTip(h)
+            except Exception:
+                pass
+            self.headings_list.addItem(item)
+        # Then add subpages (only the page name shown) into the Sub Pages column
         for label, rel in subpages:
-            item = QListWidgetItem(label)
+            try:
+                short = Path(rel).stem
+            except Exception:
+                short = label
+            item = QListWidgetItem(short)
             item.setData(PATH_ROLE, rel)
             self.subpage_list.addItem(item)
         # Highlight current page if provided
         if current_path:
-            for idx in range(self.subpage_list.count()):
-                it = self.subpage_list.item(idx)
+            # Try headings first
+            for idx in range(self.headings_list.count()):
+                it = self.headings_list.item(idx)
                 if it and current_path.endswith(str(it.data(PATH_ROLE))):
-                    self.subpage_list.setCurrentItem(it)
+                    self.headings_list.setCurrentItem(it)
                     break
+            else:
+                for idx in range(self.subpage_list.count()):
+                    it = self.subpage_list.item(idx)
+                    if it and current_path.endswith(str(it.data(PATH_ROLE))):
+                        self.subpage_list.setCurrentItem(it)
+                        break
 
     def _open_insight_link(self, item: QListWidgetItem) -> None:
         if not item:
@@ -810,6 +1071,104 @@ class CalendarPanel(QWidget):
         path = item.data(PATH_ROLE)
         if path:
             self.pageActivated.emit(str(path))
+
+    def _slugify(self, text: str) -> str:
+        """Create a simple slug for headings to be used as anchor targets."""
+        if not text:
+            return ""
+        s = text.strip().lower()
+        s = re.sub(r"[^a-z0-9\s-]", "", s)
+        s = re.sub(r"\s+", "-", s)
+        s = re.sub(r"-+", "-", s)
+        return s.strip("-")
+
+    def _clear_filter(self) -> None:
+        """Clear the multi-day filter and select the calendar's current date."""
+        try:
+            cur = self.calendar.selectedDate()
+            self.multi_selected_dates = {cur}
+            self.filter_btn.setVisible(False)
+            self._apply_multi_selection_formats()
+            self._update_insights_for_selection()
+        except Exception:
+            pass
+
+    def _ensure_day_page_exists(self, date: QDate) -> Optional[str]:
+        """Ensure the journal day page file exists; create it if necessary and return rel path."""
+        if not self.vault_root or not date or not date.isValid():
+            return None
+        year = f"{date.year():04d}"
+        month = f"{date.month():02d}"
+        day = f"{date.day():02d}"
+        day_dir = Path(self.vault_root) / "Journal" / year / month / day
+        try:
+            day_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+                self._add_insight_item(f"{date_label} (day)", "/" + day_page.relative_to(self.vault_root).as_posix())
+                # Add headings from the day's main page into the headings column
+                try:
+                    text = day_page.read_text(encoding="utf-8", errors="ignore")
+                    day_headings = self._parse_headings_from_text(text)
+                    main_path = f"/Journal/{date.year():04d}/{date.month():02d}/{date.day():02d}/{date.day():02d}{PAGE_SUFFIX}"
+                    for dh in day_headings:
+                        slug = self._slugify(dh)
+                        label = f"{date_label}: {dh}"
+                        hi = QListWidgetItem(label)
+                        hi.setData(PATH_ROLE, f"{main_path}#{slug}")
+                        try:
+                            hi.setToolTip(label)
+                        except Exception:
+                            pass
+                        self.headings_list.addItem(hi)
+                except Exception:
+                    pass
+        day_file = day_dir / f"{day}{PAGE_SUFFIX}"
+        if not day_file.exists():
+            try:
+                # Try to create from the repository template `templates/JournalDay.txt` if available
+                content = None
+                try:
+                    template_path = Path(__file__).resolve().parents[2] / "templates" / "JournalDay.txt"
+                    if template_path.exists():
+                        tmpl = template_path.read_text(encoding="utf-8", errors="ignore")
+                        # Use QDate formatting for localized names
+                        dow = date.toString("dddd")
+                        month_name = date.toString("MMMM")
+                        dd = date.toString("dd")
+                        yyyy = date.toString("yyyy")
+                        content = (
+                            tmpl.replace("{{DOW}}", dow)
+                            .replace("{{Month}}", month_name)
+                            .replace("{{dd}}", dd)
+                            .replace("{{YYYY}}", yyyy)
+                        )
+                except Exception:
+                    content = None
+
+                # Fallback: a simple ISO date heading
+                if content is None:
+                    content = f"# {date.toString('yyyy-MM-dd')}\n\n"
+
+                day_file.write_text(content, encoding="utf-8")
+            except Exception:
+                return None
+        try:
+            return "/" + day_file.relative_to(self.vault_root).as_posix()
+        except Exception:
+            return None
+
+    def _parse_headings_from_text(self, text: str) -> list[str]:
+        """Return a list of headings (text only) in order from markdown text."""
+        if not text:
+            return []
+        out: list[str] = []
+        for line in text.splitlines():
+            m = re.match(r"^(#{1,6})\s+(.*)", line)
+            if m:
+                h = m.group(2).strip()
+                if h:
+                    out.append(h)
+        return out
 
     def _open_task_item(self, item) -> None:
         """Open a due task's page at its line."""

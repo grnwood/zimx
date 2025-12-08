@@ -2096,7 +2096,21 @@ class AIChatPanel(QtWidgets.QWidget):
         if cursor.hasSelection():
             menu = QtWidgets.QMenu(self)
             copy_sel = menu.addAction("Copy")
-            copy_sel.triggered.connect(lambda: QtWidgets.QApplication.clipboard().setText(cursor.selectedText()))
+            def _copy_selected():
+                try:
+                    txt = cursor.selection().toPlainText()
+                    QtWidgets.QApplication.clipboard().setText(self._sanitize_for_clipboard(txt))
+                except Exception:
+                    QtWidgets.QApplication.clipboard().setText("")
+            copy_sel.triggered.connect(_copy_selected)
+            copy_md_sel = menu.addAction("Copy As Markdown")
+            def _copy_selected_md():
+                try:
+                    txt = cursor.selection().toPlainText()
+                    QtWidgets.QApplication.clipboard().setText(self._sanitize_for_clipboard(txt))
+                except Exception:
+                    QtWidgets.QApplication.clipboard().setText("")
+            copy_md_sel.triggered.connect(_copy_selected_md)
             menu.exec(self.chat_view.mapToGlobal(pos))
             return
         anchor = self.chat_view.anchorAt(pos)
@@ -2116,7 +2130,20 @@ class AIChatPanel(QtWidgets.QWidget):
         _, content = self._message_map[msg_id]
         menu = QtWidgets.QMenu(self)
         copy_act = menu.addAction("Copy Message")
-        copy_act.triggered.connect(lambda: QtWidgets.QApplication.clipboard().setText(content))
+        def _copy_message():
+            try:
+                QtWidgets.QApplication.clipboard().setText(self._sanitize_for_clipboard(content))
+            except Exception:
+                QtWidgets.QApplication.clipboard().setText("")
+        copy_act.triggered.connect(_copy_message)
+        copy_md = menu.addAction("Copy As Markdown")
+        def _copy_message_md():
+            try:
+                # content is stored as the original markdown/plain text for the message
+                QtWidgets.QApplication.clipboard().setText(self._sanitize_for_clipboard(content))
+            except Exception:
+                QtWidgets.QApplication.clipboard().setText("")
+        copy_md.triggered.connect(_copy_message_md)
         goto_act = menu.addAction("Go To Start")
         goto_act.triggered.connect(lambda: self.chat_view.scrollToAnchor(msg_id))
         del_act = menu.addAction("Delete Message")
@@ -2133,6 +2160,29 @@ class AIChatPanel(QtWidgets.QWidget):
             return self.chat_view.toPlainText().replace("\u2029", "\n")
         except Exception:
             return ""
+
+    def _sanitize_for_clipboard(self, text: str) -> str:
+        """Normalize text for copying to the system clipboard.
+
+        Keep markdown characters but remove non-printable control characters and
+        normalize paragraph separators.
+        """
+        if text is None:
+            return ""
+        text = text.replace("\u2029", "\n")
+        try:
+            # Remove low-control characters but keep common whitespace (\n,\r,\t)
+            text = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+", "", text)
+            # Also remove BOM, object-replacement, zero-width and bidi control characters,
+            # and private-use-area glyphs that can appear as weird symbols when pasted.
+            text = re.sub(
+                r"[\u200B-\u200F\u2028\u202A-\u202E\uFEFF\uFFFC\uE000-\uF8FF]",
+                "",
+                text,
+            )
+        except Exception:
+            pass
+        return text.strip()
 
     def _trigger_ai_overlay_from_chat(self) -> None:
         text = (self._ai_overlay_payload_text() or "").strip()
@@ -2559,7 +2609,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self._set_status("Response received.", "#2ecc71")
         try:
             if full:
-                QtWidgets.QApplication.clipboard().setText(full)
+                QtWidgets.QApplication.clipboard().setText(self._sanitize_for_clipboard(full))
                 self.responseCopied.emit("Last chat response copied to buffer.")
         except Exception:
             pass
@@ -2672,7 +2722,10 @@ class AIChatPanel(QtWidgets.QWidget):
                     return
                 if action == "copy":
                     content = self._message_map.get(msg_id, ("", ""))[1]
-                    QtWidgets.QApplication.clipboard().setText(content)
+                    try:
+                        QtWidgets.QApplication.clipboard().setText(self._sanitize_for_clipboard(content))
+                    except Exception:
+                        QtWidgets.QApplication.clipboard().setText("")
                 elif action == "goto":
                     self.chat_view.scrollToAnchor(msg_id)
                 elif action == "delete":
@@ -2686,6 +2739,14 @@ class AIChatPanel(QtWidgets.QWidget):
             return
         if href.startswith("http://") or href.startswith("https://"):
             QDesktopServices.openUrl(QUrl(href))
+            return
+        # Internal vault links (absolute /path or colon :Vault:Page) — forward to app navigation
+        if href.startswith("/") or href.startswith(":"):
+            try:
+                self.chatNavigateRequested.emit(href)
+            except Exception:
+                pass
+            return
 
     def _accept_summary(self) -> None:
         """Replace history with condensed summary."""

@@ -2403,7 +2403,9 @@ class MainWindow(QMainWindow):
     def _open_link_from_panel(self, path: str) -> None:
         if not path:
             return
-        path = self._normalize_editor_path(path)
+        # Support fragment anchors in panel links (e.g. /Journal/2025/.../15.txt#slug)
+        base, anchor = self._split_link_anchor(path)
+        path = self._normalize_editor_path(base)
         # Special case: if the path matches the vault root name or is the vault root folder, open the main page
         if self.vault_root_name:
             # Accept /VaultRoot, VaultRoot, /VaultRoot/, or /VaultRoot/VaultRoot.txt as vault root
@@ -2422,6 +2424,12 @@ class MainWindow(QMainWindow):
                 return
         self._select_tree_path(path)
         self._open_file(path)
+        # Scroll to anchor if provided
+        try:
+            slug = self._anchor_slug(anchor)
+            self._scroll_to_anchor_slug(slug)
+        except Exception:
+            pass
         self.right_panel.focus_link_tab(path)
         self._apply_navigation_focus("navigator")
 
@@ -2429,9 +2437,16 @@ class MainWindow(QMainWindow):
         """Open a page from the Calendar tab without changing tabs."""
         if not path:
             return
-        norm = self._normalize_editor_path(path)
+        # Handle possible anchor fragment in calendar links
+        base, anchor = self._split_link_anchor(path)
+        norm = self._normalize_editor_path(base)
         self._select_tree_path(norm)
         self._open_file(norm)
+        try:
+            slug = self._anchor_slug(anchor)
+            self._scroll_to_anchor_slug(slug)
+        except Exception:
+            pass
         # Keep the Calendar tab active and return focus to its tree
         try:
             self.right_panel.tabs.setCurrentWidget(self.right_panel.calendar_panel)
@@ -3647,17 +3662,26 @@ class MainWindow(QMainWindow):
         """Handle 'Go To Page' from AI chat by focusing the matching page in the editor."""
         if not chat_folder:
             return
-        # Stay on the current page if it already matches this chat's folder
+        # Accept both folder paths and full page refs (may include anchors)
+        base, anchor = self._split_link_anchor(chat_folder)
+        # If base appears to be a file path (ends with PAGE_SUFFIX), normalize directly
+        if base and base.strip().endswith(PAGE_SUFFIX):
+            file_path = self._normalize_editor_path(base)
+        else:
+            file_path = self._folder_to_file_path(base or "/")
+        # Stay on the current page if it already matches this chat's folder/file
         if self.current_path:
             try:
                 current_folder = "/" + Path(self.current_path.lstrip("/")).parent.as_posix()
             except Exception:
                 current_folder = None
-            if current_folder == chat_folder:
+            if current_folder == (base or "/") or self.current_path == file_path:
+                # If an anchor was provided, attempt to scroll within current page
+                if anchor and self.current_path == file_path:
+                    self._scroll_to_anchor_slug(self._anchor_slug(anchor))
                 self.editor.setFocus()
                 self._apply_focus_borders()
                 return
-        file_path = self._folder_to_file_path(chat_folder)
         if not file_path:
             return
         if self.current_path == file_path:
@@ -3668,7 +3692,13 @@ class MainWindow(QMainWindow):
         self.right_panel.focus_ai_chat(chat_folder)
         try:
             self._select_tree_path(file_path)
+            # Open base file then scroll to anchor if provided
             self._open_file(file_path, force=True)
+            try:
+                if anchor:
+                    self._scroll_to_anchor_slug(self._anchor_slug(anchor))
+            except Exception:
+                pass
             self.editor.setFocus()
             self._apply_focus_borders()
         except Exception:

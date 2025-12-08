@@ -2318,6 +2318,11 @@ class MarkdownEditor(QTextEdit):
         if self._ai_actions_enabled and config.load_enable_ai_chats():
             if menu is None:
                 menu = self.createStandardContextMenu()
+                # Replace default copy with sanitized copy and add Copy As Markdown
+                try:
+                    self._install_copy_actions(menu)
+                except Exception:
+                    pass
             ai_action = menu.addAction("AI Actions...")
             ai_action.triggered.connect(self._show_ai_action_overlay)
             self._add_ai_chat_context_actions(menu)
@@ -2328,6 +2333,10 @@ class MarkdownEditor(QTextEdit):
         # Check if right-clicking anywhere in the editor (for Copy Link to Location)
         if self._current_path:
             menu = self.createStandardContextMenu()
+            try:
+                self._install_copy_actions(menu)
+            except Exception:
+                pass
             menu.addSeparator()
             copy_action = menu.addAction("Copy Link to Location")
             # Get heading text if right-click is on a heading line
@@ -2370,6 +2379,74 @@ class MarkdownEditor(QTextEdit):
         text = selected if selected.strip() else self.toPlainText()
         normalized = text.replace("\u2029", "\n").strip()
         return normalized
+
+    def _sanitize_for_clipboard(self, text: str) -> str:
+        """Normalize text for copying to the system clipboard.
+
+        - Replace Unicode paragraph separators with newlines.
+        - Remove non-printable control characters except tab/newline/carriage return.
+        - Trim trailing/leading whitespace.
+        """
+        if text is None:
+            return ""
+        text = text.replace("\u2029", "\n")
+        # Remove low-control characters but keep common whitespace (\n,\r,\t)
+        text = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+", "", text)
+        # Remove BOM, object-replacement, zero-width and bidi control characters,
+        # and private-use-area glyphs that can appear as weird symbols when pasted.
+        try:
+            text = re.sub(
+                r"[\u200B-\u200F\u2028\u202A-\u202E\uFEFF\uFFFC\uE000-\uF8FF]",
+                "",
+                text,
+            )
+        except Exception:
+            pass
+        return text.strip()
+
+    def _install_copy_actions(self, menu: QMenu) -> None:
+        """Replace the default Copy action with sanitized versions and add 'Copy As Markdown'."""
+        if not menu:
+            return
+        actions = menu.actions()
+        copy_act = None
+        for a in actions:
+            t = (a.text() or "").lower()
+            if t.startswith("copy"):
+                copy_act = a
+                break
+        # Create sanitized copy action
+        def do_copy():
+            cursor = self.textCursor()
+            if cursor.hasSelection():
+                txt = cursor.selection().toPlainText()
+            else:
+                txt = self.toPlainText()
+            QApplication.clipboard().setText(self._sanitize_for_clipboard(txt))
+
+        # Create 'Copy As Markdown' action
+        def do_copy_md():
+            cursor = self.textCursor()
+            if cursor.hasSelection():
+                # Convert the selected display text back to storage markdown
+                display_text = cursor.selection().toPlainText()
+                try:
+                    txt = self._from_display(display_text)
+                except Exception:
+                    txt = display_text
+            else:
+                # Use full-document conversion which handles images and link conversions
+                txt = self.to_markdown()
+            # For markdown, keep markup characters but still normalize control chars
+            QApplication.clipboard().setText(self._sanitize_for_clipboard(txt))
+
+        new_copy = menu.addAction("Copy")
+        new_copy.triggered.connect(lambda checked=False: do_copy())
+        md_action = menu.addAction("Copy As Markdown")
+        md_action.triggered.connect(lambda checked=False: do_copy_md())
+        # Remove original copy action if present
+        if copy_act:
+            menu.removeAction(copy_act)
 
     def _emit_ai_chat_send(self) -> None:
         payload = self._ai_chat_payload_text()
