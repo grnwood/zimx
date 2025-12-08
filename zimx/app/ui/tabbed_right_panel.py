@@ -28,6 +28,7 @@ class TabbedRightPanel(QWidget):
     dateActivated = Signal(int, int, int)  # year, month, day (from Calendar tab)
     linkActivated = Signal(str)  # page path from Link Navigator
     calendarPageActivated = Signal(str)  # page path from Calendar tab
+    calendarTaskActivated = Signal(str, int)  # path, line from Calendar tab task list
     aiChatNavigateRequested = Signal(str)  # page path from AI Chat tab
     aiChatResponseCopied = Signal(str)  # status text when chat response copied
     aiOverlayRequested = Signal(str, object)  # text, anchor QPoint
@@ -82,6 +83,7 @@ class TabbedRightPanel(QWidget):
         self.task_panel.taskActivated.connect(self.taskActivated)
         self.calendar_panel.dateActivated.connect(self.dateActivated)
         self.calendar_panel.pageActivated.connect(self.calendarPageActivated)
+        self.calendar_panel.taskActivated.connect(self.calendarTaskActivated)
         self.calendar_panel.openInWindowRequested.connect(self.openInWindowRequested)
         self.link_panel.pageActivated.connect(self.linkActivated)
         self.link_panel.openInWindowRequested.connect(self.openInWindowRequested)
@@ -126,6 +128,11 @@ class TabbedRightPanel(QWidget):
         t1 = time.perf_counter()
         self.link_panel.set_page(relative_path)
         t2 = time.perf_counter()
+        try:
+            if self.calendar_panel and relative_path:
+                self.calendar_panel.set_current_page(relative_path)
+        except Exception:
+            pass
         if _PAGE_LOGGING:
             print(
                 f"[PageLoadAndRender] right panel update attachments={(t1-t0)*1000:.1f}ms links={(t2-t1)*1000:.1f}ms"

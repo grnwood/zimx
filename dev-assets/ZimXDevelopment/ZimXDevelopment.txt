@@ -1,6 +1,6 @@
 # ZimXDevelopment
 Logbook of all the development efforts on zim. yes!
-
+( )  this is due <2025-12-07
 ### Calendar
 (x)  I'm seeing some blue dates on a fresh calendar, i only have the 24th defined?  @cal
 		 	
@@ -19,7 +19,7 @@ Logbook of all the development efforts on zim. yes!
 (x)  when you click a link from a floating editor to a anchor, show the animation  @edit
 (x)  found the vi ; key bug, when i'm in caps it works, when lower it doesn't (maybe win32 only)  @edit
 ( )  figure out a way to not allow crazy links to get generated and pasted @edit				￼
-  			![paste_image_001](./paste_image_001.png)make colon-link (: somelink) processing smarter, like if its in a the middle of the sentence
+  			![paste_image_001](./paste_image_001.png)smarter, like if its in a the middle of the sentence
  		or 8 : 56pm
  		of  This : That  <-- not a link.		
 (x)  add find and replace functionality @edit

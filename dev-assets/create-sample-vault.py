@@ -411,7 +411,7 @@ def _generate_journal_calendar(root: Path, cross_targets: list[str]) -> None:
         year_dir.mkdir(parents=True, exist_ok=True)
         month_details: list[tuple[int, list[date]]] = []
         for month in sorted(set(grouped[year])):
-            day_dates = _write_journal_month(year_dir, year, month, cross_targets)
+            day_dates, day_sub_links = _write_journal_month(year_dir, year, month, cross_targets)
             month_details.append((month, day_dates))
         year_page = year_dir / f"{year:04d}{PAGE_SUFFIX}"
         year_page.write_text(
@@ -677,7 +677,9 @@ def _write_journal_day_subpages(day_dir: Path, entry_date: date, cross_targets: 
     sub_links: list[str] = []
     for topic in picks:
         slug = topic.replace(" ", "")
-        file_path = day_dir / f"{slug}{PAGE_SUFFIX}"
+        sub_dir = day_dir / slug
+        sub_dir.mkdir(parents=True, exist_ok=True)
+        file_path = sub_dir / f"{slug}{PAGE_SUFFIX}"
         colon_path = f"Journal:{entry_date:%Y}:{entry_date:%m}:{entry_date:%d}:{slug}"
         cross_refs = _sample_cross_links(cross_targets, random.randint(3, 6))
         body_parts = [

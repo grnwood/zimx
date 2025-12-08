@@ -527,9 +527,9 @@ class MainWindow(QMainWindow):
         )
         self.right_panel.refresh_tasks()
         self.right_panel.taskActivated.connect(self._open_task_from_panel)
-        self.right_panel.dateActivated.connect(self._open_journal_date)
         self.right_panel.linkActivated.connect(self._open_link_from_panel)
         self.right_panel.calendarPageActivated.connect(self._open_calendar_page)
+        self.right_panel.calendarTaskActivated.connect(self._open_task_from_panel)
         self.right_panel.aiChatNavigateRequested.connect(self._on_ai_chat_navigate)
         self.right_panel.aiChatResponseCopied.connect(
             lambda msg: self.statusBar().showMessage(msg or "Last chat response copied to buffer", 4000)
