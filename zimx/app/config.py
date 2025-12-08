@@ -769,15 +769,28 @@ def search_pages(term: str, limit: int = 50) -> list[dict]:
     conn = _get_conn()
     if not conn:
         return []
-    like = f"%{term.lower()}%"
+    term_lower = term.lower()
+    like = f"%{term_lower}%"
+    exact_path = f"/{term_lower}"
+    starts_path = f"{exact_path}/%"
+    # Prioritize exact leaf matches first, then children, then exact title matches,
+    # then title-like matches, then others (all ordered by updated desc as tiebreaker).
     cur = conn.execute(
         """
         SELECT path, title FROM pages
         WHERE lower(path) LIKE ? OR lower(title) LIKE ?
-        ORDER BY updated DESC
+        ORDER BY
+            CASE
+                WHEN lower(path) = ? THEN 0
+                WHEN lower(path) LIKE ? THEN 1
+                WHEN lower(title) = ? THEN 2
+                WHEN lower(title) LIKE ? THEN 3
+                ELSE 4
+            END,
+            updated DESC
         LIMIT ?
         """,
-        (like, like, limit),
+        (like, like, exact_path, starts_path, term_lower, like, limit),
     )
     return [{"path": row[0], "title": row[1]} for row in cur.fetchall()]
 

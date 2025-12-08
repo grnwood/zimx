@@ -2973,7 +2973,9 @@ class ContextOverlay(QtWidgets.QFrame):
         layout.addWidget(self.filter_edit)
         self.list_widget = QListWidget()
         self.list_widget.setStyleSheet("font-size: 9px;")
+        # Accept selection via keyboard (Enter) or mouse click
         self.list_widget.itemActivated.connect(self._on_item_activated)
+        self.list_widget.itemClicked.connect(self._on_item_activated)
         layout.addWidget(self.list_widget)
         self._candidates: list[ContextCandidate] = []
         self._trigger: Optional[str] = None
@@ -2989,7 +2991,23 @@ class ContextOverlay(QtWidgets.QFrame):
             width = max(520, parent.width() - 16)
             self.setFixedWidth(width)
             self.list_widget.setFixedWidth(width - 16)
-        self.move(position)
+        # Prefer placing above the anchor point so the popup doesn't get
+        # obscured at the bottom of the screen. If there's not enough room
+        # above, fall back to placing below.
+        screen_geo = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        width = self.width()
+        height = self.height() or self.sizeHint().height()
+        margin = 6
+        # Horizontal placement: keep the left edge at the provided x (clamped)
+        left = max(screen_geo.left(), min(position.x(), screen_geo.right() - width))
+        # Try above first
+        above_top = position.y() - height - margin
+        below_top = position.y() + margin
+        if above_top >= screen_geo.top():
+            top = max(screen_geo.top(), min(above_top, screen_geo.bottom() - height))
+        else:
+            top = max(screen_geo.top(), min(below_top, screen_geo.bottom() - height))
+        self.move(QtCore.QPoint(left, top))
         super().show()
         self.filter_edit.setFocus(QtCore.Qt.FocusReason.ShortcutFocusReason)
 
@@ -3098,6 +3116,8 @@ class ContextListPopup(QtWidgets.QFrame):
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.table.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.table.cellActivated.connect(self._handle_cell_activated)
+        # Accept selection via single mouse click as well as keyboard
+        self.table.cellClicked.connect(self._handle_cell_activated)
         layout.addWidget(self.table)
 
     def show_for(self, items: list[ContextItem], position: QtCore.QPoint, width_hint: Optional[int] = None) -> None:
@@ -3130,7 +3150,20 @@ class ContextListPopup(QtWidgets.QFrame):
         if parent:
             width = min(width, parent.width())
         self.setFixedWidth(width)
-        self.move(position)
+        # Prefer to show above the given position when possible (keeps popup
+        # readable when input is at bottom of screen). Otherwise show below.
+        screen_geo = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        self.adjustSize()
+        height = self.height() or self.sizeHint().height()
+        margin = 6
+        left = max(screen_geo.left(), min(position.x(), screen_geo.right() - width))
+        above_top = position.y() - height - margin
+        below_top = position.y() + margin
+        if above_top >= screen_geo.top():
+            top = max(screen_geo.top(), min(above_top, screen_geo.bottom() - height))
+        else:
+            top = max(screen_geo.top(), min(below_top, screen_geo.bottom() - height))
+        self.move(QtCore.QPoint(left, top))
         super().show()
 
     def _context_label(self, item: ContextItem) -> str:
