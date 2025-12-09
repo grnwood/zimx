@@ -16,7 +16,17 @@ Logbook of all the development efforts on zim. yes!
 ( )  add a 'today' button on the calendar widget @cal
 ---
 
+### File Nav
+---
+( )  need to implement a true 'delete' @file
+( ) need to implement a true 'rename' @file
+( ) need to implement a true drag drop/move @file
+[:FileNavResearch|FileNavResearch]
+( )  add a collapse all to top of nav, also a right click expand and collapse feature @file
+
+
 ### Editor
+---
 (x)  I still see sometimes my page doesn't save, there is some kind of navigation why to lose the buffer, keep an eye out.  @edit
 	pretty sure this is VI navigation (soft keys) doing this, need to make sure it fires a write ALL the time. Gotta hitj ctrl-s for now.
 	I found **ONE** : If you activate a link before page saved it loses buffer, need to fix!
@@ -30,6 +40,8 @@ Logbook of all the development efforts on zim. yes!
 (x)  add find and replace functionality @edit
 (x)  give the toc widget more prominence when hovering over a heading @edit
 ( ) implement the full text search with your chatgpt vetted feature @edit
+	[:FullTextSearch|FullTextSearch]
+	
 ( )  when i paste a link i copied from a header or toc bar and paste into page it doesnt create the link in link navigator @edit
 	Ai is really not handling this well, I'm going to have to debug / fix this one myself.
 ( )  i added redo along with undo.  there is still something funky here but its mostly all usable, so leaving alone for now.  @edit
@@ -43,6 +55,7 @@ Logbook of all the development efforts on zim. yes!
 (x)  opened window (at least on calendar) not treated as a first class window in the os tab switcher maybe win32 only? @edit
 ( )  maybe ctrl-enter to get out of vi mode?  moving off home keys to esc is disrupting to flow. @edit
 (x)  when i alt-tab back to docs editor should always load (and scroll if need be) to last cursor position @edit
+( )  when you add a camel case link the page reloads to render and puts cursor at top needs to remove location and scroll there @edit
 
 
 ### Git
@@ -54,10 +67,12 @@ Logbook of all the development efforts on zim. yes!
 		git installed in OS and on path. (or warning)
 		attempt a git init.  Setup a remote origin and auto push?  (auto push on commit?)
 		
-### Indexer
+### Indexer and Link Nav
 ---
 ( )  sometimes ctrl-l link adding is give bad link targets: @index
 ￼
+( )   lets fix the font and make it solid white, maybe have it scale down with the view size @link
+( )  remember prefered / last used view and persist it @link
 
 ### Tasks
 ---
@@ -85,7 +100,6 @@ Logbook of all the development efforts on zim. yes!
 	other ideas:
 		meetings? [:SomeAdditionalideas|SomeAdditionalideas]
 		
-		
 ### Printing
 ---
 ( )  print to browser[:print_to_browser|] feature?  @print  <2025-12-01
@@ -103,3 +117,5 @@ Logbook of all the development efforts on zim. yes!
 ( )  when i send in ai prompts from main editor it doesn't register in that as sent, lets fix @ai
 ( )  funky page load when sending to ai chat @ai
 (x)  one shot promptiong @ai
+( )   the ai tab when it gets focus should never load anything into the editor unless 'load chat for' is enabled. @ai
+( )  my wipe confirm thing is wired to 'refresh models' not the refresh chat button :)  @ai
