@@ -1,6 +1,6 @@
 # ZimXDevelopment
 Logbook of all the development efforts on zim. yes!
-( )  this is due <2025-12-07
+---
 ### Calendar
 (x)  I'm seeing some blue dates on a fresh calendar, i only have the 24th defined?  @cal
 		 	
@@ -10,10 +10,12 @@ Logbook of all the development efforts on zim. yes!
 	move tasks to its own 
 	Tasks can have just the full rail.
 	remove 'show jornal' from left nav since it's under calendar.
-( )  on cal panel insights for day page show all the headings in a clickable outline @cal
-( ) keep the filter across days applied, add a 'clear filter' above insight panel @cal
+(x)  on cal panel insights for day page show all the headings in a clickable outline @cal
+(x) keep the filter across days applied, add a 'clear filter' above insight panel @cal
 	(this is great for clicking around on a filtered view or either review or context on next steps).
-	
+( )  add a 'today' button on the calendar widget @cal
+---
+
 ### Editor
 (x)  I still see sometimes my page doesn't save, there is some kind of navigation why to lose the buffer, keep an eye out.  @edit
 	pretty sure this is VI navigation (soft keys) doing this, need to make sure it fires a write ALL the time. Gotta hitj ctrl-s for now.
@@ -21,17 +23,30 @@ Logbook of all the development efforts on zim. yes!
 (x)  should i use fast api locally if server and ui are in the same place?  @edit
 (x)  when you click a link from a floating editor to a anchor, show the animation  @edit
 (x)  found the vi ; key bug, when i'm in caps it works, when lower it doesn't (maybe win32 only)  @edit
-( )  figure out a way to not allow crazy links to get generated and pasted @edit				￼
-  			![paste_image_001](./paste_image_001.png)smarter, like if its in a the middle of the sentence
+(x)  figure out a way to not allow crazy links to get generated and pasted @edit				￼
+(x)		￼smarter, like if its in a the middle of the sentence
  		or 8 : 56pm
  		of  This : That  <-- not a link.		
 (x)  add find and replace functionality @edit
+( )  give the toc widget more prominence when hovering over a heading @edit
 ( ) implement the full text search with your chatgpt vetted feature @edit
 ( )  when i paste a link i copied from a header or toc bar and paste into page it doesnt create the link in link navigator @edit
 	Ai is really not handling this well, I'm going to have to debug / fix this one myself.
 ( )  i added redo along with undo.  there is still something funky here but its mostly all usable, so leaving alone for now.  @edit
+( )  there is a c++/dump issue sometimes messing around in the jump to or link view, need to investigate. @edit
+( )  strange issue when you edit near the bottom of a page, it doesn't scroll, very annoying.  fix.  @edit
+( )  tags need to be smarter about emails @edit
+		Username: joe.greenwood@capgemini.com
+( )  link pattern needs to be smarter too @edit
+	e.g. this is not a link Password: Py9D+ssJ
+( )  slight oddity with the dirty/save buffer on open as window (win32 only?) since vi edit mode maybe? @edit
+( )  opened window (at least on calendar) not treated as a first class window in the os tab switcher maybe win32 only? @edit
+( )  maybe ctrl-enter to get out of vi mode?  moving off home keys to esc is disrupting to flow. @edit
+( )  when i alt-tab back to docs editor should always load (and scroll if need be) to last cursor position @edit
+
 
 ### Git
+---
 ( )  git support: simple 'version this vault' @edit
 	maybe version this vault, or page... with a note.
 	System pref:  git control for vault?  default no.
@@ -40,10 +55,12 @@ Logbook of all the development efforts on zim. yes!
 		attempt a git init.  Setup a remote origin and auto push?  (auto push on commit?)
 		
 ### Indexer
+---
 ( )  sometimes ctrl-l link adding is give bad link targets: @index
-![paste_image_002](./paste_image_002.png){width=300}
+￼
 
 ### Tasks
+---
 (x)  support hiearchy assignment  @task
 (x) if all tasks on a tag are complete, tag comes out of tags filter (unless show completed is selected)  @task
 (x) if tree is filtered, filter the tasks panel based on tree and sub pages? @task
@@ -53,17 +70,28 @@ Logbook of all the development efforts on zim. yes!
 ( )  double check the searching seems to not be filtering right (tags and tasks text?) @task
 ( )  move my indicators to the right of the panel so the panel shrinks better @task
 	Or, a better treatment?
-
+( )  hierarchial tasks should show a slight visual representation in task bar @task
+			￼
+( )  when flipping toggles on tasks we should update the number next to the tag so counts and data match up. @task
+	
 ### Page Templages
+---
 ( )  ctrl-n should default to the `New Page` template.  @page
-( ) Add some more?  @edit
+( ) Add some more?  @page
 ( )  need to fix template engine. add a open template folder (users .zimx folder overrides). @page
 	probably add !qotd! in there too for fun, any others?
-	
+( )  concept of project template? @page
+	thinking something like:  right click / new project / TSD template.  This might create the folder / page structure automatically.
+	other ideas:
+		meetings? [:SomeAdditionalideas|SomeAdditionalideas]
+		
+		
 ### Printing
+---
 ( )  print to browser[:print_to_browser|] feature?  @print  <2025-12-01
 
 ### Ai Stuff
+---
 ( )  need to add chroma/rag into chat.  @ai
 	* add the page text into chroma by default?
 	* (#) hash tag loads list of file attachements from page?

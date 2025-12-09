@@ -1,0 +1,59 @@
+# Monday, December 08 2025
+---
+Did a bunch of PRs today surrounding the calendar.
+Also worked a lot of the one shot prompting!
+
+Still has some issues with undo/redo buffer :).
+
+my one shot prompt on ibm/granite-4h-tiny:
+> "make me a reverse acrostic from english language each word having to do with personal productivity"
+
+
+Here's a reverse acrostic for each letter of the English alphabet (in reverse order) related to personal productivity:
+
+Z: Zealously pursuing goals with unwavering determination
+Y: Yielding to distractions that hinder progress
+X: Embracing challenges as opportunities for growth and learning
+W: Finding ways to work efficiently, minimizing time wasted
+V: Valuing self-care and maintaining a healthy work-life balance
+U: Overcoming procrastination through effective goal-setting strategies
+T: Tackling tasks with focus and discipline
+S: Simplifying processes to enhance productivity
+R: Recognizing the importance of regular breaks for mental clarity
+Q: Questing for knowledge and skills to improve personal effectiveness
+P: Prioritizing tasks based on their impact and urgency
+O: Organizing time and resources effectively to achieve desired outcomes
+N: Nurturing a growth mindset, continuously seeking improvement
+M: Maintaining motivation even in the face of adversity
+L: Leveraging strengths while addressing weaknesses for optimal performance
+K: Kindling passion for personal development and self-improvement
+J: Justifying actions taken with purpose and intentionality
+I: Igniting inner drive to accomplish goals consistently
+H: Harnessing creativity to overcome obstacles and innovate solutions
+G: Garnering support from mentors, peers, and resources when needed
+F: Fostering positive habits that contribute to long-term success
+E: Embracing flexibility and adaptability in the face of change
+Each letter represents a key aspect or strategy for achieving personal productivity.	
+
+> "make me acrostic from the word 'zimx' each word having to do with personal productivity"
+
+Sure, here's an acrostic poem using the letters in "ZIMX" related to personal productivity:
+
+**Z**est for success  
+**I**nspire daily goals  
+**M**aintain focus and drive  
+**X**cellence through discipline and practice  
+
+Each word encapsulates a key aspect of maintaining high levels of productivity.
+
+This is a lot of fun.
+
+This window is editable within itself.
+No alt-left/right/up/down or vi key navigation.
+ctrl-l works, but ctrl-j does not.
+
+
+My dirty/save buffer doesn't seem to work anymore?
+Interesting.
+
+very intersting.
