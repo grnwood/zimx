@@ -139,7 +139,13 @@ def _normalize_page_link(link: str) -> Optional[str]:
 
     Returns None for external URLs or non-page resources.
     """
-    cleaned = normalize_link_target(link or "").strip()
+    raw = (link or "").strip()
+    # Drop any label/extra text that might remain after parsing (e.g., "target|label")
+    if "|" in raw:
+        raw = raw.split("|", 1)[0]
+    # Drop trailing delimiters (commas/semicolons/periods) that may follow inline lists
+    raw = raw.rstrip(",.;")
+    cleaned = normalize_link_target(raw).strip()
     if not cleaned:
         return None
     if cleaned.startswith(("http://", "https://", "mailto:", "ftp://")):

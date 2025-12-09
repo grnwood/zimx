@@ -537,12 +537,19 @@ class LinkGraphView(QGraphicsView):
         self._ring_depths.clear()
 
     def wheelEvent(self, event):  # type: ignore[override]
-        if event.modifiers() & Qt.ControlModifier:
-            delta = event.angleDelta().y()
+        """Use mouse wheel/trackpad to zoom the graph directly."""
+        # Prefer high-resolution pixel delta (trackpads), fall back to standard angle delta
+        delta = event.pixelDelta().y() if not event.pixelDelta().isNull() else event.angleDelta().y()
+        if delta == 0:
+            delta = event.angleDelta().x() or event.pixelDelta().x()
+        if delta:
+            self._reset_fade()
+            # Scale factor is mild for smooth trackpad scrolling
+            factor = 1.0 + (abs(delta) / 960.0)
             if delta > 0:
-                self.zoom_in()
-            elif delta < 0:
-                self.zoom_out()
+                self._adjust_zoom(factor)
+            else:
+                self._adjust_zoom(1.0 / factor)
             event.accept()
             return
         super().wheelEvent(event)
@@ -556,6 +563,7 @@ class LinkGraphView(QGraphicsView):
     def reset_zoom(self) -> None:
         self._zoom = 1.0
         self._apply_zoom()
+        self._reset_fade()
 
     def _adjust_zoom(self, factor: float) -> None:
         self._zoom = min(2.5, max(0.4, self._zoom * factor))
@@ -568,6 +576,7 @@ class LinkGraphView(QGraphicsView):
         self.fitInView(self._scene_rect, Qt.AspectRatioMode.KeepAspectRatio)
         self.scale(self._zoom, self._zoom)
         self._update_label_visibility()
+        self._reset_fade()
 
     def _spread_positions(self, count: int, start_angle: float, end_angle: float, radius: float) -> list[QPointF]:
         if count <= 0:
@@ -961,6 +970,15 @@ class LinkGraphView(QGraphicsView):
             return
         if not self._fade_timer.isActive():
             self._fade_timer.start()
+
+    def _reset_fade(self) -> None:
+        """Ensure the graph isn't dimmed during zoom gestures."""
+        self._fade_timer.stop()
+        self._fade_direction = 0
+        self._fade_target = 1.0
+        self._fade_opacity = 1.0
+        self._pending_fade_in = False
+        self._update_opacity_effect()
 
     def _advance_fade(self) -> None:
         if self._fade_direction == 0:

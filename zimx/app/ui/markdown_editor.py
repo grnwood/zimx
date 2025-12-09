@@ -558,6 +558,16 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.table_format.setFontFamily(mono_family)
         self.table_format.setFontFixedPitch(True)
         self.table_format.setFontStyleHint(QFont.StyleHint.Monospace)
+        try:
+            base_pt = parent.document().defaultFont().pointSizeF()
+            if base_pt <= 0:
+                base_pt = parent.document().defaultFont().pointSize()
+            if base_pt <= 0:
+                base_pt = 14
+        except Exception:
+            base_pt = 14
+        self._table_font_size = max(6.0, base_pt - 2.0)
+        self.table_format.setFontPointSize(self._table_font_size)
         
         # Strikethrough format
         self.strikethrough_format = QTextCharFormat()
@@ -787,9 +797,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                 self._timing_total += time.perf_counter() - t0
             return
 
-        # Markdown tables: use monospace so pipes align
-        if TABLE_ROW_PATTERN.match(text) or TABLE_SEP_PATTERN.match(text):
-            self.setFormat(0, len(text), self.table_format)
+        is_table = bool(TABLE_ROW_PATTERN.match(text) or TABLE_SEP_PATTERN.match(text))
 
         if text.strip().startswith(("- ", "* ", "+ ", "• ")):
             self.setFormat(0, len(text), self.list_format)
@@ -817,6 +825,10 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         stripped_hr = text.strip()
         if stripped_hr == "---" or stripped_hr == "***" or stripped_hr == "___":
             self.setFormat(0, len(text), self.hr_format)
+        
+        # Apply monospace + compact font to table rows last so pipes align
+        if is_table:
+            self.setFormat(0, len(text), self.table_format)
         
         # Inline code - hide backticks and style content
         iterator = self._code_pattern.globalMatch(text)
@@ -1157,6 +1169,7 @@ class MarkdownEditor(QTextEdit):
     aiActionRequested = Signal(str, str, str)  # title, prompt, text
     findBarRequested = Signal(bool, bool, str)  # replace_mode, backwards_first, seed_query
     viInsertModeChanged = Signal(bool)  # Emits True when editor is in insert mode
+    headingPickerRequested = Signal(object, bool)  # QPoint(global), prefer_above
     _VI_EXTRA_KEY = QTextFormat.UserProperty + 1
     _FLASH_EXTRA_KEY = QTextFormat.UserProperty + 2
 
@@ -1194,6 +1207,7 @@ class MarkdownEditor(QTextEdit):
         self.highlighter = MarkdownHighlighter(self.document())
         self.cursorPositionChanged.connect(self._emit_cursor)
         self.cursorPositionChanged.connect(self._maybe_update_vi_cursor)
+        self.cursorPositionChanged.connect(self._ensure_cursor_margin)
         self._display_guard = False
         self.textChanged.connect(self._enforce_display_symbols)
         self.viewport().installEventFilter(self)
@@ -2274,6 +2288,7 @@ class MarkdownEditor(QTextEdit):
             # Store the image name as unique identifier instead of position
             image_name = fmt.name()
             menu = QMenu(self)
+            self._add_ai_actions_entry(menu)
             for width in (300, 600, 900):
                 action = menu.addAction(f"{width}px")
                 action.triggered.connect(lambda checked=False, w=width, name=image_name: self._resize_image_by_name(name, w))
@@ -2283,8 +2298,6 @@ class MarkdownEditor(QTextEdit):
             menu.addSeparator()
             custom_action = menu.addAction("Custom…")
             custom_action.triggered.connect(lambda checked=False, name=image_name: self._prompt_image_width_by_name(name))
-            # Add AI Chat actions at the top level
-            self._add_ai_chat_context_actions(menu)
             menu.exec(event.globalPos())
             return
         
@@ -2294,6 +2307,7 @@ class MarkdownEditor(QTextEdit):
         plain_link = self._link_under_cursor(click_cursor)
         if md_link or plain_link:
             menu = QMenu(self)
+            self._add_ai_actions_entry(menu)
             # Edit Link option
             edit_action = menu.addAction("Edit Link…")
             edit_action.triggered.connect(lambda: self._edit_link_at_cursor(click_cursor))
@@ -2312,23 +2326,8 @@ class MarkdownEditor(QTextEdit):
             if self._filter_nav_callback and self._current_path:
                 filter_action = menu.addAction("Filter navigator to this subtree")
                 filter_action.triggered.connect(lambda: self._filter_nav_callback(self._current_path or ""))
-
-            # AI Chat actions at the top level
-            self._add_ai_chat_context_actions(menu)
-        if self._ai_actions_enabled and config.load_enable_ai_chats():
-            if menu is None:
-                menu = self.createStandardContextMenu()
-                # Replace default copy with sanitized copy and add Copy As Markdown
-                try:
-                    self._install_copy_actions(menu)
-                except Exception:
-                    pass
-            ai_action = menu.addAction("AI Actions...")
-            ai_action.triggered.connect(self._show_ai_action_overlay)
-            self._add_ai_chat_context_actions(menu)
-            if menu is not None:
-                menu.exec(event.globalPos())
-                return
+            menu.exec(event.globalPos())
+            return
         
         # Check if right-clicking anywhere in the editor (for Copy Link to Location)
         if self._current_path:
@@ -2337,8 +2336,8 @@ class MarkdownEditor(QTextEdit):
                 self._install_copy_actions(menu)
             except Exception:
                 pass
+            self._add_ai_actions_entry(menu)
             menu.addSeparator()
-            copy_action = menu.addAction("Copy Link to Location")
             # Get heading text if right-click is on a heading line
             click_cursor = self.cursorForPosition(event.pos())
             line_no = click_cursor.blockNumber() + 1
@@ -2347,8 +2346,12 @@ class MarkdownEditor(QTextEdit):
                 if int(entry.get("line", 0)) == line_no:
                     heading_text = entry.get("title", "") or None
                     break
-            copy_action.triggered.connect(lambda: self._copy_link_to_location(link_text=None, anchor_text=heading_text))
-            backlinks_action = menu.addAction("Backlinks…")
+            copy_label = "Copy Link to this heading" if heading_text else "Copy Link to this Page"
+            copy_action = menu.addAction(copy_label)
+            copy_action.triggered.connect(
+                lambda: self._copy_link_to_location(link_text=None, anchor_text=heading_text)
+            )
+            backlinks_action = menu.addAction("Backlinks / Navigator")
             backlinks_action.triggered.connect(
                 lambda: self.backlinksRequested.emit(self._current_path or "")
             )
@@ -2363,7 +2366,7 @@ class MarkdownEditor(QTextEdit):
             open_loc_action = menu.addAction("Open File Location")
             open_loc_action.triggered.connect(lambda: self.openFileLocationRequested.emit(self._current_path))
             if self._open_in_window_callback:
-                open_popup_action = menu.addAction("Open in Editor Window")
+                open_popup_action = menu.addAction("Open in New Editor")
                 open_popup_action.triggered.connect(lambda: self._open_in_window_callback(self._current_path or ""))
             if self._filter_nav_callback and self._current_path:
                 filter_action = menu.addAction("Filter navigator to this subtree")
@@ -2508,15 +2511,14 @@ class MarkdownEditor(QTextEdit):
         self.set_vi_mode(self._overlay_vi_mode_before)
         self._overlay_vi_mode_before = None
 
-    def _add_ai_chat_context_actions(self, menu: QMenu) -> None:
-        send_action = QAction("AI Chat: Send to Open Chat\tCtrl+Shift+P", self)
-        send_action.triggered.connect(self._emit_ai_chat_send)
-        start_action = QAction("AI Chat: Start Chat with this Page\tCtrl+Shift+[", self)
-        start_action.setEnabled(bool(self._current_path))
-        start_action.triggered.connect(self._emit_ai_chat_focus)
+    def _add_ai_actions_entry(self, menu: QMenu) -> None:
+        """Insert AI Actions at the top of a context menu (no chat shortcuts)."""
+        if not (self._ai_actions_enabled and config.load_enable_ai_chats()):
+            return
+        ai_action = QAction("AI Actions...\tCtrl+Shift+P", self)
+        ai_action.triggered.connect(self._show_ai_action_overlay)
         first = menu.actions()[0] if menu.actions() else None
-        menu.insertAction(first, start_action)
-        menu.insertAction(first, send_action)
+        menu.insertAction(first, ai_action)
     
     def dragEnterEvent(self, event):  # type: ignore[override]
         """Accept drag events with file URLs."""
@@ -3298,6 +3300,17 @@ class MarkdownEditor(QTextEdit):
         if key == Qt.Key_Question:
             self.request_find_bar(replace=False, backwards=True, seed=self._search_seed_query())
             return True
+        if key == Qt.Key_T and not shift:
+            cursor_rect = self.cursorRect()
+            viewport = self.viewport()
+            prefer_above = False
+            try:
+                prefer_above = cursor_rect.center().y() > (viewport.height() // 2)
+            except Exception:
+                prefer_above = False
+            global_point = viewport.mapToGlobal(cursor_rect.bottomLeft())
+            self.headingPickerRequested.emit(global_point, prefer_above)
+            return True
         if key == Qt.Key_N:
             self.search_repeat_last(reverse=False)
             return True
@@ -3386,8 +3399,8 @@ class MarkdownEditor(QTextEdit):
             self._vi_last_edit = self._vi_cut_selection_or_char
             return True
         if key == Qt.Key_D and not shift:
-            self._vi_delete_line()
-            self._vi_last_edit = self._vi_delete_line
+            self._vi_delete_selection_or_line()
+            self._vi_last_edit = self._vi_delete_selection_or_line
             return True
         if key == Qt.Key_R and not shift:
             self._vi_replace_pending = True
@@ -3424,6 +3437,7 @@ class MarkdownEditor(QTextEdit):
         cursor = self.textCursor()
         mode = QTextCursor.KeepAnchor if select else QTextCursor.MoveAnchor
         cursor.movePosition(op, mode, max(1, count))
+        cursor = self._clamp_cursor(cursor)
         self.setTextCursor(cursor)
         if not select and op in (QTextCursor.Left, QTextCursor.Right):
             # Skip hidden link sentinels so vi-mode can enter/exit links cleanly
@@ -3442,6 +3456,7 @@ class MarkdownEditor(QTextEdit):
         stripped = text.lstrip(" \t")
         offset = len(text) - len(stripped)
         cursor.setPosition(block.position() + offset)
+        cursor = self._clamp_cursor(cursor)
         self.setTextCursor(cursor)
 
     def _vi_move_to_file_start(self) -> None:
@@ -3635,6 +3650,20 @@ class MarkdownEditor(QTextEdit):
             cursor.deleteChar()
         cursor.endEditBlock()
         self.setTextCursor(cursor)
+    
+    def _vi_delete_selection_or_line(self) -> None:
+        """Delete current selection; if none, delete the current line. Does not yank."""
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+        if cursor.hasSelection():
+            cursor.removeSelectedText()
+        else:
+            cursor.select(QTextCursor.LineUnderCursor)
+            cursor.removeSelectedText()
+            if not cursor.atEnd():
+                cursor.deleteChar()
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
 
     def _vi_replace_char(self, char: str) -> None:
         if not char:
@@ -3727,6 +3756,31 @@ class MarkdownEditor(QTextEdit):
         self._vi_last_cursor_pos = pos
         self._update_vi_cursor()
 
+    def _clamp_cursor(self, cursor: QTextCursor) -> QTextCursor:
+        """Clamp cursor position to the document length to avoid out-of-range warnings."""
+        try:
+            length = len(self.toPlainText())
+        except Exception:
+            length = cursor.document().characterCount()
+        safe = max(0, min(cursor.position(), max(0, length)))
+        if safe != cursor.position():
+            cursor.setPosition(safe)
+        return cursor
+
+    def _ensure_cursor_margin(self) -> None:
+        """Keep a small margin at the bottom of the viewport for visibility while editing."""
+        sb = self.verticalScrollBar()
+        if not sb:
+            return
+        rect = self.cursorRect()
+        viewport = self.viewport()
+        if not viewport:
+            return
+        view_h = viewport.height()
+        margin = 48
+        overshoot = rect.bottom() - (view_h - margin)
+        if overshoot > 0:
+            sb.setValue(min(sb.maximum(), sb.value() + overshoot))
     def _update_vi_cursor(self) -> None:
         if not self._vi_mode_active or not self._vi_block_cursor_enabled:
             # Clear any vi-mode selection overlay but preserve other selections (e.g., flashes)
@@ -4354,20 +4408,23 @@ class MarkdownEditor(QTextEdit):
         end_delta = 0
         modified = False
         for idx, blk in enumerate(blocks):
-            line_cursor = QTextCursor(blk)
-            line_cursor.select(QTextCursor.LineUnderCursor)
+            line_cursor = QTextCursor(self.document())
+            line_start = blk.position()
             text = blk.text()
             if dedent:
                 new_line, removed = self._dedent_line_text(text, indent_unit)
                 if removed == 0:
                     continue
-                line_cursor.insertText(new_line)
+                line_cursor.setPosition(line_start)
+                line_cursor.setPosition(line_start + removed, QTextCursor.KeepAnchor)
+                line_cursor.removeSelectedText()
                 modified = True
                 end_delta -= removed
                 if idx == 0:
                     start_delta -= removed
             else:
-                line_cursor.insertText(indent_unit + text)
+                line_cursor.setPosition(line_start)
+                line_cursor.insertText(indent_unit)
                 modified = True
                 end_delta += len(indent_unit)
                 if idx == 0:

@@ -600,6 +600,66 @@ def save_editor_splitter_state(state: str) -> None:
     conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("editor_splitter_state", state))
     conn.commit()
 
+def load_panel_visibility() -> dict:
+    """Load persisted panel visibility states for main/left/right rails."""
+    conn = _get_conn()
+    if not conn:
+        return {}
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("panel_visibility",))
+    row = cur.fetchone()
+    if not row:
+        return {}
+    try:
+        return json.loads(row[0]) if row[0] else {}
+    except Exception:
+        return {}
+
+def save_panel_visibility(left_visible: bool, right_visible: bool) -> None:
+    """Persist panel visibility for the left (tree) and right (tabs) rails."""
+    conn = _get_conn()
+    if not conn:
+        return
+    payload = json.dumps({"left": bool(left_visible), "right": bool(right_visible)})
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("panel_visibility", payload))
+    conn.commit()
+
+def load_default_page_template() -> str:
+    """Load preferred template name (stem) for new pages."""
+    conn = _get_conn()
+    if not conn:
+        return "Default"
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("default_page_template",))
+    row = cur.fetchone()
+    return (row[0] or "Default") if row else "Default"
+
+def save_default_page_template(name: str) -> None:
+    """Persist preferred template name (stem) for new pages."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("default_page_template", name or "Default"))
+    conn.commit()
+
+def load_default_journal_template() -> str:
+    """Load preferred template name (stem) for new journal entries."""
+    conn = _get_conn()
+    if not conn:
+        return "JournalDay"
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("default_journal_template",))
+    row = cur.fetchone()
+    return (row[0] or "JournalDay") if row else "JournalDay"
+
+def save_default_journal_template(name: str) -> None:
+    """Persist preferred template name (stem) for new journal entries."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute(
+        "REPLACE INTO kv(key, value) VALUES(?, ?)",
+        ("default_journal_template", name or "JournalDay"),
+    )
+    conn.commit()
+
 
 def load_dialog_geometry(dialog_name: str) -> Optional[str]:
     """Load the saved dialog geometry (base64 encoded QByteArray)."""

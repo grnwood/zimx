@@ -28,21 +28,21 @@ Logbook of all the development efforts on zim. yes!
  		or 8 : 56pm
  		of  This : That  <-- not a link.		
 (x)  add find and replace functionality @edit
-( )  give the toc widget more prominence when hovering over a heading @edit
+(x)  give the toc widget more prominence when hovering over a heading @edit
 ( ) implement the full text search with your chatgpt vetted feature @edit
 ( )  when i paste a link i copied from a header or toc bar and paste into page it doesnt create the link in link navigator @edit
 	Ai is really not handling this well, I'm going to have to debug / fix this one myself.
 ( )  i added redo along with undo.  there is still something funky here but its mostly all usable, so leaving alone for now.  @edit
 ( )  there is a c++/dump issue sometimes messing around in the jump to or link view, need to investigate. @edit
-( )  strange issue when you edit near the bottom of a page, it doesn't scroll, very annoying.  fix.  @edit
+(x)  strange issue when you edit near the bottom of a page, it doesn't scroll, very annoying.  fix.  @edit
 ( )  tags need to be smarter about emails @edit
 		Username: joe.greenwood@capgemini.com
 ( )  link pattern needs to be smarter too @edit
 	e.g. this is not a link Password: Py9D+ssJ
-( )  slight oddity with the dirty/save buffer on open as window (win32 only?) since vi edit mode maybe? @edit
-( )  opened window (at least on calendar) not treated as a first class window in the os tab switcher maybe win32 only? @edit
+(x)  slight oddity with the dirty/save buffer on open as window (win32 only?) since vi edit mode maybe? @edit
+(x)  opened window (at least on calendar) not treated as a first class window in the os tab switcher maybe win32 only? @edit
 ( )  maybe ctrl-enter to get out of vi mode?  moving off home keys to esc is disrupting to flow. @edit
-( )  when i alt-tab back to docs editor should always load (and scroll if need be) to last cursor position @edit
+(x)  when i alt-tab back to docs editor should always load (and scroll if need be) to last cursor position @edit
 
 
 ### Git
@@ -103,4 +103,3 @@ Logbook of all the development efforts on zim. yes!
 ( )  when i send in ai prompts from main editor it doesn't register in that as sent, lets fix @ai
 ( )  funky page load when sending to ai chat @ai
 (x)  one shot promptiong @ai
-

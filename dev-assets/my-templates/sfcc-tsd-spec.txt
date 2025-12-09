@@ -1,0 +1,211 @@
+# {{PageName}}
+Created {{DayDateYear}}
+{{DOW}}, {{Month}} {{dd}} {{YYYY}}
+
+---
+
+## SOW Description
+Reference the SOW or project brief. Summarize what this spec is delivering and call out scope, constraints, and any relevant SOW identifiers or Jira epics.
+
+---
+
+## Business Context & Goals
+Describe the business problem, customer impact, KPIs, and the high-level reason this work exists.
+
+---
+
+## Functional Overview
+Explain what the feature does at a conceptual level. Avoid low-level technical detail. Focus on user behavior and expected outcomes.
+
+---
+
+## User Journeys / Use Cases
+
+- Primary Flow:
+- Alternative Flow(s):
+- Error / Edge Cases:
+
+---
+
+## Sites & Environments
+
+- Sites:
+- Locales:
+- Environments (Sandbox / Staging / Production):
+- Connected Systems (OMS, WMS, ESB, Vendor APIs):
+
+---
+
+## Dependencies & Assumptions
+
+### Assumptions
+-
+
+### Dependencies
+-
+
+---
+
+## Metadata & Custom Attributes
+
+| Object / Type | Attribute ID | Data Type | Description | Required? |
+|---------------|--------------|-----------|-------------|-----------|
+|               |              |           |             |           |
+
+---
+
+## Site Preferences
+
+| ID | Name | Type | Description | Default |
+|----|------|------|-------------|---------|
+|    |      |      |             |         |
+
+---
+
+## Jobs / Schedules
+
+| Job ID | Description | Frequency | Trigger Source |
+|--------|-------------|-----------|----------------|
+|        |             |           |                |
+
+---
+
+## Volume & Performance Expectations
+
+- Estimated API calls/day:
+- Peak traffic windows:
+- Timeout requirements:
+- Expected response sizes:
+
+---
+
+## Integration Overview
+
+- External system:
+- Service Framework ID(s):
+- Protocol/Format (REST, SOAP, JSON, XML):
+- Data transform requirements:
+
+---
+
+## Credentials & Endpoints
+
+| Environment | Endpoint URL | Auth Method | Notes |
+|-------------|---------------|-------------|--------|
+| Test        |               |             |        |
+| Prod        |               |             |        |
+
+Credentials stored in: **BM → Administration → Operations → Services → Credentials**
+
+---
+
+## Timeout & Retry Settings
+
+| Service ID | Timeout (ms) | Retries | Circuit Breaker? | Notes |
+|------------|--------------|---------|------------------|-------|
+|            |              |         |                  |       |
+
+---
+
+## Service Framework & Logging
+
+- Service IDs:
+- Log Category Prefix:
+- Log Structure (req, res, correlation IDs, timings):
+- Sensitive data handling:
+
+---
+
+## Availability & Fallback Behavior
+
+- User-facing fallback behavior:
+- Localized error messaging:
+- What happens if external service is down:
+
+---
+
+## UX / UI Behavior
+
+- SFRA controllers/routes impacted:
+- Templates/ISML/Page Designer components:
+- Error messages and validation:
+- Accessibility notes:
+
+---
+
+## Security & Compliance
+
+- PCI implications:
+- PII handling:
+- Encryption / masking:
+- GDPR/CCPA considerations:
+
+---
+
+## Developer Notes
+
+- Implementation patterns:
+- Reuse of cartridge utilities:
+- Hook or middleware usage:
+- Testing considerations:
+
+---
+
+## Expected Task List
+
+- [ ] Data model changes
+- [ ] Site preferences
+- [ ] Service configuration
+- [ ] Integration logic
+- [ ] Controllers / SFRA updates
+- [ ] Templates / UI updates
+- [ ] Logging / monitoring
+- [ ] Unit & integration tests
+- [ ] Deployment steps
+
+---
+
+## Request Mapping
+
+Describe how SFCC maps request fields to the external system.
+
+| External Field | SFCC Source | Type | Notes |
+|----------------|-------------|------|-------|
+|                |             |      |       |
+
+Include example payload if needed.
+
+---
+
+## Response Mapping
+
+Describe how response fields map into SFCC objects, models, or custom attributes.
+
+| External Field | SFCC Target | Type | Notes |
+|----------------|-------------|------|-------|
+|                |             |      |       |
+
+---
+
+## Error Handling & Failed Responses
+
+- Timeout behavior
+- 4xx and 5xx handling
+- Malformed responses
+- Graceful fallback
+- User messaging
+
+---
+
+## Additional Technical References
+
+- Vendor API documentation:
+- Internal architecture diagrams:
+- Related specifications:
+
+---
+
+## Screenshots & Diagrams
+
+(Add UX mocks, error states, or sequence diagrams here.)
+

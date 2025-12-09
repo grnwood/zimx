@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QSpinBox,
 )
+from pathlib import Path
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QApplication
 
@@ -158,6 +159,37 @@ class PreferencesDialog(QDialog):
         self._load_pygments_styles()
         row3.addWidget(self.pygments_style_combo, 1)
         self.layout.addLayout(row3)
+
+        # Template defaults
+        self.layout.addSpacing(10)
+        template_label = QLabel("<b>Templates</b>")
+        self.layout.addWidget(template_label)
+        template_names = self._template_names()
+        row_tpl_page = QHBoxLayout()
+        row_tpl_page.addWidget(QLabel("Default Template for New Page:"))
+        self.page_template_combo = QComboBox()
+        self.page_template_combo.addItems(template_names)
+        try:
+            current_page_tpl = config.load_default_page_template()
+        except Exception:
+            current_page_tpl = "Default"
+        if current_page_tpl in template_names:
+            self.page_template_combo.setCurrentText(current_page_tpl)
+        row_tpl_page.addWidget(self.page_template_combo, 1)
+        self.layout.addLayout(row_tpl_page)
+
+        row_tpl_journal = QHBoxLayout()
+        row_tpl_journal.addWidget(QLabel("Default Template for New Journal Entry:"))
+        self.journal_template_combo = QComboBox()
+        self.journal_template_combo.addItems(template_names)
+        try:
+            current_journal_tpl = config.load_default_journal_template()
+        except Exception:
+            current_journal_tpl = "JournalDay"
+        if current_journal_tpl in template_names:
+            self.journal_template_combo.setCurrentText(current_journal_tpl)
+        row_tpl_journal.addWidget(self.journal_template_combo, 1)
+        self.layout.addLayout(row_tpl_journal)
 
         # Vault behavior
         vault_label = QLabel("<b>Vault</b>")
@@ -325,6 +357,11 @@ class PreferencesDialog(QDialog):
         config.save_vault_force_read_only(self.force_read_only_checkbox.isChecked())
         config.save_non_actionable_task_tags(self.non_actionable_tags_edit.text())
         try:
+            config.save_default_page_template(self.page_template_combo.currentText() or "Default")
+            config.save_default_journal_template(self.journal_template_combo.currentText() or "JournalDay")
+        except Exception:
+            pass
+        try:
             config.save_pygments_style(self.pygments_style_combo.currentText() or "monokai")
         except Exception:
             pass
@@ -341,6 +378,24 @@ class PreferencesDialog(QDialog):
             combo.addItem(family, family)
         combo.setInsertPolicy(QComboBox.NoInsert)
         return combo
+    
+    def _template_names(self) -> list[str]:
+        """Return available template names (stems) from built-in and user templates."""
+        names: list[str] = []
+        builtin_dir = Path(__file__).parent.parent.parent / "templates"
+        user_dir = Path.home() / ".zimx" / "templates"
+        for tpl_dir in (builtin_dir, user_dir):
+            if tpl_dir.exists():
+                for tpl in sorted(tpl_dir.glob("*.txt")):
+                    names.append(tpl.stem)
+        # Preserve order but drop duplicates
+        seen = set()
+        unique = []
+        for n in names:
+            if n not in seen:
+                seen.add(n)
+                unique.append(n)
+        return unique or ["Default"]
 
     def _select_font(self, combo: QComboBox, family: str | None) -> None:
         if not family:

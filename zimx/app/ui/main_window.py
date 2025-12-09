@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import faulthandler
+import re
 
 import httpx
 from PySide6.QtCore import (
@@ -76,6 +77,7 @@ from .tabbed_right_panel import TabbedRightPanel
 from .task_panel import TaskPanel
 from .link_navigator_panel import LinkNavigatorPanel
 from .ai_chat_panel import AIChatPanel
+from .calendar_panel import CalendarPanel
 from .jump_dialog import JumpToPageDialog
 from .toc_widget import TableOfContentsWidget
 from .heading_utils import heading_slug
@@ -213,7 +215,6 @@ class FindReplaceBar(QWidget):
             "}"
             "QLineEdit:focus {"
             "  border: 1px solid #5aa1ff;"
-            "  box-shadow: 0 0 6px rgba(90,161,255,0.45);"
             "}"
             "QPushButton {"
             "  padding: 4px 8px;"
@@ -450,6 +451,7 @@ class MainWindow(QMainWindow):
         self.editor.imageSaved.connect(self._on_image_saved)
         self.editor.textChanged.connect(lambda: self.autosave_timer.start())
         self.editor.focusLost.connect(lambda: self._save_current_file(auto=True))
+        self.editor.cursorMoved.connect(self._on_editor_cursor_moved)
         self.editor.linkActivated.connect(lambda link: self._open_camel_link(link, focus_target="editor"))
         self.editor.linkHovered.connect(self._on_link_hovered)
         self.editor.linkCopied.connect(self._on_link_copied)
@@ -466,6 +468,7 @@ class MainWindow(QMainWindow):
         self.editor.aiChatSendRequested.connect(self._send_selection_to_ai_chat)
         self.editor.aiChatPageFocusRequested.connect(self._focus_ai_chat_for_page)
         self.editor.aiActionRequested.connect(self._handle_ai_action)
+        self.editor.headingPickerRequested.connect(self._show_heading_picker_popup)
         self.editor.linkActivated.connect(self._open_link_in_context)
         self.editor.set_open_in_window_callback(self._open_page_editor_window)
         self.editor.set_filter_nav_callback(self._set_nav_filter)
@@ -530,6 +533,11 @@ class MainWindow(QMainWindow):
             ai_chat_font_size=ai_font_size,
             http_client=self.http,
         )
+        try:
+            self.right_panel.setMinimumWidth(0)
+            self.right_panel.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Expanding)
+        except Exception:
+            pass
         self.right_panel.refresh_tasks()
         self.right_panel.taskActivated.connect(self._open_task_from_panel)
         self.right_panel.linkActivated.connect(self._open_link_from_panel)
@@ -542,8 +550,10 @@ class MainWindow(QMainWindow):
         self.right_panel.aiOverlayRequested.connect(self._on_ai_overlay_requested)
         self.right_panel.openInWindowRequested.connect(self._open_page_editor_window)
         self.right_panel.openTaskWindowRequested.connect(self._open_task_panel_window)
+        self.right_panel.openCalendarWindowRequested.connect(self._open_calendar_panel_window)
         self.right_panel.openLinkWindowRequested.connect(self._open_link_panel_window)
         self.right_panel.openAiWindowRequested.connect(self._open_ai_chat_window)
+        self.right_panel.filterClearRequested.connect(self._clear_nav_filter)
         try:
             self.right_panel.task_panel.focusGained.connect(self._suspend_vi_for_tasks)
         except Exception:
@@ -618,10 +628,13 @@ class MainWindow(QMainWindow):
         # Add history buttons container
         self.history_container = QWidget()
         self.history_container.setStyleSheet("")  # Clear any inherited styles
+        self.history_container.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.history_container.setMinimumWidth(0)
         self.history_layout = QHBoxLayout(self.history_container)
         self.history_layout.setContentsMargins(0, 0, 0, 0)
         self.history_layout.setSpacing(4)
-        history_bar_layout.addWidget(self.history_container)
+        self.history_layout.setAlignment(Qt.AlignLeft)
+        history_bar_layout.addWidget(self.history_container, 1)
         
         # Add spacer to push buttons to the left
         history_spacer = QWidget()
@@ -660,6 +673,10 @@ class MainWindow(QMainWindow):
         view_vault_disk_action.setToolTip("Open the vault folder in your system file manager")
         view_vault_disk_action.triggered.connect(self._open_vault_on_disk)
         vault_menu.addAction(view_vault_disk_action)
+        open_templates_action = QAction("Open Template Folder", self)
+        open_templates_action.setToolTip("Open or create ~/.zimx/templates in your file manager")
+        open_templates_action.triggered.connect(self._open_user_templates_folder)
+        vault_menu.addAction(open_templates_action)
         view_menu = self.menuBar().addMenu("View")
         reset_view_action = QAction("Reset View/Layout", self)
         reset_view_action.setToolTip("Reset window size and splitter positions to defaults")
@@ -669,6 +686,9 @@ class MainWindow(QMainWindow):
         task_window_action = QAction("Open Task Panel Window", self)
         task_window_action.triggered.connect(self._open_task_panel_window)
         view_menu.addAction(task_window_action)
+        calendar_window_action = QAction("Open Calendar Window", self)
+        calendar_window_action.triggered.connect(self._open_calendar_panel_window)
+        view_menu.addAction(calendar_window_action)
         link_window_action = QAction("Open Link Navigator Window", self)
         link_window_action.triggered.connect(self._open_link_panel_window)
         view_menu.addAction(link_window_action)
@@ -836,6 +856,20 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Opened vault folder: {vault_path}")
         else:
             self._alert(f"Could not open vault folder: {vault_path}")
+    
+    def _open_user_templates_folder(self) -> None:
+        """Open or create the user template folder (~/.zimx/templates) in the system file manager."""
+        tmpl_dir = Path.home() / ".zimx" / "templates"
+        try:
+            tmpl_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            self._alert(f"Could not create template folder: {exc}")
+            return
+        opened = self._open_in_file_manager(tmpl_dir)
+        if opened:
+            self.statusBar().showMessage(f"Opened template folder: {tmpl_dir}", 3000)
+        else:
+            self._alert(f"Could not open template folder: {tmpl_dir}")
 
     def _register_shortcuts(self) -> None:
         save_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
@@ -915,8 +949,10 @@ class MainWindow(QMainWindow):
 
     def _show_find_bar(self, *, replace: bool, backwards: bool = False, seed: Optional[str] = None) -> None:
         query = seed if seed is not None else self._selected_text_for_search()
+        query = self._sanitize_find_query(query)
         if not query:
             query = self.editor.last_search_query()
+        query = self._sanitize_find_query(query)
         self.find_bar.show_bar(replace=replace, query=query or "", backwards=backwards)
 
     def _on_editor_find_requested(self, replace_mode: bool, backwards: bool, seed_query: str) -> None:
@@ -924,6 +960,7 @@ class MainWindow(QMainWindow):
 
     def _on_find_next_requested(self, query: str, backwards: bool, case_sensitive: bool) -> None:
         search_query = query.strip() or self.editor.last_search_query() or self._selected_text_for_search()
+        search_query = self._sanitize_find_query(search_query)
         if not search_query:
             self.statusBar().showMessage("Enter text to find.", 2000)
             self.find_bar.focus_query()
@@ -1335,6 +1372,14 @@ class MainWindow(QMainWindow):
         config.save_editor_splitter_state(editor_splitter_state)
         if _DETAILED_LOGGING:
             print(f"[Geometry] Saved editor splitter state: {len(editor_splitter_state)} chars")
+        # Save panel visibility
+        try:
+            left_visible = self.main_splitter.sizes()[0] > 0
+            right_sizes = self.editor_split.sizes()
+            right_visible = self.right_panel.isVisible() and (len(right_sizes) >= 2 and right_sizes[1] > 0)
+            config.save_panel_visibility(left_visible, right_visible)
+        except Exception:
+            pass
 
     def _restore_geometry(self) -> None:
         """Restore window geometry and splitter positions."""
@@ -1384,6 +1429,31 @@ class MainWindow(QMainWindow):
         else:
             if _DETAILED_LOGGING:
                 print("[Geometry] No saved editor splitter state found")
+        
+        # Restore panel visibility (overrides splitter sizes if hidden)
+        vis = {}
+        try:
+            vis = config.load_panel_visibility() or {}
+        except Exception:
+            vis = {}
+        left_visible = vis.get("left", True)
+        right_visible = vis.get("right", True)
+        try:
+            if not left_visible:
+                sizes = self.main_splitter.sizes()
+                if sizes:
+                    self._saved_left_width = sizes[0]
+                total = sum(sizes) or max(1, self.main_splitter.width())
+                self.main_splitter.setSizes([0, total])
+            if not right_visible:
+                sizes = self.editor_split.sizes()
+                if sizes:
+                    self._saved_right_width = sizes[1] if len(sizes) > 1 else getattr(self, "_saved_right_width", 360)
+                total = sum(sizes) or max(1, self.editor_split.width())
+                self.right_panel.hide()
+                self.editor_split.setSizes([total, 0])
+        except Exception:
+            pass
 
     def _reset_view_layout(self) -> None:
         """Reset window geometry and splitter positions to defaults."""
@@ -1391,7 +1461,7 @@ class MainWindow(QMainWindow):
             conn = config._get_conn()
             if conn:
                 conn.execute(
-                    "DELETE FROM kv WHERE key IN ('window_geometry','splitter_state','editor_splitter_state')"
+                    "DELETE FROM kv WHERE key IN ('window_geometry','splitter_state','editor_splitter_state','panel_visibility')"
                 )
                 conn.commit()
         except Exception:
@@ -1571,7 +1641,8 @@ class MainWindow(QMainWindow):
         """Enable tree filter for the given folder path."""
         if not path:
             return
-        self._nav_filter_path = path if path.startswith("/") else f"/{path}"
+        normalized = self._file_path_to_folder(path if path.startswith("/") else f"/{path}")
+        self._nav_filter_path = normalized or "/"
         try:
             self.right_panel.task_panel.set_navigation_filter(self._nav_filter_path, refresh=False)
         except Exception:
@@ -1598,6 +1669,166 @@ class MainWindow(QMainWindow):
     def _apply_nav_filter_style(self) -> None:
         """Refresh focus borders to reflect filter state."""
         self._apply_focus_borders()
+
+    def _sanitize_find_query(self, text: Optional[str]) -> str:
+        """Strip control/sentinel characters from seeded find queries."""
+        if not text:
+            return ""
+        cleaned = text.replace("\u2029", "\n")
+        try:
+            cleaned = re.sub(r"[\x00-\x1F\x7F]", "", cleaned)
+            cleaned = re.sub(r"[\uE000-\uF8FF]", "", cleaned)  # strip private-use sentinels (e.g., headings)
+        except Exception:
+            pass
+        return cleaned.strip()
+
+    def _resolve_template_path(self, name: str, fallback: str) -> Path:
+        """Return a template path by stem, falling back if missing."""
+        templates_root = Path(__file__).parent.parent.parent / "templates"
+        user_templates = Path.home() / ".zimx" / "templates"
+        candidates = [
+            user_templates / f"{(name or '').strip()}.txt",
+            templates_root / f"{(name or '').strip()}.txt",
+            user_templates / f"{fallback}.txt",
+            templates_root / f"{fallback}.txt",
+        ]
+        for cand in candidates:
+            if cand.exists():
+                return cand
+        return templates_root / f"{fallback}.txt"
+
+    def _cursor_at_position(self, pos: int) -> QTextCursor:
+        """Return a cursor clamped to the document length."""
+        cursor = self.editor.textCursor()
+        try:
+            length = len(self.editor.toPlainText())
+        except Exception:
+            length = cursor.document().characterCount()
+        safe_max = max(0, length)
+        cursor.setPosition(max(0, min(pos, safe_max)))
+        return cursor
+
+    def _show_heading_picker_popup(self, global_pos, prefer_above: bool = False) -> None:
+        """Show a filterable heading picker near the cursor (vi 't')."""
+        headings = self._toc_headings or []
+        if not headings:
+            return
+        # Dispose any existing picker
+        if hasattr(self, "_heading_picker") and self._heading_picker:
+            try:
+                self._heading_picker.close()
+            except Exception:
+                pass
+        popup = QWidget(self, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+        popup.setStyleSheet(
+            "QWidget { background: rgba(32,32,32,240); border: 1px solid #666; border-radius: 6px; }"
+            "QLineEdit { border: 1px solid #777; border-radius: 4px; padding: 4px 6px; }"
+            "QListWidget { background: transparent; color: #f5f5f5; border: none; }"
+            "QListWidget::item { padding: 4px 6px; }"
+            "QListWidget::item:selected { background: rgba(90,161,255,80); }"
+        )
+        layout = QVBoxLayout(popup)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+        filter_edit = QLineEdit(popup)
+        filter_edit.setPlaceholderText("Filter headings…")
+        list_widget = QListWidget(popup)
+        layout.addWidget(filter_edit)
+        layout.addWidget(list_widget, 1)
+
+        def populate(query: str = "") -> None:
+            list_widget.clear()
+            needle = query.lower().strip()
+            for h in headings:
+                title = h.get("title") or "(heading)"
+                if needle and needle not in title.lower():
+                    continue
+                line = h.get("line", 1)
+                level = max(1, min(5, int(h.get("level", 1))))
+                indent = "    " * (level - 1)
+                item = QListWidgetItem(f"{indent}{title}  (line {line})")
+                item.setData(Qt.UserRole, h)
+                list_widget.addItem(item)
+            if list_widget.count():
+                list_widget.setCurrentRow(0)
+
+        def activate_current() -> None:
+            item = list_widget.currentItem()
+            if not item:
+                popup.close()
+                return
+            data = item.data(Qt.UserRole) or {}
+            try:
+                pos = int(data.get("position", 0))
+            except Exception:
+                pos = 0
+            cursor = self._cursor_at_position(max(0, pos))
+            self._animate_or_flash_to_cursor(cursor)
+            popup.close()
+            QTimer.singleShot(0, lambda: self.editor.setFocus(Qt.OtherFocusReason))
+
+        filter_edit.textChanged.connect(populate)
+        list_widget.itemDoubleClicked.connect(lambda *_: activate_current())
+        list_widget.itemActivated.connect(lambda *_: activate_current())
+
+        editor_ref = self.editor
+
+        class _PickerFilter(QObject):
+            def eventFilter(self, obj, ev):  # type: ignore[override]
+                if ev.type() == QEvent.KeyPress:
+                    if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
+                        activate_current()
+                        return True
+                    if ev.key() == Qt.Key_J and ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
+                        row = list_widget.currentRow()
+                        if list_widget.count():
+                            list_widget.setCurrentRow(min(list_widget.count() - 1, row + 1))
+                        return True
+                    if ev.key() == Qt.Key_K and ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
+                        row = list_widget.currentRow()
+                        if list_widget.count():
+                            list_widget.setCurrentRow(max(0, row - 1))
+                        return True
+                    if ev.key() == Qt.Key_Escape:
+                        popup.close()
+                        if editor_ref:
+                            QTimer.singleShot(0, lambda: editor_ref.setFocus(Qt.OtherFocusReason))
+                        return True
+                return False
+
+        filt = _PickerFilter(popup)
+        filter_edit.installEventFilter(filt)
+        list_widget.installEventFilter(filt)
+        populate("")
+
+        # Position near cursor, above or below based on preference and space
+        popup.resize(360, min(320, max(160, list_widget.sizeHintForRow(0) * min(8, list_widget.count()) + 64)))
+        screen = QApplication.primaryScreen().availableGeometry()
+        size = popup.size()
+        x = max(screen.x(), min(global_pos.x(), screen.x() + screen.width() - size.width()))
+        if prefer_above:
+            y = global_pos.y() - size.height() - 8
+            if y < screen.y():
+                y = global_pos.y() + 12
+        else:
+            y = global_pos.y() + 12
+            if y + size.height() > screen.y() + screen.height():
+                y = global_pos.y() - size.height() - 8
+        popup.move(x, y)
+        popup.show()
+        popup.raise_()
+        filter_edit.setFocus()
+        self._heading_picker = popup
+
+    def _save_panel_visibility(self) -> None:
+        """Persist current left/right panel visibility to config."""
+        try:
+            left_visible = self.main_splitter.sizes()[0] > 0
+            right_sizes = self.editor_split.sizes()
+            right_visible = self.right_panel.isVisible() and (len(right_sizes) >= 2 and right_sizes[1] > 0)
+            config.save_panel_visibility(left_visible, right_visible)
+        except Exception:
+            pass
 
     def _populate_vault_tree(self) -> None:
         self._cancel_inline_editor()
@@ -1828,6 +2059,8 @@ class MainWindow(QMainWindow):
         self._refresh_detached_link_panels(path)
         if tracer:
             tracer.mark("right panel links refreshed")
+        # Persist panel visibility when a page is opened (captures programmatic restores)
+        self._save_panel_visibility()
         move_cursor_to_end = cursor_at_end or self._should_focus_hr_tail(content)
         restored_history_cursor = False
         if restore_history_cursor:
@@ -1835,7 +2068,7 @@ class MainWindow(QMainWindow):
             if saved_pos is not None:
                 cursor = self.editor.textCursor()
                 cursor.setPosition(min(saved_pos, len(self.editor.toPlainText())))
-                self.editor.setTextCursor(cursor)
+                self._scroll_cursor_to_top_quarter(cursor, animate=False, flash=False)
                 restored_history_cursor = True
                 move_cursor_to_end = False
         if move_cursor_to_end:
@@ -1948,6 +2181,12 @@ class MainWindow(QMainWindow):
             self.right_panel.refresh_tasks()
             self.right_panel.refresh_links(self.current_path)
         self._last_saved_content = payload["content"]
+        # Persist latest cursor position along with the save so reloads restore it
+        try:
+            self._history_cursor_positions[self.current_path] = self.editor.textCursor().position()
+            self._persist_recent_history()
+        except Exception:
+            pass
         try:
             self.editor.document().setModified(False)
         except Exception:
@@ -1996,7 +2235,8 @@ class MainWindow(QMainWindow):
         day_template = ""
         try:
             templates_root = Path(__file__).parent.parent.parent / "templates"
-            day_tpl = templates_root / "JournalDay.txt"
+            preferred_day = config.load_default_journal_template()
+            day_tpl = self._resolve_template_path(preferred_day, fallback="JournalDay")
             if day_tpl.exists():
                 from datetime import datetime
                 now = datetime.now()
@@ -2007,6 +2247,7 @@ class MainWindow(QMainWindow):
                     "{{dd}}": f"{now:%d}",
                 }
                 raw = day_tpl.read_text(encoding="utf-8")
+                print(f"[Template] Loaded journal template: {day_tpl}")
                 for k, v in vars_map.items():
                     raw = raw.replace(k, v)
                 day_template = raw
@@ -2066,11 +2307,12 @@ class MainWindow(QMainWindow):
         month_page = month_dir / f"{month_dir.name}{PAGE_SUFFIX}"
         day_page = day_dir / f"{day_dir.name}{PAGE_SUFFIX}"
 
-        # Load templates
+        # Load templates (use preference for day)
         templates_root = Path(__file__).parent.parent.parent / "templates"
         year_tpl = templates_root / "JournalYear.txt"
         month_tpl = templates_root / "JournalMonth.txt"
-        day_tpl = templates_root / "JournalDay.txt"
+        preferred_day = config.load_default_journal_template()
+        day_tpl = self._resolve_template_path(preferred_day, fallback="JournalDay")
 
         vars_map = {
             "{{YYYY}}": year_str,
@@ -2477,6 +2719,17 @@ class MainWindow(QMainWindow):
         window.destroyed.connect(
             lambda: self._detached_panels.remove(window) if window in self._detached_panels else None
         )
+    
+    def _prepare_top_level_window(self, window: QMainWindow) -> None:
+        """Ensure detached windows are true top-level (Alt+Tab visible)."""
+        try:
+            window.setParent(None)
+            window.setWindowFlag(Qt.Window, True)
+            window.setWindowFlag(Qt.Tool, False)
+            window.setAttribute(Qt.WA_NativeWindow, True)
+            window.setWindowModality(Qt.NonModal)
+        except Exception:
+            pass
 
     def _open_task_panel_window(self) -> None:
         if not config.has_active_vault():
@@ -2490,11 +2743,31 @@ class MainWindow(QMainWindow):
             pass
         panel.refresh()
         panel.taskActivated.connect(self._open_task_from_panel)
-        window = QMainWindow(self)
+        window = QMainWindow(None)
+        self._prepare_top_level_window(window)
         window.setWindowTitle("Tasks")
         window.setCentralWidget(panel)
         window.resize(720, 640)
         self._apply_geometry_persistence(window, "task_panel_window")
+        window.show()
+        self._register_detached_panel(window)
+    
+    def _open_calendar_panel_window(self) -> None:
+        if not config.has_active_vault():
+            self._alert("Open a vault first.")
+            return
+        panel = CalendarPanel()
+        panel.set_vault_root(self.vault_root or "")
+        panel.dateActivated.connect(self.right_panel.calendar_panel.dateActivated.emit)
+        panel.pageActivated.connect(self._open_calendar_page)
+        panel.taskActivated.connect(self._open_task_from_panel)
+        panel.openInWindowRequested.connect(self._open_page_editor_window)
+        window = QMainWindow(None)
+        self._prepare_top_level_window(window)
+        window.setWindowTitle("Calendar")
+        window.setCentralWidget(panel)
+        window.resize(760, 680)
+        self._apply_geometry_persistence(window, "calendar_panel_window")
         window.show()
         self._register_detached_panel(window)
 
@@ -2508,7 +2781,8 @@ class MainWindow(QMainWindow):
             panel.set_page(self._normalize_editor_path(current))
         panel.pageActivated.connect(self._open_link_from_panel)
         panel.openInWindowRequested.connect(self._open_page_editor_window)
-        window = QMainWindow(self)
+        window = QMainWindow(None)
+        self._prepare_top_level_window(window)
         window.setWindowTitle("Link Navigator")
         window.setCentralWidget(panel)
         window.resize(760, 680)
@@ -2528,7 +2802,8 @@ class MainWindow(QMainWindow):
         if self.current_path:
             panel.set_current_page(self._normalize_editor_path(self.current_path))
         panel.chatNavigateRequested.connect(self._on_ai_chat_navigate)
-        window = QMainWindow(self)
+        window = QMainWindow(None)
+        self._prepare_top_level_window(window)
         window.setWindowTitle("AI Chat")
         window.setCentralWidget(panel)
         window.resize(820, 720)
@@ -2593,8 +2868,15 @@ class MainWindow(QMainWindow):
                 page_path=rel_path,
                 read_only=self._read_only,
                 open_in_main_callback=lambda target, **kw: self._open_link_in_context(target, **kw),
-                parent=self,
+                parent=None,
             )
+            try:
+                window.setWindowFlag(Qt.Window, True)
+                window.setWindowFlag(Qt.Tool, False)
+                window.setAttribute(Qt.WA_NativeWindow, True)
+                window.setWindowModality(Qt.NonModal)
+            except Exception:
+                pass
             window.show()
             self._page_windows.append(window)
             window.destroyed.connect(lambda: self._page_windows.remove(window) if window in self._page_windows else None)
@@ -2611,25 +2893,32 @@ class MainWindow(QMainWindow):
             width = getattr(self, "_saved_left_width", 240)
             total = sum(self.main_splitter.sizes())
             self.main_splitter.setSizes([width, max(1, total - width)])
+        self._save_panel_visibility()
 
     def _toggle_right_panel(self) -> None:
         """Show/hide the right tabbed panel."""
-        is_visible = self.editor_split.sizes()[1] > 0
+        sizes = self.editor_split.sizes()
+        is_visible = self.right_panel.isVisible() and len(sizes) >= 2 and sizes[1] > 0
         if is_visible:
-            self._saved_right_width = self.editor_split.sizes()[1]
-            self.editor_split.setSizes([sum(self.editor_split.sizes()), 0])
+            self._saved_right_width = sizes[1]
+            self.right_panel.hide()
+            self.editor_split.setSizes([sum(sizes), 0])
         else:
+            self.right_panel.show()
             width = getattr(self, "_saved_right_width", 360)
-            total = sum(self.editor_split.sizes())
-            self.editor_split.setSizes([max(1, total - width), width])
+            total = sum(sizes) or max(1, self.editor_split.width())
+            self.editor_split.setSizes([max(1, total - width), max(0, width)])
+        self._save_panel_visibility()
 
     def _ensure_right_panel_visible(self) -> None:
         """Ensure the right panel is visible (used before showing link/AI panes)."""
         sizes = self.editor_split.sizes()
         if len(sizes) >= 2 and sizes[1] == 0:
+            self.right_panel.show()
             width = getattr(self, "_saved_right_width", 360)
-            total = sum(sizes)
-            self.editor_split.setSizes([max(1, total - width), width])
+            total = sum(sizes) or max(1, self.editor_split.width())
+            self.editor_split.setSizes([max(1, total - width), max(0, width)])
+            self._save_panel_visibility()
 
     def _open_link_in_context(self, link: str, force: bool = False, refresh_only: bool = False) -> None:
         """Handle link activations from the editor (main or popup)."""
@@ -2649,7 +2938,7 @@ class MainWindow(QMainWindow):
         if link.startswith("/"):
             target = self._normalize_editor_path(link)
             if refresh_only and self.current_path == target:
-                self._open_file(target, add_to_history=False, force=True)
+                self._reload_page_preserve_cursor(target)
             elif not refresh_only:
                 self._select_tree_path(target)
                 self._open_file(target, force=force)
@@ -2693,8 +2982,8 @@ class MainWindow(QMainWindow):
         from datetime import date
         target_date = date(year, month, day)
         
-        templates_root = Path(__file__).parent.parent.parent / "templates"
-        day_tpl = templates_root / "JournalDay.txt"
+        preferred_day = config.load_default_journal_template()
+        day_tpl = self._resolve_template_path(preferred_day, fallback="JournalDay")
         
         vars_map = {
             "{{YYYY}}": f"{year}",
@@ -2707,6 +2996,7 @@ class MainWindow(QMainWindow):
         if day_tpl.exists():
             try:
                 raw = day_tpl.read_text(encoding="utf-8")
+                print(f"[Template] Loaded journal template: {day_tpl}")
                 content = raw
                 for k, v in vars_map.items():
                     content = content.replace(k, v)
@@ -2782,7 +3072,8 @@ class MainWindow(QMainWindow):
         templates_root = Path(__file__).parent.parent.parent / "templates"
         year_tpl = templates_root / "JournalYear.txt"
         month_tpl = templates_root / "JournalMonth.txt"
-        day_tpl = templates_root / "JournalDay.txt"
+        preferred_day = config.load_default_journal_template()
+        day_tpl = self._resolve_template_path(preferred_day, fallback="JournalDay")
         
         vars_map = {
             "{{YYYY}}": year_str,
@@ -2950,7 +3241,7 @@ class MainWindow(QMainWindow):
                 # Open the vault's main page (fake root concept)
                 main_page = f"/{self.vault_root_name}{PAGE_SUFFIX}"
                 if refresh_only and self.current_path == main_page:
-                    self._open_file(main_page, add_to_history=False, force=True)
+                    self._reload_page_preserve_cursor(main_page)
                 else:
                     self._open_file(main_page, force=force)
                     self._scroll_to_anchor_slug(anchor_slug)
@@ -2983,7 +3274,7 @@ class MainWindow(QMainWindow):
                 self._apply_new_page_template(target_file, page_name)
             self._pending_selection = target_file
             if refresh_only and self.current_path == target_file:
-                self._open_file(target_file, add_to_history=False, force=True)
+                self._reload_page_preserve_cursor(target_file)
             else:
                 self._populate_vault_tree()
                 self._open_file(target_file, cursor_at_end=is_new_page, force=force)
@@ -3021,7 +3312,7 @@ class MainWindow(QMainWindow):
                 self._apply_new_page_template(target_file, target_name)
             self._pending_selection = target_file
             if refresh_only and self.current_path == target_file:
-                self._open_file(target_file, add_to_history=False, force=True)
+                self._reload_page_preserve_cursor(target_file)
             else:
                 self._populate_vault_tree()
                 self._open_file(target_file, cursor_at_end=is_new_page, force=force)
@@ -3333,13 +3624,20 @@ class MainWindow(QMainWindow):
         """Open the Link Navigator tab for the given page."""
         if not file_path:
             return
+        normalized = self._normalize_editor_path(file_path)
         self._ensure_right_panel_visible()
-        if file_path != self.current_path:
+        if normalized != self.current_path:
             try:
-                self._open_file(file_path)
+                self._open_file(normalized)
             except Exception:
                 return
-        self.right_panel.focus_link_tab(file_path)
+        self.right_panel.focus_link_tab(normalized)
+        # Sync any detached link navigator windows to the same page
+        for panel in list(getattr(self, "_detached_link_panels", [])):
+            try:
+                panel.set_page(normalized)
+            except Exception:
+                continue
 
     def _open_ai_chat_for_path(self, file_path: Optional[str], create: bool = False, *, focus_tab: bool = True) -> None:
         """Open (or create) the AI Chat session for the given page, optionally without shifting focus."""
@@ -3801,8 +4099,13 @@ class MainWindow(QMainWindow):
         self._populate_vault_tree()
 
     def _apply_new_page_template(self, file_path: str, page_name: str) -> None:
-        """Apply the NewPage.txt template to a newly created page."""
-        template_path = Path(__file__).parent.parent.parent / "templates" / "NewPage.txt"
+        """Apply the preferred template to a newly created page."""
+        template_name = "Default"
+        try:
+            template_name = config.load_default_page_template()
+        except Exception:
+            template_name = "Default"
+        template_path = self._resolve_template_path(template_name, fallback="Default")
         self._apply_template_from_path(file_path, page_name, str(template_path))
 
     def _apply_template_from_path(self, file_path: str, page_name: str, template_path: str) -> None:
@@ -3819,6 +4122,7 @@ class MainWindow(QMainWindow):
         
         try:
             template_content = template_file.read_text(encoding="utf-8")
+            print(f"[Template] Loaded template: {template_file}")
         except Exception:
             return
         
@@ -3839,11 +4143,18 @@ class MainWindow(QMainWindow):
         # Get current date in format: Tuesday 29 April 2025
         now = datetime.now()
         day_date_year = now.strftime("%A %d %B %Y")
-        
-        # Replace variables
-        result = template.replace("{{PageName}}", page_name)
-        result = result.replace("{{DayDateYear}}", day_date_year)
-        
+        vars_map = {
+            "{{PageName}}": page_name,
+            "{{DayDateYear}}": day_date_year,
+            "{{YYYY}}": f"{now:%Y}",
+            "{{Month}}": now.strftime("%B"),
+            "{{MM}}": f"{now:%m}",
+            "{{DOW}}": now.strftime("%A"),
+            "{{dd}}": f"{now:%d}",
+        }
+        result = template
+        for k, v in vars_map.items():
+            result = result.replace(k, v)
         return result
 
     def _inline_editor_cancelled(self) -> None:
@@ -4001,6 +4312,22 @@ class MainWindow(QMainWindow):
             self._suspend_selection_open = False
         self._open_file(target_path, add_to_history=False, restore_history_cursor=True)
         QTimer.singleShot(0, self.editor.setFocus)
+    
+    def _reload_page_preserve_cursor(self, path: str) -> None:
+        """Reload a page while keeping its last known cursor position."""
+        saved_pos = self._history_cursor_positions.get(path)
+        # Prefer the live cursor position if this tab is the one being reloaded
+        if self.current_path == path:
+            try:
+                saved_pos = self.editor.textCursor().position()
+            except Exception:
+                pass
+        self._remember_history_cursor()
+        self._open_file(path, add_to_history=False, force=True, restore_history_cursor=True)
+        if saved_pos is not None:
+            cursor = self.editor.textCursor()
+            cursor.setPosition(min(saved_pos, len(self.editor.toPlainText())))
+            self._scroll_cursor_to_top_quarter(cursor, animate=False, flash=False)
 
     def _history_can_go_back(self) -> bool:
         """Return True if history has a previous entry to navigate to."""
@@ -4009,6 +4336,12 @@ class MainWindow(QMainWindow):
     def _history_can_go_forward(self) -> bool:
         """Return True if history has a forward entry."""
         return bool(self.page_history) and self.history_index < len(self.page_history) - 1
+
+    def _on_editor_cursor_moved(self, position: int) -> None:
+        """Persist last cursor position for the active page whenever it changes."""
+        if not self.current_path:
+            return
+        self._history_cursor_positions[self.current_path] = position
 
     def _remember_history_cursor(self) -> None:
         """Remember the current cursor position for history restore."""
@@ -4168,9 +4501,14 @@ class MainWindow(QMainWindow):
         mode = self._popup_mode
         self._hide_history_popup()
         if mode == "history" and target:
+            saved_pos = self._history_cursor_positions.get(target)
             self._remember_history_cursor()
             self._select_tree_path(target)
-            self._open_file(target, force=True, restore_history_cursor=True)
+            self._open_file(target, add_to_history=False, force=True, restore_history_cursor=True)
+            if saved_pos is not None:
+                cursor = self.editor.textCursor()
+                cursor.setPosition(min(saved_pos, len(self.editor.toPlainText())))
+                self._scroll_cursor_to_top_quarter(cursor, animate=False, flash=False)
         elif mode == "heading" and target:
             try:
                 pos = int(target.get("position", 0))
@@ -4184,8 +4522,7 @@ class MainWindow(QMainWindow):
                 block = self.editor.document().findBlockByNumber(max(0, line - 1))
                 if block.isValid():
                     pos = block.position()
-            cursor = self.editor.textCursor()
-            cursor.setPosition(max(0, pos))
+            cursor = self._cursor_at_position(max(0, pos))
             self._animate_or_flash_to_cursor(cursor)
 
     def _hide_history_popup(self) -> None:
@@ -4244,9 +4581,9 @@ class MainWindow(QMainWindow):
                 pass
 
     def _toc_jump_to_position(self, position: int) -> None:
-        cursor = self.editor.textCursor()
-        cursor.setPosition(max(0, position))
+        cursor = self._cursor_at_position(max(0, position))
         self._animate_or_flash_to_cursor(cursor)
+        QTimer.singleShot(180, lambda: self.editor.setFocus(Qt.OtherFocusReason))
 
     def _on_toc_collapsed_changed(self, collapsed: bool) -> None:
         config.save_toc_collapsed(collapsed)
@@ -4267,42 +4604,50 @@ class MainWindow(QMainWindow):
         self.toc_widget.move(x, y)
         self.toc_widget.raise_()
 
-    def _animate_or_flash_to_cursor(self, cursor: QTextCursor) -> None:
-        """Smooth scroll to a heading; flash if already visible."""
+    def _scroll_cursor_to_top_quarter(self, cursor: QTextCursor, *, animate: bool, flash: bool) -> None:
+        """Place the cursor so it sits in the top quarter of the viewport."""
         sb = self.editor.verticalScrollBar()
+        self.editor.setTextCursor(cursor)
         if not sb:
-            self.editor.setTextCursor(cursor)
             self.editor.ensureCursorVisible()
+            if flash:
+                self._flash_heading(cursor)
             return
+        view_height = max(1, self.editor.viewport().height())
         target_rect = self.editor.cursorRect(cursor)
-        view_height = self.editor.viewport().height()
+        desired_y = max(0, int(view_height * 0.25))
+        cursor_doc_y = sb.value() + target_rect.top()
+        target_val = int(cursor_doc_y - desired_y)
+        target_val = max(0, min(target_val, sb.maximum()))
         current_val = sb.value()
-        target_val = current_val + target_rect.top() - 10  # small top margin
-        in_view = 0 <= target_rect.top() <= view_height - target_rect.height()
-        if in_view:
-            self.editor.setTextCursor(cursor)
+        delta = abs(target_val - current_val)
+        if not animate or delta <= 2:
+            sb.setValue(target_val)
             self.editor.ensureCursorVisible()
-            self._flash_heading(cursor)
+            if flash:
+                self._flash_heading(cursor)
             return
         if self._scroll_anim and self._scroll_anim.state() == QPropertyAnimation.Running:
             self._scroll_anim.stop()
-        target_pos = cursor.position()
         anim = QPropertyAnimation(sb, b"value", self)
-        anim.setDuration(min(100, abs(target_val - current_val)))
+        anim.setDuration(min(150, max(60, delta)))
         anim.setStartValue(current_val)
         anim.setEndValue(target_val)
         def _finish_flash() -> None:
             try:
-                c = QTextCursor(self.editor.document())
-                c.setPosition(target_pos)
-                self.editor.setTextCursor(c)
+                self.editor.setTextCursor(cursor)
                 self.editor.ensureCursorVisible()
-                self._flash_heading(c)
+                if flash:
+                    self._flash_heading(cursor)
             except Exception:
                 pass
         anim.finished.connect(_finish_flash)
         anim.start()
         self._scroll_anim = anim
+
+    def _animate_or_flash_to_cursor(self, cursor: QTextCursor) -> None:
+        """Smooth scroll to a heading; flash when positioned."""
+        self._scroll_cursor_to_top_quarter(cursor, animate=True, flash=True)
 
     def _flash_heading(self, cursor: QTextCursor) -> None:
         """Briefly highlight the heading line."""

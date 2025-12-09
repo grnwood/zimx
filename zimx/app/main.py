@@ -124,12 +124,23 @@ def _maybe_use_minimal_fonts() -> None:
             win_fonts / "arial.ttf",
             win_fonts / "tahoma.ttf",
         ]
+        mono_candidates = [
+            win_fonts / "consola.ttf",
+            win_fonts / "cour.ttf",
+            win_fonts / "lucon.ttf",
+        ]
     else:
         candidates = [
             Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
             Path("/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf"),
             Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
             Path("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"),
+        ]
+        mono_candidates = [
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
+            Path("/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"),
+            Path("/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf"),
+            Path("/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf"),
         ]
     src = next((p for p in candidates if p.exists()), None)
     if not src:
@@ -143,13 +154,50 @@ def _maybe_use_minimal_fonts() -> None:
         print(f"[ZimX] Failed to copy minimal font {src}: {exc}", file=sys.stderr)
         return
 
+    # Ensure a monospace font is available for code/tables
+    mono_src = next((p for p in mono_candidates if p.exists()), None)
+    mono_dest = None
+    mono_family = None
+    if mono_src:
+        mono_dest = font_dir / mono_src.name
+        try:
+            if not mono_dest.exists():
+                shutil.copy2(mono_src, mono_dest)
+        except Exception as exc:
+            print(f"[ZimX] Failed to copy minimal monospace font {mono_src}: {exc}", file=sys.stderr)
+        else:
+            family_lookup = {
+                "consola.ttf": "Consolas",
+                "cour.ttf": "Courier New",
+                "lucon.ttf": "Lucida Console",
+                "DejaVuSansMono.ttf": "DejaVu Sans Mono",
+                "LiberationMono-Regular.ttf": "Liberation Mono",
+                "NotoSansMono-Regular.ttf": "Noto Sans Mono",
+                "UbuntuMono-R.ttf": "Ubuntu Mono",
+            }
+            mono_family = family_lookup.get(mono_src.name, mono_src.stem)
+            print(f"[ZimX] Minimal font scan: bundled monospace font {mono_src} -> {mono_dest} (family {mono_family})", file=sys.stderr)
+    else:
+        print("[ZimX] Minimal font scan: no monospace candidate found; tables/code may lack monospace.", file=sys.stderr)
+
     fonts_conf = cache_root / "fonts.conf"
     try:
+        alias_block = ""
+        if mono_family:
+            alias_block = f"""
+  <alias>
+    <family>monospace</family>
+    <prefer>
+      <family>{mono_family}</family>
+    </prefer>
+  </alias>"""
         fonts_conf.write_text(
             f"""<?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
 <fontconfig>
   <dir>{font_dir}</dir>
+  <config>{alias_block}
+  </config>
 </fontconfig>
 """,
             encoding="utf-8",

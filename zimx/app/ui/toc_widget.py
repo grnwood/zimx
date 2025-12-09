@@ -42,8 +42,22 @@ class TableOfContentsWidget(QFrame):
                 background: transparent;
             }
             QTreeWidget#tocTree::item {
-                padding: 0px 2px;
+                padding: 2px 6px;
                 text-align: right;
+                border: none;
+            }
+            QTreeWidget#tocTree::item:hover {
+                background: rgba(108, 180, 255, 0.18);
+                border-radius: 4px;
+            }
+            QTreeWidget#tocTree::item:selected {
+                background: rgba(108, 180, 255, 0.18);
+                border: none;
+                outline: none;
+            }
+            QTreeWidget#tocTree::branch:selected,
+            QTreeWidget#tocTree::branch:selected:has-children {
+                background: transparent;
             }
             """
         )
@@ -63,8 +77,8 @@ class TableOfContentsWidget(QFrame):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(2)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
 
         # Hide the header toggle to keep the widget unobtrusive
         self.toggle_button = None
@@ -75,8 +89,10 @@ class TableOfContentsWidget(QFrame):
         self.tree.setIndentation(16)
         self.tree.setUniformRowHeights(True)
         self.tree.setExpandsOnDoubleClick(False)
+        self.tree.setMouseTracking(True)
         self.tree.itemActivated.connect(self._on_item_activated)
         self.tree.itemClicked.connect(self._on_item_activated)
+        self.tree.setVerticalScrollMode(QTreeWidget.ScrollMode.ScrollPerPixel)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
         layout.addWidget(self.tree, 1)
@@ -192,6 +208,12 @@ class TableOfContentsWidget(QFrame):
     def leaveEvent(self, event):  # type: ignore[override]
         self._fade_to(self._idle_opacity)
         super().leaveEvent(event)
+
+    def wheelEvent(self, event):  # type: ignore[override]
+        """Scroll TOC without affecting the editor."""
+        self._fade_to(self._hover_opacity)
+        event.accept()
+        self.tree.wheelEvent(event)
 
     def _fade_to(self, target: float) -> None:
         try:

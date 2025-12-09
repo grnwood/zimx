@@ -36,6 +36,8 @@ class TabbedRightPanel(QWidget):
     openTaskWindowRequested = Signal()
     openLinkWindowRequested = Signal()
     openAiWindowRequested = Signal()
+    openCalendarWindowRequested = Signal()
+    filterClearRequested = Signal()
     
     def __init__(
         self,
@@ -81,6 +83,7 @@ class TabbedRightPanel(QWidget):
         
         # Forward signals
         self.task_panel.taskActivated.connect(self.taskActivated)
+        self.task_panel.filterClearRequested.connect(self.filterClearRequested)
         self.calendar_panel.dateActivated.connect(self.dateActivated)
         self.calendar_panel.pageActivated.connect(self.calendarPageActivated)
         self.calendar_panel.taskActivated.connect(self.calendarTaskActivated)
@@ -202,6 +205,9 @@ class TabbedRightPanel(QWidget):
         if widget == self.task_panel:
             action = menu.addAction("Open in New Window")
             action.triggered.connect(self.openTaskWindowRequested.emit)
+        elif widget == self.calendar_panel:
+            action = menu.addAction("Open in New Window")
+            action.triggered.connect(self.openCalendarWindowRequested.emit)
         elif widget == self.link_panel:
             action = menu.addAction("Open in New Window")
             action.triggered.connect(self.openLinkWindowRequested.emit)

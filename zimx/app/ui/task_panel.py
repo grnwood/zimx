@@ -48,6 +48,7 @@ def _should_suspend_nav_for_tag(text: str, cursor: int, available_tags: set[str]
 class TaskPanel(QWidget):
     taskActivated = Signal(str, int)
     focusGained = Signal()
+    filterClearRequested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -140,6 +141,9 @@ class TaskPanel(QWidget):
         tags_row.addWidget(QLabel("Tags"))
         self.filter_label = QLabel("Filtered")
         self.filter_label.setVisible(False)
+        self.filter_label.setCursor(Qt.PointingHandCursor)
+        self.filter_label.setToolTip("Click to clear navigation filter")
+        self.filter_label.mousePressEvent = lambda event: self._on_filter_label_clicked(event)
         tags_row.addSpacing(6)
         tags_row.addWidget(self.filter_label)
         self.filter_checkbox = QCheckBox()
@@ -204,6 +208,10 @@ class TaskPanel(QWidget):
         self._nav_filter_enabled = bool(checked)
         self._update_filter_indicator()
         self._refresh_tasks()
+
+    def _on_filter_label_clicked(self, event) -> None:
+        """Request clearing the navigation filter when the label is clicked."""
+        self.filterClearRequested.emit()
 
     def _on_journal_checkbox_toggled(self, checked: bool) -> None:
         if not self._nav_filter_prefix:
