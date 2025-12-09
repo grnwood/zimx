@@ -56,6 +56,7 @@ Logbook of all the development efforts on zim. yes!
 ( )  maybe ctrl-enter to get out of vi mode?  moving off home keys to esc is disrupting to flow. @edit
 (x)  when i alt-tab back to docs editor should always load (and scroll if need be) to last cursor position @edit
 ( )  when you add a camel case link the page reloads to render and puts cursor at top needs to remove location and scroll there @edit
+( )  when I launch http links (at least win32) it's launching them twice! @edit
 
 
 ### Git
