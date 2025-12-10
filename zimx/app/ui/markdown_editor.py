@@ -2549,6 +2549,7 @@ class MarkdownEditor(QTextEdit):
         print(f"[Drop] hasUrls: {mime.hasUrls()}, hasText: {mime.hasText()}")
         
         file_path = None
+        dropped_path_text: str | None = None
         
         if mime.hasUrls():
             urls = mime.urls()
@@ -2559,10 +2560,32 @@ class MarkdownEditor(QTextEdit):
             # Try to parse text as file path
             text = mime.text().strip()
             print(f"[Drop] Text: {text}")
+            dropped_path_text = text
             if text.startswith('file://'):
                 file_path = Path(text[7:])
             else:
                 file_path = Path(text)
+        # Tree drop to create vault link (use custom mime to avoid clobbering file drops)
+        if mime.hasFormat("application/x-zimx-path"):
+            try:
+                raw = mime.data("application/x-zimx-path")
+                dropped_path_text = bytes(raw).decode("utf-8")
+            except Exception:
+                dropped_path_text = None
+        if dropped_path_text and dropped_path_text.startswith("/"):
+            try:
+                from .path_utils import path_to_colon, ensure_root_colon_link
+            except Exception:
+                return super().dropEvent(event)
+            colon = path_to_colon(dropped_path_text) or dropped_path_text
+            link_target = ensure_root_colon_link(colon)
+            label = Path(dropped_path_text).stem or link_target
+            link_text = f"[{link_target}|{label}]"
+            cursor = self.cursorForPosition(event.pos())
+            self.setTextCursor(cursor)
+            cursor.insertText(link_text)
+            event.acceptProposedAction()
+            return
         
         if file_path and file_path.exists() and file_path.is_file():
             print(f"[Drop] Processing file: {file_path}")
@@ -2580,8 +2603,10 @@ class MarkdownEditor(QTextEdit):
                 cursor.insertText(link_text)
             
             event.acceptProposedAction()
+            # For vault link drops (text path), do not emit attachmentDropped to avoid duplicate indexing
             try:
-                self.attachmentDropped.emit(file_path.name)
+                if not dropped_path_text:
+                    self.attachmentDropped.emit(file_path.name)
             except Exception:
                 pass
             return

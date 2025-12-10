@@ -158,7 +158,8 @@ def _normalize_page_link(link: str) -> Optional[str]:
     if ":" in base and not base.startswith("/"):
         return colon_to_path(base)
 
-    # Slash paths - ensure they are anchored at root
+    # Slash paths - ensure they are anchored at root and normalize underscores to spaces for consistency
+    base = base.replace("_", " ")
     path = base if base.startswith("/") else f"/{base}"
     path_obj = Path(path)
     # Skip obvious non-page assets (images, docs, etc.)

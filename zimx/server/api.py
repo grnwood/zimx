@@ -27,15 +27,19 @@ from typing import Iterable, List, Literal, Optional
 import httpx
 from fastapi import FastAPI, HTTPException, File as FastAPISingleFile, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from . import indexer
+from . import file_ops
 from .adapters import files, tasks
 from .adapters.files import FileAccessError
 from .state import vault_state
 from .vector import vector_manager
 from zimx.rag.index import RetrievedChunk
 from zimx.app import config
+
+_ANSI_BLUE = "\033[94m"
+_ANSI_RESET = "\033[0m"
 
 _LOCAL_FILE_OPS_ENABLED = os.getenv("ATTACHMENTS_LOCAL_FILE_OPS", "0") not in (
     "0",
@@ -81,6 +85,22 @@ class CreatePathPayload(BaseModel):
 
 class DeletePathPayload(BaseModel):
     path: str
+
+
+class FileDeletePayload(BaseModel):
+    path: str
+    version: Optional[int] = None
+
+
+class RenameMovePayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    from_path: str = Field(..., alias="from")
+    to_path: str = Field(..., alias="to")
+    version: Optional[int] = None
+
+
+class UpdateLinksPayload(BaseModel):
+    path_map: dict[str, str]
 
 
 class AttachmentDeletePayload(BaseModel):
@@ -143,7 +163,10 @@ def select_vault(payload: VaultSelectPayload) -> dict:
 @app.get("/api/vault/tree")
 def vault_tree() -> dict:
     root = vault_state.get_root()
-    return {"root": str(root), "tree": files.list_dir(root)}
+    tree = files.list_dir(root)
+    order_map = config.fetch_display_order_map()
+    _sort_tree_nodes(tree, order_map)
+    return {"root": str(root), "tree": tree}
 
 
 @app.post("/api/file/read")
@@ -223,11 +246,16 @@ async def api_chat(payload: ChatPayload) -> dict:
 @app.post("/api/path/create")
 def create_path(payload: CreatePathPayload) -> dict:
     root = vault_state.get_root()
+    page_path: Optional[str] = None
     try:
         if payload.is_dir:
             files.create_directory(root, payload.path)
+            page_path = config.folder_to_page_path(payload.path)
         else:
             files.create_markdown_file(root, payload.path, payload.content or "")
+            page_path = payload.path
+        if page_path:
+            config.ensure_page_entry(page_path)
     except FileExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except FileAccessError as exc:
@@ -239,12 +267,75 @@ def create_path(payload: CreatePathPayload) -> dict:
 def delete_path(payload: DeletePathPayload) -> dict:
     root = vault_state.get_root()
     try:
-        files.delete_path(root, payload.path)
+        result = file_ops.delete_folder(root, payload.path)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except FileAccessError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"ok": True}
+    return {"ok": True, **result}
+
+
+@app.options("/api/file/operation")
+def file_operation_options(path: str, op: Literal["rename", "move", "delete"], dest: Optional[str] = None) -> dict:
+    root = vault_state.get_root()
+    ok, reason = file_ops.preflight(root, op, path, dest)
+    return {"canOperate": ok, "reason": reason}
+
+
+@app.post("/api/file/rename")
+def file_rename(payload: RenameMovePayload) -> dict:
+    root = vault_state.get_root()
+    ok, reason = file_ops.preflight(root, "rename", payload.from_path, payload.to_path)
+    if not ok:
+        raise HTTPException(status_code=400, detail=reason or "Preflight failed")
+    try:
+        result = file_ops.rename_folder(root, payload.from_path, payload.to_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileAccessError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, **result}
+
+
+@app.post("/api/file/move")
+def file_move(payload: RenameMovePayload) -> dict:
+    print(f"{_ANSI_BLUE}[API] POST /api/file/move from={payload.from_path} to={payload.to_path}{_ANSI_RESET}")
+    root = vault_state.get_root()
+    ok, reason = file_ops.preflight(root, "move", payload.from_path, payload.to_path)
+    if not ok:
+        print(f"{_ANSI_BLUE}[API] /api/file/move preflight failed: {reason}{_ANSI_RESET}")
+        raise HTTPException(status_code=400, detail=reason or "Preflight failed")
+    try:
+        result = file_ops.move_folder(root, payload.from_path, payload.to_path)
+    except FileNotFoundError as exc:
+        print(f"{_ANSI_BLUE}[API] /api/file/move not found: {exc}{_ANSI_RESET}")
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileAccessError as exc:
+        print(f"{_ANSI_BLUE}[API] /api/file/move error: {exc}{_ANSI_RESET}")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, **result}
+
+
+@app.delete("/api/file")
+def file_delete(payload: FileDeletePayload) -> dict:
+    root = vault_state.get_root()
+    ok, reason = file_ops.preflight(root, "delete", payload.path)
+    if not ok:
+        raise HTTPException(status_code=400, detail=reason or "Preflight failed")
+    try:
+        result = file_ops.delete_folder(root, payload.path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileAccessError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, **result}
+
+
+@app.post("/api/vault/update-links")
+def vault_update_links(payload: UpdateLinksPayload) -> dict:
+    root = vault_state.get_root()
+    touched = file_ops.update_links_on_disk(root, payload.path_map)
+    return {"ok": True, "touched": touched}
 
 
 @app.post("/files/attach")
@@ -345,6 +436,21 @@ def vector_query(payload: VectorQueryPayload) -> dict:
     except Exception as exc:
         _handle_vector_exception("querying vector data", exc)
     return {"chunks": [_chunk_to_dict(chunk) for chunk in chunks]}
+
+
+def _sort_tree_nodes(nodes: list[dict], order_map: dict[str, int]) -> None:
+    """Sort tree nodes in-place using display order, defaulting to alpha."""
+    for node in nodes:
+        children = node.get("children") or []
+        _sort_tree_nodes(children, order_map)
+        node["children"] = children
+
+    def _key(node: dict) -> tuple:
+        open_path = node.get("open_path")
+        order_val = order_map.get(open_path) if open_path else None
+        return (order_val if order_val is not None else float("inf"), (node.get("name") or "").lower())
+
+    nodes.sort(key=_key)
 
 
 def _log_attachment(message: str) -> None:
