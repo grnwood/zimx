@@ -534,6 +534,9 @@ class MainWindow(QMainWindow):
         self.dir_icon = self.style().standardIcon(QStyle.SP_DirIcon)
         self.file_icon = self.style().standardIcon(QStyle.SP_FileIcon)
         self._tree_arrow_focus_pending = False
+        self._tree_enter_focus = False
+        self._tree_keyboard_nav = False
+        self._suspend_cursor_history = False
         
         # Create custom header widget with "Show Journal" checkbox
         self.tree_header_widget = QWidget()
@@ -598,7 +601,6 @@ class MainWindow(QMainWindow):
         self.editor.textChanged.connect(lambda: self.autosave_timer.start())
         self.editor.focusLost.connect(lambda: (self._remember_history_cursor(), self._save_current_file(auto=True)))
         self.editor.cursorMoved.connect(self._on_editor_cursor_moved)
-        self.editor.linkActivated.connect(lambda link: self._open_camel_link(link, focus_target="editor"))
         self.editor.linkHovered.connect(self._on_link_hovered)
         self.editor.linkCopied.connect(self._on_link_copied)
         self.editor.insertDateRequested.connect(self._insert_date)
@@ -2211,9 +2213,15 @@ class MainWindow(QMainWindow):
         self._debug(f"[UI] tree change: {self._describe_index(current)}")
         if self.tree_view.is_dragging() or (QApplication.mouseButtons() & Qt.LeftButton):
             return
-        restore_tree_focus = self._tree_arrow_focus_pending and self.tree_view.hasFocus()
+        had_tree_focus = self.tree_view.hasFocus()
+        restore_tree_focus = (self._tree_arrow_focus_pending or had_tree_focus) and not self._tree_enter_focus
         # One-shot flag: consume after evaluating
         self._tree_arrow_focus_pending = False
+        if self._tree_keyboard_nav and had_tree_focus:
+            # Arrow-key navigation should not open pages; consume the flag and stop.
+            self._tree_keyboard_nav = False
+            return
+        self._tree_keyboard_nav = False
         if self._skip_next_selection_open:
             self._skip_next_selection_open = False
             return
@@ -2253,6 +2261,8 @@ class MainWindow(QMainWindow):
     def _open_file(self, path: str, retry: bool = False, add_to_history: bool = True, force: bool = False, cursor_at_end: bool = False, restore_history_cursor: bool = False) -> None:
         if not path or (path == self.current_path and not force):
             return
+        # Remember current cursor before switching pages
+        self._remember_history_cursor()
         tracer = PageLoadLogger(path) if PAGE_LOGGING_ENABLED else None
         # Save current page if dirty before switching
         if self.current_path and path != self.current_path:
@@ -2315,8 +2325,11 @@ class MainWindow(QMainWindow):
             pass
         self.current_path = path
         self._suspend_autosave = True
-        self.editor.set_markdown(content)
-        self._suspend_autosave = False
+        self._suspend_cursor_history = True
+        try:
+            self.editor.set_markdown(content)
+        finally:
+            self._suspend_autosave = False
         if tracer:
             tracer.mark("editor content applied")
         # Mark buffer clean for dirty tracking
@@ -2340,6 +2353,7 @@ class MainWindow(QMainWindow):
         self._save_panel_visibility()
         move_cursor_to_end = cursor_at_end or self._should_focus_hr_tail(content)
         restored_history_cursor = False
+        final_cursor_pos = None
         if restore_history_cursor:
             saved_pos = self._history_cursor_positions.get(path)
             if saved_pos is not None:
@@ -2348,6 +2362,7 @@ class MainWindow(QMainWindow):
                 self._scroll_cursor_to_top_quarter(cursor, animate=False, flash=False)
                 restored_history_cursor = True
                 move_cursor_to_end = False
+                final_cursor_pos = cursor.position()
         # If no explicit restore request, prefer any remembered cursor for this path
         if not restored_history_cursor:
             saved_pos = self._history_cursor_positions.get(path)
@@ -2357,13 +2372,19 @@ class MainWindow(QMainWindow):
                 self._scroll_cursor_to_top_quarter(cursor, animate=False, flash=False)
                 restored_history_cursor = True
                 move_cursor_to_end = False
+                final_cursor_pos = cursor.position()
         if move_cursor_to_end:
             cursor = self.editor.textCursor()
             display_length = len(self.editor.toPlainText())
             cursor.setPosition(display_length)
             self.editor.setTextCursor(cursor)
+            final_cursor_pos = cursor.position()
         elif not restored_history_cursor:
             self.editor.moveCursor(QTextCursor.Start)
+            final_cursor_pos = self.editor.textCursor().position()
+        self._suspend_cursor_history = False
+        if final_cursor_pos is not None:
+            self._history_cursor_positions[path] = final_cursor_pos
         # Always show editing status; vi-mode banner is separate
         display_path = path_to_colon(path) or path
         if hasattr(self, "toc_widget"):
@@ -2455,8 +2476,12 @@ class MainWindow(QMainWindow):
                 return
         
         payload_content = self.editor.to_markdown()
+        # Keep buffer and on-disk content in sync when we inject a missing title
+        title_content = self._ensure_page_title(payload_content, self.current_path)
+        if title_content != payload_content:
+            payload_content = title_content
+            self._apply_rewritten_editor_content(payload_content)
         # Ensure the first non-empty line is a page title; if missing, inject one using leaf name
-        payload_content = self._ensure_page_title(payload_content, self.current_path)
         if self.link_update_mode == "lazy":
             rewritten, changed = self._rewrite_links(payload_content)
             if changed:
@@ -3721,6 +3746,7 @@ class MainWindow(QMainWindow):
             self.editor.setFocus()
 
     def _focus_editor_from_tree(self) -> None:
+        self._tree_enter_focus = True
         index = self.tree_view.currentIndex()
         target = index.data(OPEN_ROLE) or index.data(PATH_ROLE) if index.isValid() else None
         if target == FILTER_BANNER:
@@ -3730,6 +3756,8 @@ class MainWindow(QMainWindow):
             self._skip_next_selection_open = True
             self._open_file(target)
         self._focus_editor()
+        QTimer.singleShot(0, lambda: setattr(self, "_tree_enter_focus", False))
+        self._tree_keyboard_nav = False
 
     def _on_tree_row_clicked(self, index: QModelIndex) -> None:
         """Open and focus editor when a tree row is clicked."""
@@ -3806,6 +3834,7 @@ class MainWindow(QMainWindow):
     def _mark_tree_arrow_nav(self) -> None:
         """Flag that tree navigation via arrow keys should keep focus on the tree."""
         self._tree_arrow_focus_pending = True
+        self._tree_keyboard_nav = True
 
     # --- Focus toggle & visual indication ---------------------------
     def _toggle_focus_between_tree_and_editor(self) -> None:
@@ -4121,6 +4150,18 @@ class MainWindow(QMainWindow):
             self._ensure_right_panel_visible()
             self.right_panel.focus_ai_chat(None, create=True)
             self.right_panel.focus_ai_chat_input()
+            return
+        if action == "Send selection to Global Chat":
+            if not config.load_enable_ai_chats() or not self.right_panel.ai_chat_panel:
+                QMessageBox.information(self, "AI Chat", "Enable AI Chats in Preferences to use AI actions.")
+                return
+            self._ensure_right_panel_visible()
+            self.right_panel.focus_ai_chat(None, create=True)
+            if not self.right_panel.send_text_to_chat(text):
+                self.statusBar().showMessage("Enable AI chats to send text from the editor.", 4000)
+            return
+        if action == "Send selection to Page Chat":
+            self._send_selection_to_ai_chat(text)
             return
 
         if not config.load_enable_ai_chats() or not self.right_panel.ai_chat_panel:
@@ -5063,6 +5104,8 @@ class MainWindow(QMainWindow):
     def _on_editor_cursor_moved(self, position: int) -> None:
         """Persist last cursor position for the active page whenever it changes."""
         if not self.current_path:
+            return
+        if self._suspend_cursor_history:
             return
         self._history_cursor_positions[self.current_path] = position
 

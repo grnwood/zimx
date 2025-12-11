@@ -1230,7 +1230,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self.model_combo.currentTextChanged.connect(self._on_model_selected)
         model_row.addWidget(self.model_combo, 1)
         refresh_models_btn = QtWidgets.QPushButton("Refresh Models")
-        refresh_models_btn.clicked.connect(self._show_refresh_warning)
+        refresh_models_btn.clicked.connect(self._refresh_models_from_server)
         model_row.addWidget(refresh_models_btn)
         self.prompt_btn = QtWidgets.QPushButton("System Prompts")
         self.prompt_btn.clicked.connect(self._open_prompt_dialog)
@@ -1330,7 +1330,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self.reset_btn = QtWidgets.QToolButton()
         self.reset_btn.setText("↺")
         self.reset_btn.setToolTip("Reset chat history")
-        self.reset_btn.clicked.connect(self._reset_chat_history)
+        self.reset_btn.clicked.connect(self._show_reset_warning)
         self.reset_btn.setFixedWidth(28)
         top_btn_row = QtWidgets.QHBoxLayout()
         top_btn_row.setSpacing(4)
@@ -2675,10 +2675,10 @@ class AIChatPanel(QtWidgets.QWidget):
         self._update_model_status()
         self._update_stop_button()
 
-    def _show_refresh_warning(self) -> None:
-        """Insert a warning message before refreshing models."""
+    def _show_reset_warning(self) -> None:
+        """Insert a warning message before resetting chat history."""
         warning = (
-            "Warning! Refreshing models will wipe this chat history. "
+            "Warning! Resetting chat history will wipe this chat. "
             "<a href='action:reset_chat:accept'>Accept</a>"
         )
         self.messages.append(("assistant", warning))

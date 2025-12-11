@@ -303,11 +303,14 @@ class AIActionOverlay(QWidget):
         self._entries = []
         if not self._current_group:
             if not self._has_chat:
-                self._entries.append(AIActionOverlay.Entry("Start AI chat with this page", "start_chat"))
-            elif self._has_chat and not self._chat_active:
-                self._entries.append(AIActionOverlay.Entry("Load the chat for this page", "load_chat"))
-            self._entries.append(AIActionOverlay.Entry("Load Global Chat", "load_global"))
-            self._entries.append(AIActionOverlay.Entry("Send Selection to AI Chat", "default"))
+                self._entries.append(AIActionOverlay.Entry("Send selection to Global Chat", "send_global"))
+                self._entries.append(AIActionOverlay.Entry("Chat: Start Chat with this Page", "start_chat"))
+                self._entries.append(AIActionOverlay.Entry("Chat: with Global", "load_global"))
+            else:
+                self._entries.append(AIActionOverlay.Entry("Send selection to Page Chat", "send_page"))
+                self._entries.append(AIActionOverlay.Entry("Send selection to Global Chat", "send_global"))
+                self._entries.append(AIActionOverlay.Entry("Chat: with Page", "load_chat"))
+                self._entries.append(AIActionOverlay.Entry("Chat: With Global", "load_global"))
             # One-shot prompt: send selected text directly to the configured model
             # and replace the selection with the model response (does not add to chat history).
             self._entries.append(AIActionOverlay.Entry("One-Shot Prompt Selection", "one_shot"))
@@ -399,8 +402,11 @@ class AIActionOverlay(QWidget):
         entry = item.data(Qt.UserRole)
         if not entry:
             return
-        if entry.kind == "default":
-            self.sendSelection.emit()
+        if entry.kind == "send_page":
+            self.actionTriggered.emit("Send selection to Page Chat", "")
+            self.hide()
+        elif entry.kind == "send_global":
+            self.actionTriggered.emit("Send selection to Global Chat", "")
             self.hide()
         elif entry.kind == "start_chat":
             self.startChat.emit()
@@ -506,11 +512,14 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         # Tiny size so hidden sentinels don't create visible gaps
         self.hidden_format.setFontPointSize(0.01)
 
-        self.heading_styles = []
-        for size in (26, 22, 18, 16, 14):
-            fmt = QTextCharFormat(self.heading_format)
-            fmt.setFontPointSize(size)
-            self.heading_styles.append(fmt)
+        self._heading_multipliers = (1.9, 1.6, 1.35, 1.2, 1.08)
+        self.heading_styles: list[QTextCharFormat] = []
+        try:
+            base_font = parent.defaultFont()
+            base_pt = base_font.pointSizeF() or base_font.pointSize() or 14.0
+        except Exception:
+            base_pt = 14.0
+        self._apply_heading_sizes(base_pt)
 
         self.bold_format = QTextCharFormat()
         self.bold_format.setForeground(QColor("#ffd479"))
@@ -562,14 +571,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.table_format.setFontFamily(mono_family)
         self.table_format.setFontFixedPitch(True)
         self.table_format.setFontStyleHint(QFont.StyleHint.Monospace)
-        try:
-            base_pt = parent.document().defaultFont().pointSizeF()
-            if base_pt <= 0:
-                base_pt = parent.document().defaultFont().pointSize()
-            if base_pt <= 0:
-                base_pt = 14
-        except Exception:
-            base_pt = 14
+        self._base_font_size = base_pt
         self._table_font_size = max(6.0, base_pt - 2.0)
         self.table_format.setFontPointSize(self._table_font_size)
         
@@ -591,6 +593,23 @@ class MarkdownHighlighter(QSyntaxHighlighter):
 
         self._reset_code_block_cache()
         self._init_pygments(config.load_pygments_style("monokai"))
+
+    def _apply_heading_sizes(self, base_pt: float) -> None:
+        """Recompute heading sizes from the current base font size."""
+        safe_base = max(6.0, base_pt or 14.0)
+        self.heading_styles = []
+        for mult in self._heading_multipliers:
+            fmt = QTextCharFormat(self.heading_format)
+            fmt.setFontPointSize(safe_base * mult)
+            self.heading_styles.append(fmt)
+
+    def set_base_font_size(self, base_pt: float) -> None:
+        """Update heading/table sizes when the editor zoom changes."""
+        self._base_font_size = max(6.0, base_pt or 14.0)
+        self._apply_heading_sizes(self._base_font_size)
+        self._table_font_size = max(6.0, self._base_font_size - 2.0)
+        self.table_format.setFontPointSize(self._table_font_size)
+        self.rehighlight()
 
     def _reset_code_block_cache(self) -> None:
         self._code_block_spans: dict[int, list[tuple[int, int, QTextCharFormat]]] = {}
@@ -1174,6 +1193,7 @@ class MarkdownEditor(QTextEdit):
     findBarRequested = Signal(bool, bool, str)  # replace_mode, backwards_first, seed_query
     viInsertModeChanged = Signal(bool)  # Emits True when editor is in insert mode
     headingPickerRequested = Signal(object, bool)  # QPoint(global), prefer_above
+    LIST_INDENT_UNIT = "  "
     _VI_EXTRA_KEY = QTextFormat.UserProperty + 1
     _FLASH_EXTRA_KEY = QTextFormat.UserProperty + 2
 
@@ -1555,11 +1575,10 @@ class MarkdownEditor(QTextEdit):
             self.highlighter.setDocument(self.document())
         self.setUpdatesEnabled(True)
         
-        # Lazy load images after a short delay to let the UI render first
-        scheduled_at = time.perf_counter()
-        QTimer.singleShot(0, lambda: self._render_images(display, scheduled_at))
+        # Render images immediately (lazy load removed to avoid missed renders)
+        self._render_images(display, time.perf_counter())
         t4 = time.perf_counter()
-        self._mark_page_load("queued image render")
+        self._mark_page_load("render images")
         
         self._display_guard = False
         self._schedule_heading_outline()
@@ -1765,6 +1784,15 @@ class MarkdownEditor(QTextEdit):
         font = self.font()
         font.setPointSize(safe_size)
         self.setFont(font)
+        try:
+            self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(" "))
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "highlighter"):
+                self.highlighter.set_base_font_size(float(safe_size))
+        except Exception:
+            pass
 
     def begin_dialog_block(self) -> None:
         """Completely freeze editor input and interaction while a modal dialog is open."""
@@ -2283,6 +2311,7 @@ class MarkdownEditor(QTextEdit):
         block = cursor.block()
         text = block.text()
         is_bullet, indent, content = self._is_bullet_line(text)
+        is_dash, dash_indent, dash_content = self._is_dash_line(text)
         is_task, task_indent, task_state, task_content = self._is_task_line(text)
         # Ctrl+E: edit link under cursor
         if event.key() == Qt.Key_E and event.modifiers() == Qt.ControlModifier:
@@ -2295,6 +2324,9 @@ class MarkdownEditor(QTextEdit):
                 event.accept()
                 return
             if is_bullet and self._handle_bullet_indent():
+                event.accept()
+                return
+            if is_dash and self._handle_dash_indent():
                 event.accept()
                 return
             if is_task and self._handle_task_indent(task_indent):
@@ -2312,6 +2344,9 @@ class MarkdownEditor(QTextEdit):
                 if is_bullet and self._handle_bullet_dedent():
                     event.accept()
                     return
+                if is_dash and self._handle_dash_dedent():
+                    event.accept()
+                    return
                 if is_task and self._handle_task_dedent(task_indent):
                     event.accept()
                     return
@@ -2321,6 +2356,11 @@ class MarkdownEditor(QTextEdit):
         # Enter: continue bullet or terminate if empty
         if is_bullet and event.key() in (Qt.Key_Return, Qt.Key_Enter) and not meaningful_modifiers:
             if self._handle_bullet_enter():
+                event.accept()
+                return
+        # Enter: continue dash list or terminate if empty
+        if is_dash and event.key() in (Qt.Key_Return, Qt.Key_Enter) and not meaningful_modifiers:
+            if self._handle_dash_enter():
                 event.accept()
                 return
         # Enter: continue task checkbox lines
@@ -2368,6 +2408,10 @@ class MarkdownEditor(QTextEdit):
             if not self._is_cursor_at_link_activation_point(cursor):
                 # Handle bullet list continuation (non-bullet lines)
                 if self._handle_bullet_enter():
+                    event.accept()
+                    return
+                # Handle dash list continuation (non-dash lines)
+                if self._handle_dash_enter():
                     event.accept()
                     return
                 # For non-bullets: carry over leading indentation on new line
@@ -2418,6 +2462,10 @@ class MarkdownEditor(QTextEdit):
             self._last_camel_trigger = "enter" if event.key() in (Qt.Key_Return, Qt.Key_Enter) else "space"
             self._last_camel_cursor_pos = self.textCursor().position()
             self._schedule_camel_refresh()
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                block = self.textCursor().block().previous()
+                if block.isValid():
+                    self._finalize_heading_block(block)
 
     def contextMenuEvent(self, event):  # type: ignore[override]
         menu = None
@@ -3804,26 +3852,52 @@ class MarkdownEditor(QTextEdit):
     def _vi_selected_text_or_line(self) -> Optional[str]:
         cursor = QTextCursor(self.textCursor())
         if cursor.hasSelection():
-            text = cursor.selectedText()
+            text = self._vi_selection_as_markdown(cursor)
         else:
             block = cursor.block()
             if not block.isValid():
                 return None
             cursor.select(QTextCursor.LineUnderCursor)
-            text = cursor.selectedText()
+            text = self._vi_selection_as_markdown(cursor)
+        if text is None:
+            return None
         normalized = text.replace("\u2029", "\n")
         return normalized if normalized else None
+
+    def _vi_selection_as_markdown(self, cursor: QTextCursor) -> Optional[str]:
+        """Return selected content as markdown, preserving images."""
+        if not cursor.hasSelection():
+            return None
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+        doc_cursor = QTextCursor(self.document())
+        doc_cursor.setPosition(start)
+        parts: list[str] = []
+        while doc_cursor.position() < end:
+            doc_cursor.setPosition(doc_cursor.position() + 1, QTextCursor.KeepAnchor)
+            fmt = doc_cursor.charFormat()
+            if fmt.isImageFormat():
+                parts.append(self._markdown_from_image_format(fmt.toImageFormat()))
+            else:
+                part = doc_cursor.selectedText()
+                if part:
+                    parts.append(part)
+            doc_cursor.setPosition(doc_cursor.position())
+        if not parts:
+            return None
+        return "".join(parts)
 
     def _vi_cut_selection_or_char(self) -> None:
         cursor = self.textCursor()
         cursor.beginEditBlock()
         text = ""
         if cursor.hasSelection():
-            text = cursor.selectedText()
+            text = self._vi_selection_as_markdown(cursor) or ""
             cursor.removeSelectedText()
         else:
             cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor)
-            text = cursor.selectedText()
+            sel_text = self._vi_selection_as_markdown(cursor)
+            text = sel_text if sel_text is not None else cursor.selectedText()
             if text:
                 cursor.removeSelectedText()
         cursor.endEditBlock()
@@ -3843,6 +3917,8 @@ class MarkdownEditor(QTextEdit):
         cursor.insertText(text)
         cursor.endEditBlock()
         self.setTextCursor(cursor)
+        if "![" in text:
+            self._render_images(self.toPlainText())
 
     def _vi_paste_buffer(self) -> Optional[str]:
         sys_clip = self._system_clipboard_text()
@@ -4119,8 +4195,16 @@ class MarkdownEditor(QTextEdit):
             stripped = text.lstrip()
             if stripped:
                 level = heading_level_from_char(stripped[0])
-                if level:
+                title = None
+                if not level:
+                    match = HEADING_MARK_PATTERN.match(text)
+                    if match:
+                        hashes = match.group(2)
+                        title = match.group(4).strip()
+                        level = min(len(hashes), HEADING_MAX_LEVEL)
+                else:
                     title = stripped[1:].strip()
+                if level:
                     cursor = QTextCursor(block)
                     outline.append(
                         {
@@ -4218,8 +4302,15 @@ class MarkdownEditor(QTextEdit):
 
         line = TASK_LINE_PATTERN.sub(task_repl, original)
 
-        # 2) Heading marks: #'s → sentinel on this line only
-        line = HEADING_MARK_PATTERN.sub(self._encode_heading, line)
+        # 2) Heading marks: #'s → sentinel on this line only (unless actively editing)
+        delay_heading_render = False
+        if HEADING_MARK_PATTERN.match(line):
+            stripped = line.lstrip()
+            # Keep hashes visible while the cursor is on this line; render after Enter.
+            if not (stripped and heading_level_from_char(stripped[0])):
+                delay_heading_render = True
+        if not delay_heading_render:
+            line = HEADING_MARK_PATTERN.sub(self._encode_heading, line)
 
         # 3) Wiki-style links: [link|label] → \x00link\x00label\x00
         line = WIKI_LINK_STORAGE_PATTERN.sub(self._encode_wiki_link, line)
@@ -4242,6 +4333,19 @@ class MarkdownEditor(QTextEdit):
                 line = indent + "• " + stripped[2:]
 
         if line == original:
+            # Even if text is unchanged, ensure hanging indent matches current line type
+            is_bullet, bullet_indent, _ = self._is_bullet_line(line)
+            is_dash, dash_indent, _ = self._is_dash_line(line)
+            is_task, task_indent, _, _ = self._is_task_line(line)
+            if is_bullet:
+                self._apply_hanging_indent(block, bullet_indent, "• ")
+            elif is_dash:
+                self._apply_hanging_indent(block, dash_indent, "- ")
+            elif is_task:
+                marker = "☑ " if line.strip().startswith("☑") else "☐ "
+                self._apply_hanging_indent(block, task_indent, marker)
+            else:
+                self._clear_hanging_indent(block)
             return
 
         # Preserve caret relative to line start
@@ -4266,12 +4370,85 @@ class MarkdownEditor(QTextEdit):
             self.setTextCursor(c)
         finally:
             self._display_guard = False
+        # Apply hanging indent for wrapped lines
+        is_bullet, bullet_indent, _ = self._is_bullet_line(line)
+        is_dash, dash_indent, _ = self._is_dash_line(line)
+        is_task, task_indent, _, _ = self._is_task_line(line)
+        if is_bullet:
+            self._apply_hanging_indent(block, bullet_indent, "• ")
+        elif is_dash:
+            self._apply_hanging_indent(block, dash_indent, "- ")
+        elif is_task:
+            marker = "☑ " if line.strip().startswith("☑") else "☐ "
+            self._apply_hanging_indent(block, task_indent, marker)
+        else:
+            self._clear_hanging_indent(block)
         self._schedule_heading_outline()
 
     def _restore_cursor_position(self, position: int) -> None:
         cursor = self.textCursor()
         cursor.setPosition(min(position, len(self.toPlainText())))
         self.setTextCursor(cursor)
+
+    def _apply_hanging_indent(self, block, indent: str, marker: str) -> None:
+        """Indent wrapped lines to start after bullet/task markers."""
+        if not block or not block.isValid():
+            return
+        fm = self.fontMetrics()
+        left_margin = fm.horizontalAdvance(indent + marker)
+        text_indent = -fm.horizontalAdvance(marker)
+        fmt = block.blockFormat()
+        if fmt.leftMargin() == left_margin and fmt.textIndent() == text_indent:
+            return
+        fmt.setLeftMargin(left_margin)
+        fmt.setTextIndent(text_indent)
+        cursor = QTextCursor(block)
+        cursor.setBlockFormat(fmt)
+
+    def _clear_hanging_indent(self, block) -> None:
+        if not block or not block.isValid():
+            return
+        fmt = block.blockFormat()
+        if fmt.leftMargin() == 0 and fmt.textIndent() == 0:
+            return
+        fmt.setLeftMargin(0)
+        fmt.setTextIndent(0)
+        cursor = QTextCursor(block)
+        cursor.setBlockFormat(fmt)
+
+    def _finalize_heading_block(self, block) -> None:
+        """Render a plain '# ' heading line into display form once editing is done."""
+        if self._display_guard or not block or not block.isValid():
+            return
+        text = block.text()
+        if not text:
+            return
+        stripped = text.lstrip()
+        # Skip if already rendered (sentinel present)
+        if stripped and heading_level_from_char(stripped[0]):
+            return
+        converted = HEADING_MARK_PATTERN.sub(self._encode_heading, text)
+        if converted == text:
+            return
+
+        current = self.textCursor()
+        current_pos = current.position()
+        block_start = block.position()
+        delta = len(converted) - len(text)
+
+        self._display_guard = True
+        try:
+            line_cursor = QTextCursor(block)
+            line_cursor.select(QTextCursor.LineUnderCursor)
+            line_cursor.insertText(converted)
+        finally:
+            self._display_guard = False
+
+        if delta and current_pos > block_start + len(text):
+            new_cursor = self.textCursor()
+            new_cursor.setPosition(max(block_start, current_pos + delta))
+            self.setTextCursor(new_cursor)
+        self._schedule_heading_outline()
     
     # --- Bullet list handling ---
     
@@ -4291,6 +4468,62 @@ class MarkdownEditor(QTextEdit):
             return (True, indent, content)
         
         return (False, "", "")
+
+    def _is_dash_line(self, text: str) -> tuple[bool, str, str]:
+        """Check if line is a dash list entry: leading '-' plus a space."""
+        stripped = text.lstrip()
+        indent = text[:len(text) - len(stripped)]
+        if stripped.startswith("- ") and not stripped.startswith("--"):
+            return True, indent, stripped[2:]
+        return False, "", ""
+
+    def _list_line_info(self, text: str) -> tuple[str, str, str]:
+        """Return (kind, indent, remainder) where kind is bullet/dash/task/other."""
+        is_bullet, indent, _ = self._is_bullet_line(text)
+        if is_bullet:
+            return "bullet", indent, text[len(indent):]
+        is_dash, indent, _ = self._is_dash_line(text)
+        if is_dash:
+            return "dash", indent, text[len(indent):]
+        is_task, indent, _, _ = self._is_task_line(text)
+        if is_task:
+            return "task", indent, text[len(indent):]
+        return "other", "", text
+
+    def _list_children_blocks(self, block, current_indent_len: int):
+        """Collect immediately following list blocks that are more indented than current.
+
+        Non-list lines with greater indent are skipped but allow traversal to continue,
+        so grandchildren separated by blank/indented lines still move with the parent.
+        """
+        children = []
+        next_block = block.next()
+        while next_block.isValid():
+            text = next_block.text()
+            leading_ws = len(text) - len(text.lstrip(" \t"))
+            kind, next_indent, remainder = self._list_line_info(text)
+            if kind == "other":
+                if leading_ws > current_indent_len:
+                    next_block = next_block.next()
+                    continue
+                break
+            if len(next_indent) > current_indent_len:
+                children.append((next_block, kind, next_indent, remainder))
+                next_block = next_block.next()
+                continue
+            break
+        return children
+
+    def _rewrite_block_indent(self, block, new_indent: str, remainder: Optional[str] = None) -> str:
+        """Replace block text with new_indent + remainder (defaults to existing remainder)."""
+        text = block.text()
+        if remainder is None:
+            remainder = text[len(text) - len(text.lstrip(" \t")):]
+        new_line = new_indent + remainder
+        line_cursor = QTextCursor(block)
+        line_cursor.select(QTextCursor.LineUnderCursor)
+        line_cursor.insertText(new_line)
+        return new_line
     
     def _handle_bullet_enter(self) -> bool:
         """Handle Enter key in bullet mode. Returns True if handled."""
@@ -4302,23 +4535,59 @@ class MarkdownEditor(QTextEdit):
         if not is_bullet:
             return False
         
-        # Get cursor position relative to line start
-        rel_pos = cursor.position() - block.position()
-        bullet_start = len(indent) + 2  # After bullet marker
-        
         # If bullet line is empty (just the bullet), exit bullet mode
         if not content.strip():
-            # Remove the bullet marker and stay on same line
             cursor.beginEditBlock()
             cursor.select(QTextCursor.LineUnderCursor)
             cursor.removeSelectedText()
-            cursor.insertText(indent)  # Keep indent but remove bullet
+            if indent:
+                new_indent, removed = self._dedent_line_text(indent, self.LIST_INDENT_UNIT)
+                if removed == 0:
+                    new_indent = ""
+                cursor.insertText(new_indent + "• ")
+                cursor.setPosition(cursor.block().position() + len(new_indent) + 2)
+            else:
+                cursor.insertText("")
+                cursor.setPosition(cursor.block().position())
             cursor.endEditBlock()
+            self.setTextCursor(cursor)
             return True
         
         # Insert new line with bullet (use • for visual consistency)
         cursor.beginEditBlock()
         cursor.insertText("\n" + indent + "• ")
+        cursor.endEditBlock()
+        return True
+    
+    def _handle_dash_enter(self) -> bool:
+        """Handle Enter key in dash-list mode. Returns True if handled."""
+        cursor = self.textCursor()
+        block = cursor.block()
+        text = block.text()
+
+        is_dash, indent, content = self._is_dash_line(text)
+        if not is_dash:
+            return False
+
+        if not content.strip():
+            cursor.beginEditBlock()
+            cursor.select(QTextCursor.LineUnderCursor)
+            cursor.removeSelectedText()
+            if indent:
+                new_indent, removed = self._dedent_line_text(indent, self.LIST_INDENT_UNIT)
+                if removed == 0:
+                    new_indent = ""
+                cursor.insertText(new_indent + "- ")
+                cursor.setPosition(cursor.block().position() + len(new_indent) + 2)
+            else:
+                cursor.insertText("")
+                cursor.setPosition(cursor.block().position())
+            cursor.endEditBlock()
+            self.setTextCursor(cursor)
+            return True
+
+        cursor.beginEditBlock()
+        cursor.insertText("\n" + indent + "- ")
         cursor.endEditBlock()
         return True
 
@@ -4344,8 +4613,16 @@ class MarkdownEditor(QTextEdit):
         if not content.strip():
             cursor.select(QTextCursor.LineUnderCursor)
             cursor.removeSelectedText()
-            cursor.insertText(indent)
-            cursor.setPosition(cursor.block().position() + len(indent))
+            if indent:
+                new_indent, removed = self._dedent_line_text(indent, self.LIST_INDENT_UNIT)
+                if removed == 0:
+                    new_indent = ""
+                marker = "☐ "
+                cursor.insertText(new_indent + marker)
+                cursor.setPosition(cursor.block().position() + len(new_indent) + len(marker))
+            else:
+                cursor.insertText("")
+                cursor.setPosition(cursor.block().position())
             cursor.endEditBlock()
             self.setTextCursor(cursor)
             return True
@@ -4388,32 +4665,65 @@ class MarkdownEditor(QTextEdit):
 
     def _handle_task_indent(self, indent: str) -> bool:
         cursor = self.textCursor()
+        block = cursor.block()
+        text = block.text()
+
+        # Collect child list items with greater indent
+        current_indent_len = len(indent)
+        children_blocks = self._list_children_blocks(block, current_indent_len)
+
+        rel_from_end = len(text) - (cursor.position() - block.position())
+
         cursor.beginEditBlock()
         cursor.select(QTextCursor.LineUnderCursor)
         line_text = cursor.selectedText()
         cursor.removeSelectedText()
-        new_indent = indent + "  "
+        new_indent = indent + self.LIST_INDENT_UNIT
         marker_len = 2  # '☐ '
-        cursor.insertText(new_indent + line_text[len(indent):])
-        cursor.setPosition(cursor.block().position() + len(new_indent) + marker_len)
-        cursor.endEditBlock()
+        new_line = new_indent + line_text[len(indent):]
+        cursor.insertText(new_line)
+        # Indent children (any list type)
+        for child_block, _, child_indent, child_remainder in children_blocks:
+            new_child_indent = child_indent + self.LIST_INDENT_UNIT
+            self._rewrite_block_indent(child_block, new_child_indent, child_remainder)
+
+        new_pos = block.position() + len(new_line) - rel_from_end
+        cursor.setPosition(max(block.position() + len(new_indent) + marker_len, new_pos))
         self.setTextCursor(cursor)
+        cursor.endEditBlock()
         return True
 
     def _handle_task_dedent(self, indent: str) -> bool:
-        if len(indent) < 2:
+        if len(indent) < len(self.LIST_INDENT_UNIT):
             return False
         cursor = self.textCursor()
+        block = cursor.block()
+        text = block.text()
+
+        current_indent_len = len(indent)
+        indent_unit_len = len(self.LIST_INDENT_UNIT)
+        children_blocks = self._list_children_blocks(block, current_indent_len)
+
+        rel_from_end = len(text) - (cursor.position() - block.position())
+
         cursor.beginEditBlock()
         cursor.select(QTextCursor.LineUnderCursor)
         line_text = cursor.selectedText()
-        dedent = indent[:-2]
+        dedent = indent[:-indent_unit_len]
         cursor.removeSelectedText()
         marker_len = 2
-        cursor.insertText(dedent + line_text[len(indent):])
-        cursor.setPosition(cursor.block().position() + len(dedent) + marker_len)
-        cursor.endEditBlock()
+        new_line = dedent + line_text[len(indent):]
+        cursor.insertText(new_line)
+
+        for child_block, _, child_indent, child_remainder in children_blocks:
+            if len(child_indent) >= indent_unit_len:
+                new_child_indent = child_indent[:-indent_unit_len]
+                self._rewrite_block_indent(child_block, new_child_indent, child_remainder)
+
+        new_pos = block.position() + len(new_line) - rel_from_end
+        cursor.setPosition(max(block.position() + len(dedent) + marker_len, new_pos))
         self.setTextCursor(cursor)
+        cursor.endEditBlock()
         return True
     
     def _handle_bullet_indent(self) -> bool:
@@ -4433,20 +4743,8 @@ class MarkdownEditor(QTextEdit):
         # Get current indent level
         current_indent_len = len(indent)
         
-        # Find all child bullets (lines with greater indent following this line)
-        children_blocks = []
-        next_block = block.next()
-        while next_block.isValid():
-            next_text = next_block.text()
-            next_is_bullet, next_indent, next_content = self._is_bullet_line(next_text)
-            
-            if next_is_bullet and len(next_indent) > current_indent_len:
-                # This is a child bullet
-                children_blocks.append(next_block)
-                next_block = next_block.next()
-            else:
-                # No longer a child (same or less indent, or not a bullet)
-                break
+        # Find all child list items (bullets/dashes/tasks) that are more indented
+        children_blocks = self._list_children_blocks(block, current_indent_len)
         
         # Save cursor position relative to end of line
         rel_from_end = len(text) - (cursor.position() - block.position())
@@ -4455,24 +4753,14 @@ class MarkdownEditor(QTextEdit):
         cursor.beginEditBlock()
         
         # Indent the current line
-        new_indent = indent + "  "
-        new_line = new_indent + "• " + content
+        new_indent = indent + self.LIST_INDENT_UNIT
+        remainder = text[len(indent):]
+        new_line = self._rewrite_block_indent(block, new_indent, remainder)
         
-        line_cursor = QTextCursor(block)
-        line_cursor.select(QTextCursor.LineUnderCursor)
-        line_cursor.insertText(new_line)
-        
-        # Indent all child bullets
-        for child_block in children_blocks:
-            child_text = child_block.text()
-            child_is_bullet, child_indent, child_content = self._is_bullet_line(child_text)
-            if child_is_bullet:
-                new_child_indent = child_indent + "  "
-                new_child_line = new_child_indent + "• " + child_content
-                
-                child_cursor = QTextCursor(child_block)
-                child_cursor.select(QTextCursor.LineUnderCursor)
-                child_cursor.insertText(new_child_line)
+        # Indent all child list items
+        for child_block, _, child_indent, child_remainder in children_blocks:
+            new_child_indent = child_indent + self.LIST_INDENT_UNIT
+            self._rewrite_block_indent(child_block, new_child_indent, child_remainder)
         
         # Restore cursor position (adjusted for new indent)
         new_pos = block.position() + len(new_line) - rel_from_end
@@ -4502,24 +4790,13 @@ class MarkdownEditor(QTextEdit):
         # Get current indent level
         current_indent_len = len(indent)
         
-        # Find all child bullets (lines with greater indent following this line)
-        children_blocks = []
-        next_block = block.next()
-        while next_block.isValid():
-            next_text = next_block.text()
-            next_is_bullet, next_indent, next_content = self._is_bullet_line(next_text)
-            
-            if next_is_bullet and len(next_indent) > current_indent_len:
-                # This is a child bullet
-                children_blocks.append(next_block)
-                next_block = next_block.next()
-            else:
-                # No longer a child (same or less indent, or not a bullet)
-                break
+        # Find all child list items (bullets/dashes/tasks) that are more indented
+        children_blocks = self._list_children_blocks(block, current_indent_len)
         
-        # Remove up to two spaces from indent
-        if len(indent) >= 2:
-            new_indent = indent[:-2]
+        # Remove up to one indent unit from indent
+        indent_unit_len = len(self.LIST_INDENT_UNIT)
+        if len(indent) >= indent_unit_len:
+            new_indent = indent[:-indent_unit_len]
         else:
             new_indent = ""
         
@@ -4530,25 +4807,80 @@ class MarkdownEditor(QTextEdit):
         cursor.beginEditBlock()
         
         # Dedent the current line
-        new_line = new_indent + "• " + content
+        remainder = text[len(indent):]
+        new_line = self._rewrite_block_indent(block, new_indent, remainder)
         
-        line_cursor = QTextCursor(block)
-        line_cursor.select(QTextCursor.LineUnderCursor)
-        line_cursor.insertText(new_line)
-        
-        # Dedent all child bullets (if they have at least 2 spaces to remove)
-        for child_block in children_blocks:
-            child_text = child_block.text()
-            child_is_bullet, child_indent, child_content = self._is_bullet_line(child_text)
-            if child_is_bullet and len(child_indent) >= 2:
-                new_child_indent = child_indent[:-2]
-                new_child_line = new_child_indent + "• " + child_content
-                
-                child_cursor = QTextCursor(child_block)
-                child_cursor.select(QTextCursor.LineUnderCursor)
-                child_cursor.insertText(new_child_line)
+        # Dedent all child list items (if they have enough indent)
+        for child_block, _, child_indent, child_remainder in children_blocks:
+            if len(child_indent) >= indent_unit_len:
+                new_child_indent = child_indent[:-indent_unit_len]
+                self._rewrite_block_indent(child_block, new_child_indent, child_remainder)
         
         # Restore cursor position (adjusted for new indent)
+        new_pos = block.position() + len(new_line) - rel_from_end
+        cursor.setPosition(max(block.position() + len(new_indent) + 2, new_pos))
+        self.setTextCursor(cursor)
+        cursor.endEditBlock()
+        return True
+
+    def _handle_dash_indent(self) -> bool:
+        """Handle Tab key for dash lists, carrying child dashes along."""
+        cursor = self.textCursor()
+        block = cursor.block()
+        text = block.text()
+
+        is_dash, indent, content = self._is_dash_line(text)
+        if not is_dash:
+            return False
+
+        current_indent_len = len(indent)
+        children_blocks = self._list_children_blocks(block, current_indent_len)
+
+        rel_from_end = len(text) - (cursor.position() - block.position())
+
+        cursor.beginEditBlock()
+        new_indent = indent + self.LIST_INDENT_UNIT
+        remainder = text[len(indent):]
+        new_line = self._rewrite_block_indent(block, new_indent, remainder)
+
+        for child_block, _, child_indent, child_remainder in children_blocks:
+            new_child_indent = child_indent + self.LIST_INDENT_UNIT
+            self._rewrite_block_indent(child_block, new_child_indent, child_remainder)
+
+        new_pos = block.position() + len(new_line) - rel_from_end
+        cursor.setPosition(max(block.position() + len(new_indent) + 2, new_pos))
+        self.setTextCursor(cursor)
+        cursor.endEditBlock()
+        return True
+
+    def _handle_dash_dedent(self) -> bool:
+        """Handle Shift+Tab for dash lists, carrying child dashes along."""
+        cursor = self.textCursor()
+        block = cursor.block()
+        text = block.text()
+
+        is_dash, indent, content = self._is_dash_line(text)
+        if not is_dash:
+            return False
+        indent_unit_len = len(self.LIST_INDENT_UNIT)
+        if len(indent) == 0:
+            return True
+
+        current_indent_len = len(indent)
+        children_blocks = self._list_children_blocks(block, current_indent_len)
+
+        rel_from_end = len(text) - (cursor.position() - block.position())
+
+        cursor.beginEditBlock()
+        new_indent = indent[:-indent_unit_len] if len(indent) >= indent_unit_len else ""
+        remainder = text[len(indent):]
+        new_line = self._rewrite_block_indent(block, new_indent, remainder)
+
+        for child_block, _, child_indent, child_remainder in children_blocks:
+            if len(child_indent) >= indent_unit_len:
+                new_child_indent = child_indent[:-indent_unit_len]
+                self._rewrite_block_indent(child_block, new_child_indent, child_remainder)
+
         new_pos = block.position() + len(new_line) - rel_from_end
         cursor.setPosition(max(block.position() + len(new_indent) + 2, new_pos))
         self.setTextCursor(cursor)
