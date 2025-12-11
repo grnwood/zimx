@@ -209,4 +209,4 @@ This helps verify FTS wiring without needing the full FastAPI stack running.
 You can paste that whole block as a comment or as a prompt to your local coding assistant (Codex / Copilot-like) and let it generate the schema + helper module + FastAPI route in your actual project structure.
 
 If you want, I can also write a **second brief** focused just on “Refactor `search_index.py` to use connection pooling / dependency injection,” once you get the basic version in.
-```
+```	

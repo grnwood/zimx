@@ -41,8 +41,7 @@ Logbook of all the development efforts on zim. yes!
 (x)  give the toc widget more prominence when hovering over a heading @edit
 ( ) implement the full text search with your chatgpt vetted feature @edit
 	[:FullTextSearch|FullTextSearch]
-	
-( )  when i paste a link i copied from a header or toc bar and paste into page it doesnt create the link in link navigator @edit
+	 ( )  when i paste a link i copied from a header or toc bar and paste into page it doesnt create the link in link navigator @edit
 	Ai is really not handling this well, I'm going to have to debug / fix this one myself.
 ( )  i added redo along with undo.  there is still something funky here but its mostly all usable, so leaving alone for now.  @edit
 ( )  there is a c++/dump issue sometimes messing around in the jump to or link view, need to investigate. @edit
@@ -51,6 +50,8 @@ Logbook of all the development efforts on zim. yes!
 		Username: joe.greenwood@capgemini.com
 ( )  link pattern needs to be smarter too @edit
 	e.g. this is not a link Password: Py9D+ssJ
+	e.g. also plus mixed in some other words
+		 ` node, detach+attach sub-trees, remove sub-trees).`
 (x)  slight oddity with the dirty/save buffer on open as window (win32 only?) since vi edit mode maybe? @edit
 (x)  opened window (at least on calendar) not treated as a first class window in the os tab switcher maybe win32 only? @edit
 ( )  maybe ctrl-enter to get out of vi mode?  moving off home keys to esc is disrupting to flow. @edit
@@ -90,7 +91,7 @@ Logbook of all the development efforts on zim. yes!
 			￼
 ( )  when flipping toggles on tasks we should update the number next to the tag so counts and data match up. @task
 	
-### Page Templages
+### Page Templates
 ---
 ( )  ctrl-n should default to the `New Page` template.  @page
 ( ) Add some more?  @page
