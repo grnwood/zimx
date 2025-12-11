@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 import sqlite3
 import time
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
+
+from zimx.server.adapters.files import PAGE_SUFFIX
 
 GLOBAL_CONFIG = Path.home() / ".zimx_config.json"
 
@@ -149,6 +152,39 @@ def load_minimal_font_scan_enabled() -> bool:
     if isinstance(val, bool):
         return val
     return bool(val)
+
+
+def load_link_update_mode() -> str:
+    """Return link update handling preference: none | lazy | reindex."""
+    payload = _read_global_config()
+    mode = payload.get("link_update_mode")
+    if isinstance(mode, str):
+        mode_lower = mode.strip().lower()
+        if mode_lower in {"none", "lazy", "reindex"}:
+            return mode_lower
+    return "reindex"
+
+
+def save_link_update_mode(mode: str) -> None:
+    """Persist link update handling preference."""
+    normalized = (mode or "").strip().lower()
+    if normalized not in {"none", "lazy", "reindex"}:
+        normalized = "reindex"
+    _update_global_config({"link_update_mode": normalized})
+
+
+def load_update_links_on_index() -> bool:
+    """Return whether indexer should rewrite page links during reindex (default: True)."""
+    payload = _read_global_config()
+    val = payload.get("update_links_on_index")
+    if val is None:
+        return True
+    return bool(val)
+
+
+def save_update_links_on_index(enabled: bool) -> None:
+    """Persist preference to rewrite page links during reindex."""
+    _update_global_config({"update_links_on_index": bool(enabled)})
 
 
 def save_minimal_font_scan_enabled(enabled: bool) -> None:
@@ -731,28 +767,69 @@ def load_cursor_position(path: str) -> Optional[int]:
     return int(row[0]) if row else None
 
 
+def _next_display_order(conn: sqlite3.Connection, parent_path: str) -> int:
+    """Return the next display order slot for a parent folder."""
+    try:
+        cur = conn.execute("SELECT MAX(display_order) FROM pages WHERE parent_path = ?", (parent_path,))
+        current = cur.fetchone()[0]
+        return (current or 0) + 1
+    except sqlite3.OperationalError:
+        return 0
+
+
 def update_page_index(
     path: str,
     title: str,
     tags: Iterable[str],
     links: Iterable[str],
     tasks: Sequence[dict],
+    display_order: int | None = None,
+    last_modified: float | None = None,
 ) -> None:
     conn = _get_conn()
     if not conn:
         return
     now = time.time()
+    modified_ts = last_modified if last_modified is not None else now
+    parent_path = _parent_folder_for_page(path)
+    existing_order = None
+    try:
+        row = conn.execute("SELECT display_order FROM pages WHERE path = ?", (path,)).fetchone()
+        if row:
+            existing_order = row[0]
+    except sqlite3.OperationalError:
+        existing_order = None
+    if display_order is None:
+        if existing_order is not None:
+            display_order = existing_order
+        else:
+            display_order = _next_display_order(conn, parent_path)
     with conn:
-        conn.execute("REPLACE INTO pages(path, title, updated) VALUES(?, ?, ?)", (path, title, now))
+        unique_tags = list(dict.fromkeys(tags))
+        unique_links = list(dict.fromkeys(links))
+        conn.execute(
+            """
+            INSERT INTO pages(path, title, updated, parent_path, display_order)
+            VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(path) DO UPDATE SET
+                title = excluded.title,
+                updated = excluded.updated,
+                last_modified = excluded.updated,
+                parent_path = excluded.parent_path,
+                display_order = COALESCE(excluded.display_order, pages.display_order)
+            """,
+            (path, title, modified_ts, parent_path, display_order),
+        )
         conn.execute("DELETE FROM page_tags WHERE page = ?", (path,))
         conn.executemany(
             "INSERT INTO page_tags(page, tag) VALUES(?, ?)",
-            ((path, tag) for tag in tags),
+            ((path, tag) for tag in unique_tags),
         )
         conn.execute("DELETE FROM links WHERE from_path = ?", (path,))
+        print(f"unique links: {unique_links}")
         conn.executemany(
             "INSERT INTO links(from_path, to_path) VALUES(?, ?)",
-            ((path, link) for link in links),
+            ((path, link) for link in unique_links),
         )
         conn.execute("DELETE FROM tasks WHERE path = ?", (path,))
         conn.execute("DELETE FROM task_tags WHERE task_id LIKE ?", (f"{path}:%",))
@@ -811,25 +888,258 @@ def delete_folder_index(folder_path: str) -> None:
     conn = _get_conn()
     if not conn:
         return
-    
-    # Clean up the folder path
-    folder_prefix = folder_path.rstrip("/")
-    if not folder_prefix.startswith("/"):
-        folder_prefix = "/" + folder_prefix
-    
-    # Find all pages that start with this folder path
-    # Pattern: /PageA/PageB/% will match /PageA/PageB/PageC.txt, /PageA/PageB/Sub/Sub.txt, etc.
+
+    folder_prefix = _normalize_folder_prefix(folder_path)
+    _delete_index_for_prefix(conn, folder_prefix)
+
+
+def delete_tree_index(folder_path: str) -> None:
+    """Thread-safe deletion helper for API callers."""
+    conn = _connect_to_vault_db()
+    try:
+        prefix = _normalize_folder_prefix(folder_path)
+        _delete_index_for_prefix(conn, prefix)
+    finally:
+        conn.close()
+
+
+def _normalize_folder_prefix(folder_path: str) -> str:
+    """Normalize folder path to a leading-slash prefix with no trailing slash (except root)."""
+    cleaned = folder_path.strip().replace("\\", "/").rstrip("/")
+    if not cleaned:
+        return "/"
+    if not cleaned.startswith("/"):
+        cleaned = f"/{cleaned}"
+    return cleaned
+
+
+def _delete_index_for_prefix(conn: sqlite3.Connection, folder_prefix: str) -> None:
     like_pattern = f"{folder_prefix}/%"
-    
     with conn:
-        # Delete all pages under this folder
         conn.execute("DELETE FROM pages WHERE path LIKE ?", (like_pattern,))
         conn.execute("DELETE FROM page_tags WHERE page LIKE ?", (like_pattern,))
-        conn.execute("DELETE FROM links WHERE from_path LIKE ? OR to_path LIKE ?", 
-                    (like_pattern, like_pattern))
+        conn.execute("DELETE FROM links WHERE from_path LIKE ? OR to_path LIKE ?", (like_pattern, like_pattern))
         conn.execute("DELETE FROM tasks WHERE path LIKE ?", (like_pattern,))
-        # For task_tags, the task_id format is "path:line", so we need to match "path:%"
         conn.execute("DELETE FROM task_tags WHERE task_id LIKE ?", (f"{folder_prefix}/%:%",))
+        conn.execute("DELETE FROM bookmarks WHERE path LIKE ?", (like_pattern,))
+        conn.execute("DELETE FROM cursor_positions WHERE path LIKE ?", (like_pattern,))
+        conn.execute("DELETE FROM attachments WHERE page_path LIKE ?", (like_pattern,))
+        conn.execute("DELETE FROM attachments WHERE attachment_path LIKE ?", (like_pattern,))
+        conn.execute("DELETE FROM kv WHERE key LIKE ?", (f"hash:{folder_prefix}/%",))
+
+
+def _rebase_page_path(page_path: str, old_folder: str, new_folder: str) -> str:
+    """Rebase a page path (with .txt) from one folder prefix to another."""
+    cleaned_old = old_folder.strip().lstrip("/")
+    cleaned_new = new_folder.strip().lstrip("/")
+    page_obj = Path(page_path.lstrip("/"))
+    page_folder = page_obj.parent
+    relative = page_folder.relative_to(Path(cleaned_old))
+    new_base = Path(cleaned_new) / relative
+    # If this is the root page for the folder, rename the file to match the new folder leaf
+    if page_folder == Path(cleaned_old):
+        rebased = new_base / f"{new_base.name}{PAGE_SUFFIX}"
+    else:
+        rebased = new_base / page_obj.name
+    return f"/{rebased.as_posix()}"
+
+
+def _collapse_duplicate_leaf_path(page_path: str) -> str:
+    """If a path ends with .../Leaf/Leaf.txt, collapse to .../Leaf.txt."""
+    cleaned = (page_path or "").strip().lstrip("/")
+    if not cleaned:
+        return page_path
+    p = Path(cleaned)
+    if p.suffix.lower() != PAGE_SUFFIX:
+        return page_path
+    if len(p.parts) >= 2 and p.stem == p.parent.name:
+        collapsed = p.parent.parent / f"{p.stem}{PAGE_SUFFIX}"
+        return f"/{collapsed.as_posix()}"
+    return page_path
+
+
+def move_tree_index(old_folder_path: str, new_folder_path: str, root: Path, *, set_new_parent_order: bool = False) -> dict[str, dict]:
+    """Move all indexed paths from old_folder_path to new_folder_path.
+
+    Returns a dict with path_map (old->new) and orders (new_path->display_order).
+    """
+    conn = _connect_to_vault_db()
+    try:
+        now = time.time()
+        old_prefix = _normalize_folder_prefix(old_folder_path)
+        new_prefix = _normalize_folder_prefix(new_folder_path)
+        if old_prefix == "/":
+            raise RuntimeError("Cannot move the vault root")
+        old_page_path = folder_to_page_path(old_prefix)
+        like_pattern = f"{old_prefix}/%"
+        rows = conn.execute(
+            "SELECT path, display_order FROM pages WHERE path = ? OR path LIKE ?",
+            (old_page_path, like_pattern),
+        ).fetchall()
+        if not rows:
+            return {"path_map": {}, "orders": {}}
+        path_map: dict[str, str] = {}
+        orders: dict[str, int] = {}
+        old_parent = _parent_folder_for_page(old_page_path)
+        new_parent = _parent_folder_for_page(folder_to_page_path(new_prefix))
+        parent_changed = old_parent != new_parent
+        root_new_order = None
+        if parent_changed and set_new_parent_order:
+            root_new_order = _next_display_order(conn, new_parent)
+        for old_path, existing_order in rows:
+            new_path = _rebase_page_path(old_path, old_prefix, new_prefix)
+            parent_path = _parent_folder_for_page(new_path)
+            order = existing_order
+            if order is None:
+                order = _next_display_order(conn, parent_path)
+            if old_path == old_page_path and parent_changed and set_new_parent_order and root_new_order is not None:
+                order = root_new_order
+            path_map[old_path] = new_path
+            orders[new_path] = order
+        new_paths = list(path_map.values())
+        if len(new_paths) != len(set(new_paths)):
+            dupes = sorted({p for p in new_paths if new_paths.count(p) > 1})
+            raise RuntimeError(f"Move would create duplicate page paths: {', '.join(dupes)}")
+        placeholders = ",".join("?" for _ in new_paths)
+        if placeholders:
+            existing = {
+                row[0]
+                for row in conn.execute(f"SELECT path FROM pages WHERE path IN ({placeholders})", new_paths).fetchall()
+            }
+            allowed = set(path_map.keys())
+            conflicts = [p for p in existing if p not in allowed]
+            if conflicts:
+                raise RuntimeError(f"Destination already contains page(s): {', '.join(sorted(conflicts))}")
+        with conn:
+            conn.executemany(
+                "UPDATE pages SET path = ?, parent_path = ?, display_order = ?, last_modified = ? WHERE path = ?",
+                (
+                    (new_path, _parent_folder_for_page(new_path), orders[new_path], now, old_path)
+                    for old_path, new_path in path_map.items()
+                ),
+            )
+            for old_path, new_path in path_map.items():
+                conn.execute("UPDATE page_tags SET page = ? WHERE page = ?", (new_path, old_path))
+                conn.execute("UPDATE links SET from_path = ? WHERE from_path = ?", (new_path, old_path))
+                conn.execute("UPDATE links SET to_path = ? WHERE to_path = ?", (new_path, old_path))
+                conn.execute(
+                    "UPDATE tasks SET path = ?, task_id = REPLACE(task_id, ?, ?) WHERE path = ?",
+                    (new_path, f"{old_path}:", f"{new_path}:", old_path),
+                )
+                conn.execute(
+                    "UPDATE task_tags SET task_id = REPLACE(task_id, ?, ?) WHERE task_id LIKE ?",
+                    (f"{old_path}:", f"{new_path}:", f"{old_path}:%"),
+                )
+                conn.execute("UPDATE bookmarks SET path = ? WHERE path = ?", (new_path, old_path))
+                conn.execute("UPDATE cursor_positions SET path = ? WHERE path = ?", (new_path, old_path))
+                conn.execute("UPDATE attachments SET page_path = ? WHERE page_path = ?", (new_path, old_path))
+            old_abs_prefix = str((root / old_prefix.lstrip("/")).resolve())
+            new_abs_prefix = str((root / new_prefix.lstrip("/")).resolve())
+            if not old_abs_prefix.endswith(os.sep):
+                old_abs_prefix += os.sep
+            if not new_abs_prefix.endswith(os.sep):
+                new_abs_prefix += os.sep
+            conn.execute(
+                "UPDATE attachments SET attachment_path = REPLACE(attachment_path, ?, ?) WHERE attachment_path LIKE ?",
+                (f"{old_prefix}/", f"{new_prefix}/", f"{old_prefix}/%"),
+            )
+            conn.execute(
+                "UPDATE attachments SET stored_path = REPLACE(stored_path, ?, ?) WHERE stored_path LIKE ?",
+                (old_abs_prefix, new_abs_prefix, f"{old_abs_prefix}%"),
+            )
+            conn.execute(
+                "UPDATE kv SET key = REPLACE(key, ?, ?) WHERE key LIKE ?",
+                (f"hash:{old_prefix}", f"hash:{new_prefix}", f"hash:{old_prefix}/%"),
+            )
+        return {"path_map": path_map, "orders": orders}
+    finally:
+        conn.close()
+
+
+def update_link_paths(path_map: dict[str, str]) -> None:
+    """Rewrite link rows to point at new paths after a move/rename."""
+    if not path_map:
+        return
+    conn = _connect_to_vault_db()
+    try:
+        with conn:
+            for old_path, new_path in path_map.items():
+                old_norm = _collapse_duplicate_leaf_path(old_path)
+                new_norm = _collapse_duplicate_leaf_path(new_path)
+                conn.execute("UPDATE links SET from_path = ? WHERE from_path = ?", (new_norm, old_norm))
+                conn.execute("UPDATE links SET to_path = ? WHERE to_path = ?", (new_norm, old_norm))
+                print(f"\033[94m[API] Link index path updated: {old_norm} -> {new_norm}\033[0m")
+    finally:
+        conn.close()
+
+
+def rebuild_index_from_disk(root: Path, keep_tables: Optional[set[str]] = None) -> None:
+    """Drop and recreate vault index tables, preserving selected tables.
+
+    Keeps bookmarks, kv, and any ai* tables by default.
+    """
+    keep: set[str] = {t.lower() for t in (keep_tables or set())}
+    keep.update({"bookmarks", "kv"})
+    conn = _connect_to_vault_db()
+    try:
+        tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        # Always preserve ai* tables
+        for name in tables:
+            if name.lower().startswith("ai"):
+                keep.add(name.lower())
+        to_drop = [name for name in tables if name.lower() not in keep]
+        with conn:
+            for name in to_drop:
+                conn.execute(f"DROP TABLE IF EXISTS {name}")
+        _ensure_schema(conn)
+    finally:
+        conn.close()
+
+
+def ensure_page_entry(page_path: str, title: Optional[str] = None) -> None:
+    """Ensure a page row exists with parent/display order set."""
+    conn = _connect_to_vault_db()
+    try:
+        parent_path = _parent_folder_for_page(page_path)
+        now = time.time()
+        existing_order = None
+        try:
+            row = conn.execute("SELECT display_order FROM pages WHERE path = ?", (page_path,)).fetchone()
+            if row:
+                existing_order = row[0]
+        except sqlite3.OperationalError:
+            existing_order = None
+        order = existing_order if existing_order is not None else _next_display_order(conn, parent_path)
+        page_title = title or Path(page_path.lstrip("/")).stem
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO pages(path, title, updated, parent_path, display_order)
+                VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    parent_path = excluded.parent_path,
+                    last_modified = excluded.updated,
+                    display_order = COALESCE(pages.display_order, excluded.display_order)
+                """,
+            (page_path, page_title, now, parent_path, order),
+        )
+    finally:
+        conn.close()
+
+
+def fetch_display_order_map() -> dict[str, int]:
+    """Return mapping of page path -> display_order for tree sorting."""
+    try:
+        conn = _connect_to_vault_db()
+    except Exception:
+        return {}
+    try:
+        cur = conn.execute("SELECT path, display_order FROM pages")
+        return {row[0]: row[1] for row in cur.fetchall() if row[1] is not None}
+    except sqlite3.OperationalError:
+        return {}
+    finally:
+        conn.close()
 
 
 def search_pages(term: str, limit: int = 50) -> list[dict]:
@@ -1104,6 +1414,86 @@ def _ensure_task_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tasks ADD COLUMN actionable INTEGER")
 
 
+def _parent_folder_for_page(page_path: str) -> str:
+    """Return parent folder path (leading slash) for a page path like /Foo/Bar/Bar.txt."""
+    cleaned = page_path.strip().lstrip("/")
+    if not cleaned:
+        return "/"
+    path_obj = Path(cleaned)
+    parent_folder = path_obj.parent.parent
+    if parent_folder.as_posix() in ("", "."):
+        return "/"
+    return "/" + parent_folder.as_posix().rstrip("/")
+
+
+def _folder_path_for_page(page_path: str) -> str:
+    """Return the folder path (leading slash) containing this page file."""
+    cleaned = page_path.strip().lstrip("/")
+    if not cleaned:
+        return "/"
+    parent_dir = Path(cleaned).parent
+    if parent_dir.as_posix() in ("", "."):
+        return "/"
+    return "/" + parent_dir.as_posix().rstrip("/")
+
+
+def folder_to_page_path(folder_path: str) -> str:
+    """Convert a folder path (/Foo/Bar) to the expected page file path (/Foo/Bar/Bar.txt)."""
+    cleaned = folder_path.strip().replace("\\", "/").strip("/")
+    if not cleaned:
+        return "/"
+    rel = Path(cleaned)
+    page = rel / f"{rel.name}{PAGE_SUFFIX}"
+    return f"/{page.as_posix()}"
+
+
+def _ensure_page_columns(conn: sqlite3.Connection) -> None:
+    """Add newly introduced page columns and backfill defaults."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(pages)").fetchall()}
+    added = False
+    if "parent_path" not in existing:
+        conn.execute("ALTER TABLE pages ADD COLUMN parent_path TEXT")
+        added = True
+    if "display_order" not in existing:
+        conn.execute("ALTER TABLE pages ADD COLUMN display_order INTEGER")
+        added = True
+    if "last_modified" not in existing:
+        conn.execute("ALTER TABLE pages ADD COLUMN last_modified REAL")
+        added = True
+    if added:
+        _backfill_page_hierarchy(conn)
+        try:
+            now = time.time()
+            conn.execute("UPDATE pages SET last_modified = COALESCE(last_modified, updated, ?) WHERE last_modified IS NULL", (now,))
+        except Exception:
+            pass
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_parent_order ON pages(parent_path, display_order)")
+    except sqlite3.OperationalError:
+        # Older SQLite versions or partial schemas might cause this to fail; safe to skip.
+        pass
+
+
+def _backfill_page_hierarchy(conn: sqlite3.Connection) -> None:
+    """Populate parent_path/display_order for existing pages."""
+    rows = conn.execute("SELECT path FROM pages").fetchall()
+    grouped: dict[str, list[str]] = {}
+    for (path,) in rows:
+        parent = _parent_folder_for_page(path)
+        grouped.setdefault(parent, []).append(path)
+    updates: list[tuple[str, int, str]] = []
+    now = time.time()
+    for parent, paths in grouped.items():
+        for idx, path in enumerate(sorted(paths)):
+            updates.append((parent, idx, now, path))
+    if updates:
+        conn.executemany(
+            "UPDATE pages SET parent_path = ?, display_order = ?, last_modified = COALESCE(last_modified, ?) WHERE path = ?",
+            updates,
+        )
+        conn.commit()
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -1118,7 +1508,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS pages (
             path TEXT PRIMARY KEY,
             title TEXT,
-            updated REAL
+            updated REAL,
+            last_modified REAL,
+            parent_path TEXT,
+            display_order INTEGER
         );
         CREATE TABLE IF NOT EXISTS page_tags (
             page TEXT,
@@ -1162,6 +1555,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
     _ensure_task_columns(conn)
+    _ensure_page_columns(conn)
     conn.commit()
 
 

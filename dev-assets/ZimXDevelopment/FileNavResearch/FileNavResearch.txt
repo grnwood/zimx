@@ -81,6 +81,7 @@ Implementing these steps should help maintain consistency between filesystem ope
 ---
 Codex Implementation Specification: FASTAPI-Backed File Server with Rename/Move/Delete and Safe Preflight
 
+## File api and UI treatment	
 1. Overview  
    * Build a FastAPI service exposing file-and-folder operations to a UI.  
    * Support read/write, tree-index listing, rename, move, delete.  
@@ -93,13 +94,6 @@ Codex Implementation Specification: FASTAPI-Backed File Server with Rename/Move/
      - `root/Foo/Bar/Bar.txt`
 
 3. API Endpoints  
-   1. GET  /file?path={ui_path}  
-      – Returns file contents of `{ui_path}`.  
-   2. POST /file  
-      – Body: `{ "path": string, "content": bytes }`  
-      – Writes or overwrites `path/path.txt`.  
-   3. GET  /tree?path={optional_ui_path}  
-      – Returns JSON tree of folders and pages under `path` (or root if omitted).  
    4. OPTIONS /operation  
       – Query params: `path={ui_path}`, `op={rename|move|delete}`, `dest={ui_dest}` (if move or rename)  
       – Returns `{ canOperate: bool, reason?: string }`.  
@@ -112,13 +106,7 @@ Codex Implementation Specification: FASTAPI-Backed File Server with Rename/Move/
    7. DELETE /file  
       – Body: `{ "path": string }`  
       – Deletes folder and all children recursively, or single file if you treat leaves as pages.
-
-4. Internal Path Mapping Utilities  
-   * ui_to_disk(path: str) → Path  
-     – Join root, path, path + “.txt”  
-   * ensure_page_folder(path: str)  
-     – Create folder and empty .txt if not exist.  
-   * list_tree(path: str) → list[ { name, type, children } ]
+	-  The UI currently has logic to detect if a subtree has folders under it or AI chats and warns before deleting, this should remain in place as as safeguard.
 
 5. Preflight Locking & Validation  
    * Maintain an in-memory map or per-file threading.Lock to prevent concurrent deletes/moves.  
@@ -139,11 +127,10 @@ Codex Implementation Specification: FASTAPI-Backed File Server with Rename/Move/
       – Remove or rename affected entries.  
       – Reindex children for move/rename.  
    4. Release locks.  
-   5. Return HTTP 200 with updated tree or diff.
+   5. Return HTTP 200 with updated tree or diff.jkkk
 
 7. Index & Tag Management  
-   * Store a table of pages with fields: `ui_path`, `disk_path`, `tags`, `version`.  
-   * After FS op:  
+     * After FS op:  
      – For delete, remove all rows where `ui_path` startswith deleted prefix.  
      – For rename/move, update `ui_path` prefixes and recompute `disk_path`.  
      – Recompute any tag paths that embed the old path.  
@@ -154,10 +141,11 @@ Codex Implementation Specification: FASTAPI-Backed File Server with Rename/Move/
    * UI listens to response and:  
      – Either redraw entire tree (simple)  
      – Or apply incremental changes (rename node, detach+attach sub-trees, remove sub-trees).
-
+	* The UI should be sortable, add a display order attribute to the page index.  When pages are dragged in the UI to a different location the display index is updated.  The tree can also apply changes directly and not rewrite the whole tree on this move for performance.
+	* The UI drag and drop should enact the file 'move' operation on api (moving subfolders as needed). there should be a visible treatment showing the drag until mouse button is released.
+	
 9. Summary of Best Practices  
    * Enforce locks during preflight + actual operation to avoid races.  
    * Keep FS operations atomic and catch exceptions for rollback if partial.  
    * Immediately update index/db after FS op, before notifying UI.  
-   * Consider WebSocket or SSE for push notifications when multiple clients may alter the tree.  
    * Use optimistic concurrency (versioning) to detect stale UI state.

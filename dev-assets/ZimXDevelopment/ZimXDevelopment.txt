@@ -1,6 +1,10 @@
 # ZimXDevelopment
 Logbook of all the development efforts on zim. yes!
 ---
+### App
+( )   check the vault lock (at least win32) should be warning, i lost writes over this @app
+( )  Add menus for both Format and Go.  [:FormatAndGo|FormatAndGo]
+ 
 ### Calendar
 (x)  I'm seeing some blue dates on a fresh calendar, i only have the 24th defined?  @cal
 		 	
@@ -58,6 +62,9 @@ Logbook of all the development efforts on zim. yes!
 (x)  when i alt-tab back to docs editor should always load (and scroll if need be) to last cursor position @edit
 ( )  when you add a camel case link the page reloads to render and puts cursor at top needs to remove location and scroll there @edit
 ( )  when I launch http links (at least win32) it's launching them twice! @edit
+( )   There is some kind of colon window firing on colon type, remove.  Remove colon links entirely, they are useless and problematic @edit
+( )   When a camelcase link rerenders the page, the images go missing.  Also it jerks to the top, it needs to reload (if thats even necessary) to the original cursor point. @edit
+( )  i think my alt-left and alt-right is losing cursor position (starting back at the top)... annoying!  @edit
 
 
 ### Git
@@ -85,6 +92,7 @@ Logbook of all the development efforts on zim. yes!
 ( )  need a way to AI chat with my tasks. @task
 ( ) need a way to print my tasks (esp. the current filter... print to browser?) @task
 ( )  double check the searching seems to not be filtering right (tags and tasks text?) @task
+	e.g. if i have a task tagged with multiples... it doesn't seem to 'and' the filtering (select tag1, should filter by that, etc) @task
 ( )  move my indicators to the right of the panel so the panel shrinks better @task
 	Or, a better treatment?
 ( )  hierarchial tasks should show a slight visual representation in task bar @task
