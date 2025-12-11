@@ -81,7 +81,7 @@ from .markdown_editor import MarkdownEditor
 from .tabbed_right_panel import TabbedRightPanel
 from .task_panel import TaskPanel
 from .link_navigator_panel import LinkNavigatorPanel
-from .ai_chat_panel import AIChatPanel
+from .ai_chat_panel import AIChatPanel, AIChatStore
 from .calendar_panel import CalendarPanel
 from .jump_dialog import JumpToPageDialog
 from .toc_widget import TableOfContentsWidget
@@ -596,7 +596,7 @@ class MainWindow(QMainWindow):
         self.editor = MarkdownEditor()
         self.editor.imageSaved.connect(self._on_image_saved)
         self.editor.textChanged.connect(lambda: self.autosave_timer.start())
-        self.editor.focusLost.connect(lambda: self._save_current_file(auto=True))
+        self.editor.focusLost.connect(lambda: (self._remember_history_cursor(), self._save_current_file(auto=True)))
         self.editor.cursorMoved.connect(self._on_editor_cursor_moved)
         self.editor.linkActivated.connect(lambda link: self._open_camel_link(link, focus_target="editor"))
         self.editor.linkHovered.connect(self._on_link_hovered)
@@ -652,6 +652,7 @@ class MainWindow(QMainWindow):
             self.font_size = max(6, int(app_font_size))
         except Exception:
             self.font_size = 14
+        self.font_size = config.load_global_editor_font_size(self.font_size)
         self.editor.set_font_point_size(self.font_size)
         self.editor.viInsertModeChanged.connect(self._on_vi_insert_state_changed)
         self._apply_vi_preferences()
@@ -710,7 +711,10 @@ class MainWindow(QMainWindow):
         self._vault_lock_path: Optional[Path] = None
         self._vault_lock_owner: Optional[dict] = None
         self._read_only: bool = False
+        self._ai_chat_store: Optional[AIChatStore] = None
+        self._ai_badge_icon: Optional[QIcon] = None
         self._page_windows: list[PageEditorWindow] = []
+        self._apply_read_only_state()
         self.autosave_timer = QTimer(self)
         self.autosave_timer.setInterval(30_000)
         self.autosave_timer.setSingleShot(True)
@@ -801,8 +805,9 @@ class MainWindow(QMainWindow):
 
         # Build toolbar and main menus
         self._build_toolbar()
-        # Add 'Vault' menu with required actions
-        vault_menu = self.menuBar().addMenu("Vault")
+        # Vault menu (now left of File)
+        vault_menu = self.menuBar().addMenu("Vaul&t")
+        file_menu = self.menuBar().addMenu("&File")
         open_vault_action = QAction("Open Vault", self)
         open_vault_action.setToolTip("Open an existing vault")
         open_vault_action.triggered.connect(lambda checked=False: self._select_vault(spawn_new_process=False))
@@ -823,7 +828,7 @@ class MainWindow(QMainWindow):
         open_templates_action.setToolTip("Open or create ~/.zimx/templates in your file manager")
         open_templates_action.triggered.connect(self._open_user_templates_folder)
         vault_menu.addAction(open_templates_action)
-        view_menu = self.menuBar().addMenu("View")
+        view_menu = self.menuBar().addMenu("&View")
         reset_view_action = QAction("Reset View/Layout", self)
         reset_view_action.setToolTip("Reset window size and splitter positions to defaults")
         reset_view_action.triggered.connect(self._reset_view_layout)
@@ -841,11 +846,59 @@ class MainWindow(QMainWindow):
         ai_window_action = QAction("Open AI Chat Window", self)
         ai_window_action.triggered.connect(self._open_ai_chat_window)
         view_menu.addAction(ai_window_action)
-        tools_menu = self.menuBar().addMenu("Tools")
+        tools_menu = self.menuBar().addMenu("&Tools")
         rebuild_index_action = QAction("Rebuild Vault Index", self)
         rebuild_index_action.setToolTip("Rebuild the vault database from disk (keeps bookmarks/kv/ai tables)")
         rebuild_index_action.triggered.connect(self._rebuild_vault_index_from_disk)
         tools_menu.addAction(rebuild_index_action)
+
+        go_menu = self.menuBar().addMenu("&Go")
+        home_action = QAction("(H)ome", self)
+        home_action.setShortcut(QKeySequence("G,H"))
+        home_action.triggered.connect(self._go_home)
+        go_menu.addAction(home_action)
+
+        tasks_action = QAction("(T)asks", self)
+        tasks_action.setShortcut(QKeySequence("G,T"))
+        tasks_action.triggered.connect(self._focus_tasks_search)
+        go_menu.addAction(tasks_action)
+
+        calendar_action = QAction("(C)alendar", self)
+        calendar_action.setShortcut(QKeySequence("G,C"))
+        calendar_action.triggered.connect(self._focus_calendar_tab)
+        go_menu.addAction(calendar_action)
+
+        attach_action = QAction("Attach(m)ents", self)
+        attach_action.setShortcut(QKeySequence("G,M"))
+        attach_action.triggered.connect(self._focus_attachments_tab)
+        go_menu.addAction(attach_action)
+
+        link_action = QAction("(L)ink Navigator", self)
+        link_action.setShortcut(QKeySequence("G,L"))
+        link_action.triggered.connect(lambda: self._apply_navigation_focus("navigator"))
+        go_menu.addAction(link_action)
+
+        ai_action = QAction("(A)I Chat", self)
+        ai_action.setShortcut(QKeySequence("G,A"))
+        ai_action.triggered.connect(self._open_ai_chat_window)
+        go_menu.addAction(ai_action)
+
+        today_action = QAction("T(o)day", self)
+        today_action.setShortcut(QKeySequence("G,O"))
+        today_action.setToolTip("Today's journal entry (Alt+D)")
+        today_action.triggered.connect(self._open_journal_today)
+        go_menu.addAction(today_action)
+
+        rename_action = QAction("Rename", self)
+        rename_action.setShortcut(QKeySequence(Qt.Key_F2))
+        rename_action.setShortcutContext(Qt.ApplicationShortcut)
+        rename_action.triggered.connect(self._trigger_tree_rename)
+        file_menu.addAction(rename_action)
+
+        help_menu = self.menuBar().addMenu("Hel&p")
+        about_action = QAction("About", self)
+        about_action.triggered.connect(self._show_about_dialog)
+        help_menu.addAction(about_action)
 
         self._register_shortcuts()
         self._focus_recent = ["editor", "tree", "right"]
@@ -1029,6 +1082,8 @@ class MainWindow(QMainWindow):
         save_shortcut.activated.connect(self._save_current_file)
         zoom_in = QShortcut(QKeySequence.ZoomIn, self)
         zoom_out = QShortcut(QKeySequence.ZoomOut, self)
+        zoom_in.setContext(Qt.ApplicationShortcut)
+        zoom_out.setContext(Qt.ApplicationShortcut)
         zoom_in.activated.connect(lambda: self._adjust_font_size(1))
         zoom_out.activated.connect(lambda: self._adjust_font_size(-1))
         jump_shortcut = QShortcut(QKeySequence("Ctrl+J"), self)
@@ -1047,6 +1102,9 @@ class MainWindow(QMainWindow):
         focus_tasks_shortcut2.activated.connect(self._focus_tasks_search)
         date_shortcut = QShortcut(QKeySequence("Ctrl+D"), self)
         date_shortcut.activated.connect(self._insert_date)
+        rename_shortcut = QShortcut(QKeySequence(Qt.Key_F2), self)
+        rename_shortcut.setContext(Qt.ApplicationShortcut)
+        rename_shortcut.activated.connect(self._trigger_tree_rename)
         open_vault_shortcut = QShortcut(QKeySequence("Ctrl+O"), self)
         open_vault_shortcut.activated.connect(lambda: self._select_vault(spawn_new_process=False))
         open_vault_new_win_shortcut = QShortcut(QKeySequence("Ctrl+Shift+O"), self)
@@ -1293,7 +1351,7 @@ class MainWindow(QMainWindow):
                 # Do not take over the lock file
                 self._vault_lock_path = None
                 self._vault_lock_owner = None
-                self._update_dirty_indicator()
+                self._apply_read_only_state()
                 return True
             else:
                 # Stale lock; remove it
@@ -1316,7 +1374,7 @@ class MainWindow(QMainWindow):
             self._read_only = True
             self._vault_lock_path = None
             self._vault_lock_owner = None
-            self._update_dirty_indicator()
+            self._apply_read_only_state()
             return True
         owner = {"pid": os.getpid(), "host": socket.gethostname(), "ts": time.time()}
         try:
@@ -1326,7 +1384,7 @@ class MainWindow(QMainWindow):
         except Exception:
             # If we cannot write the lock, continue but warn the user
             self.statusBar().showMessage("Warning: could not write vault lock.", 5000)
-        self._update_dirty_indicator()
+        self._apply_read_only_state()
         return True
 
     def _release_vault_lock(self, reset_read_only: bool = True) -> None:
@@ -1352,7 +1410,7 @@ class MainWindow(QMainWindow):
         self._vault_lock_owner = None
         if reset_read_only:
             self._read_only = False
-        self._update_dirty_indicator()
+        self._apply_read_only_state()
 
     def _apply_vault_read_only_pref(self) -> None:
         """Toggle read-only mode immediately based on the per-vault preference."""
@@ -1367,7 +1425,7 @@ class MainWindow(QMainWindow):
                 # Drop any lock we hold and switch to read-only
                 self._release_vault_lock(reset_read_only=False)
                 self._read_only = True
-                self._update_dirty_indicator()
+                self._apply_read_only_state()
             return
         # Preference allows writes; try to acquire lock if currently read-only
         if self._read_only:
@@ -1376,7 +1434,7 @@ class MainWindow(QMainWindow):
             else:
                 # Failed to acquire lock (likely held elsewhere); stay read-only
                 self._read_only = True
-                self._update_dirty_indicator()
+                self._apply_read_only_state()
 
     def _set_vault(self, directory: str, vault_name: Optional[str] = None) -> bool:
         # Persist current history before switching away
@@ -1393,6 +1451,13 @@ class MainWindow(QMainWindow):
             prefer_read_only = config.load_vault_force_read_only()
         except Exception:
             prefer_read_only = False
+        try:
+            self._ai_chat_store = AIChatStore(vault_root=directory)
+            if self._ai_badge_icon is None:
+                ai_path = self._find_asset("ai.svg")
+                self._ai_badge_icon = self._load_icon(ai_path, QColor("#4A90E2"), size=14)
+        except Exception:
+            self._ai_chat_store = None
         if not self._check_and_acquire_vault_lock(directory, prefer_read_only=prefer_read_only):
             return False
         self.right_panel.clear_tasks()
@@ -1447,11 +1512,12 @@ class MainWindow(QMainWindow):
                     # Respect per-vault read-only preference; release any lock we took.
                     self._release_vault_lock(reset_read_only=False)
                     self._read_only = True
-                    self._update_dirty_indicator()
+                    self._apply_read_only_state()
                     # Intentionally no warning/toast; this is a user preference.
             except Exception:
                 pass
-            self.font_size = config.load_font_size(self.font_size)
+            # Respect globally persisted editor font size (not per-vault)
+            self.font_size = config.load_global_editor_font_size(self.font_size)
             self.editor.set_font_point_size(self.font_size)
             # Load show_journal setting
             show_journal = config.load_show_journal()
@@ -2092,6 +2158,22 @@ class MainWindow(QMainWindow):
         item.setData(has_children, TYPE_ROLE)
         item.setData(open_path, OPEN_ROLE)
         icon = self.dir_icon if has_children or folder_path == "/" else self.file_icon
+        has_ai_chat = False
+        store = self._ai_chat_store
+        if store:
+            try:
+                if open_path and store.has_chat_for_path(open_path):
+                    has_ai_chat = True
+                elif folder_path:
+                    norm_folder = folder_path or "/"
+                    if store.has_chat_for_path(norm_folder):
+                        has_ai_chat = True
+                    elif store.has_chats_under(norm_folder):
+                        has_ai_chat = True
+            except Exception:
+                has_ai_chat = False
+        if has_ai_chat:
+            icon = self._badge_icon(icon)
         item.setIcon(icon)
         item.setEditable(False)
         item.setFlags(item.flags() | Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled)
@@ -2259,6 +2341,15 @@ class MainWindow(QMainWindow):
         move_cursor_to_end = cursor_at_end or self._should_focus_hr_tail(content)
         restored_history_cursor = False
         if restore_history_cursor:
+            saved_pos = self._history_cursor_positions.get(path)
+            if saved_pos is not None:
+                cursor = self.editor.textCursor()
+                cursor.setPosition(min(saved_pos, len(self.editor.toPlainText())))
+                self._scroll_cursor_to_top_quarter(cursor, animate=False, flash=False)
+                restored_history_cursor = True
+                move_cursor_to_end = False
+        # If no explicit restore request, prefer any remembered cursor for this path
+        if not restored_history_cursor:
             saved_pos = self._history_cursor_positions.get(path)
             if saved_pos is not None:
                 cursor = self.editor.textCursor()
@@ -2641,6 +2732,24 @@ class MainWindow(QMainWindow):
         painter.end()
         return QIcon(colored)
 
+    def _badge_icon(self, base: QIcon) -> QIcon:
+        """Return a copy of base icon with an AI badge overlay (bottom-right)."""
+        if not self._ai_badge_icon or base.isNull():
+            return base
+        pm = base.pixmap(24, 24)
+        if pm.isNull():
+            return base
+        badge_pm = self._ai_badge_icon.pixmap(12, 12)
+        result = QPixmap(pm.size())
+        result.fill(Qt.transparent)
+        painter = QPainter(result)
+        painter.drawPixmap(0, 0, pm)
+        x = pm.width() - badge_pm.width() - 1
+        y = pm.height() - badge_pm.height() - 1
+        painter.drawPixmap(x, y, badge_pm)
+        painter.end()
+        return QIcon(result)
+
     def _collapse_tree_to_root(self) -> None:
         """Collapse the navigation tree to top-level folders."""
         self.tree_view.collapseAll()
@@ -2994,7 +3103,7 @@ class MainWindow(QMainWindow):
         if not config.has_active_vault():
             self._alert("Open a vault first.")
             return
-        panel = TaskPanel()
+        panel = TaskPanel(font_size_key="task_font_size_detached")
         panel.set_vault_root(self.vault_root or "")
         try:
             panel.set_navigation_filter(self._nav_filter_path, refresh=False)
@@ -3015,7 +3124,7 @@ class MainWindow(QMainWindow):
         if not config.has_active_vault():
             self._alert("Open a vault first.")
             return
-        panel = CalendarPanel()
+        panel = CalendarPanel(font_size_key="calendar_font_size_detached")
         panel.set_vault_root(self.vault_root or "")
         panel.dateActivated.connect(self.right_panel.calendar_panel.dateActivated.emit)
         panel.pageActivated.connect(self._open_calendar_page)
@@ -3036,6 +3145,11 @@ class MainWindow(QMainWindow):
             return
         panel = LinkNavigatorPanel()
         current = self.current_path
+        try:
+            panel.reload_mode_from_config()
+            panel.reload_layout_from_config()
+        except Exception:
+            pass
         if current:
             panel.set_page(self._normalize_editor_path(current))
         panel.pageActivated.connect(self._open_link_from_panel)
@@ -3593,8 +3707,7 @@ class MainWindow(QMainWindow):
                 return
             self.font_size = new_size
             self.editor.set_font_point_size(self.font_size)
-            if config.has_active_vault():
-                config.save_font_size(self.font_size)
+            config.save_global_editor_font_size(self.font_size)
 
     def _apply_navigation_focus(self, focus_target: str | None) -> None:
         """Set focus after navigation based on source (editor vs link navigator)."""
@@ -3649,6 +3762,44 @@ class MainWindow(QMainWindow):
                 self.right_panel.task_panel.focus_search()
             else:
                 self.right_panel.task_panel.search.setFocus(Qt.ShortcutFocusReason)
+        except Exception:
+            pass
+
+    def _focus_calendar_tab(self) -> None:
+        """Switch to Calendar tab and focus calendar widget."""
+        sizes = self.editor_split.sizes()
+        if len(sizes) >= 2 and sizes[1] == 0:
+            width = getattr(self, "_saved_right_width", 360)
+            total = sum(sizes)
+            self.editor_split.setSizes([max(1, total - width), width])
+        try:
+            for i in range(self.right_panel.tabs.count()):
+                if self.right_panel.tabs.widget(i) == self.right_panel.calendar_panel:
+                    self.right_panel.tabs.setCurrentIndex(i)
+                    try:
+                        self.right_panel.calendar_panel.calendar.setFocus(Qt.ShortcutFocusReason)
+                    except Exception:
+                        pass
+                    break
+        except Exception:
+            pass
+
+    def _focus_attachments_tab(self) -> None:
+        """Switch to Attachments tab and focus."""
+        sizes = self.editor_split.sizes()
+        if len(sizes) >= 2 and sizes[1] == 0:
+            width = getattr(self, "_saved_right_width", 360)
+            total = sum(sizes)
+            self.editor_split.setSizes([max(1, total - width), width])
+        try:
+            for i in range(self.right_panel.tabs.count()):
+                if self.right_panel.tabs.widget(i) == self.right_panel.attachments_panel:
+                    self.right_panel.tabs.setCurrentIndex(i)
+                    try:
+                        self.right_panel.attachments_panel.setFocus(Qt.ShortcutFocusReason)
+                    except Exception:
+                        pass
+                    break
         except Exception:
             pass
 
@@ -3937,6 +4088,7 @@ class MainWindow(QMainWindow):
         self._ensure_right_panel_visible()
         if focus_tab:
             self.right_panel.focus_ai_chat(file_path, create=create)
+            self.right_panel.focus_ai_chat_input()
         else:
             if create:
                 self.right_panel.ai_chat_panel.open_chat_for_page(file_path)
@@ -3962,6 +4114,14 @@ class MainWindow(QMainWindow):
             # Perform one-shot inline replacement
             self._perform_one_shot_prompt(text)
             return
+        if action == "Load Global Chat":
+            if not config.load_enable_ai_chats() or not self.right_panel.ai_chat_panel:
+                QMessageBox.information(self, "AI Chat", "Enable AI Chats in Preferences to use AI actions.")
+                return
+            self._ensure_right_panel_visible()
+            self.right_panel.focus_ai_chat(None, create=True)
+            self.right_panel.focus_ai_chat_input()
+            return
 
         if not config.load_enable_ai_chats() or not self.right_panel.ai_chat_panel:
             QMessageBox.information(self, "AI Chat", "Enable AI Chats in Preferences to use AI actions.")
@@ -3973,6 +4133,7 @@ class MainWindow(QMainWindow):
         self.right_panel.send_ai_action(action, prompt, text)
         if target_path:
             self.editor.set_ai_chat_available(True, active=self.right_panel.is_active_chat_for_page(target_path))
+        self.right_panel.focus_ai_chat_input()
 
     def _perform_one_shot_prompt(self, text: str) -> None:
         """Send selected text as a one-shot user message to the configured server/model
@@ -4356,6 +4517,10 @@ class MainWindow(QMainWindow):
         editor.resize(width, editor.sizeHint().height())
         editor.show()
         editor.setFocus()
+        try:
+            editor.selectAll()
+        except Exception:
+            pass
 
     def _handle_inline_submit(self, parent_path: str, name: str) -> None:
         name = name.strip()
@@ -4389,6 +4554,23 @@ class MainWindow(QMainWindow):
             self._pending_selection = file_path
         self._populate_vault_tree()
 
+    def _trigger_tree_rename(self) -> None:
+        """Start inline rename on the selected tree item (and select text)."""
+        index = self.tree_view.currentIndex()
+        if (not index or not index.isValid()) and self.current_path:
+            self._select_tree_path(self.current_path)
+            index = self.tree_view.currentIndex()
+        if not index or not index.isValid():
+            return
+        path = index.data(PATH_ROLE)
+        if not path or path == FILTER_BANNER:
+            return
+        parent_path = self._parent_path(index)
+        rect = self.tree_view.visualRect(index)
+        global_pos = self.tree_view.viewport().mapToGlobal(rect.topLeft())
+        self.tree_view.setFocus(Qt.ShortcutFocusReason)
+        self._start_inline_rename(path, parent_path, global_pos, anchor_index=index)
+
     def _start_inline_rename(
         self,
         path: str,
@@ -4414,6 +4596,10 @@ class MainWindow(QMainWindow):
         editor.resize(width, editor.sizeHint().height())
         editor.show()
         editor.setFocus()
+        try:
+            QTimer.singleShot(0, editor.selectAll)
+        except Exception:
+            pass
 
     def _handle_inline_rename(self, parent_path: str, old_path: str, new_name: str) -> None:
         self._cancel_inline_editor()
@@ -5390,6 +5576,25 @@ class MainWindow(QMainWindow):
         message = detail or fallback or str(exc)
         self._alert(f"Reason: {message}")
 
+    def _show_about_dialog(self) -> None:
+        """Display a simple About dialog with app info and logo."""
+        box = QMessageBox(self)
+        box.setWindowTitle("About ZimX")
+        icon_path = self._find_asset("icon.png")
+        if icon_path:
+            try:
+                pix = QPixmap(icon_path)
+                if not pix.isNull():
+                    box.setIconPixmap(pix.scaledToWidth(96, Qt.SmoothTransformation))
+            except Exception:
+                pass
+        box.setText(
+            "ZimX\n\nA lightweight desktop note system for Markdown vaults with linking, tasks, and AI helpers.\n\n"
+            "Author: Joseph Greenwood (grnwood@gmail.com)"
+        )
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec()
+
     def _update_window_title(self) -> None:
         parts: list[str] = []
         if self.current_path:
@@ -5403,6 +5608,23 @@ class MainWindow(QMainWindow):
         suffix = "ZimX Desktop"
         title = " | ".join(parts + [suffix]) if parts else suffix
         self.setWindowTitle(title)
+
+    def _apply_read_only_state(self) -> None:
+        """Sync editor/widgets to the current read-only flag."""
+        try:
+            self.editor.set_read_only_mode(self._read_only)
+        except Exception:
+            try:
+                self.editor.setReadOnly(self._read_only)
+            except Exception:
+                pass
+        for win in list(getattr(self, "_page_windows", [])):
+            try:
+                win.set_read_only(self._read_only)
+            except Exception:
+                pass
+        self._update_dirty_indicator()
+        self._update_window_title()
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         if event.type() == QEvent.KeyPress:

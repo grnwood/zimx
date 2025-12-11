@@ -4,7 +4,7 @@ from datetime import date, timedelta
 import re
 from typing import Iterable, Optional
 
-from PySide6.QtCore import QEvent, Qt, Signal, QSize
+from PySide6.QtCore import QEvent, Qt, Signal, QSize, QTimer, QByteArray
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -50,8 +50,27 @@ class TaskPanel(QWidget):
     focusGained = Signal()
     filterClearRequested = Signal()
 
-    def __init__(self, parent=None) -> None:
+    def __init__(
+        self,
+        parent=None,
+        *,
+        font_size_key: str = "task_font_size_tabbed",
+        splitter_key: str = "task_splitter_tabbed",
+        header_state_key: str = "task_header_tabbed",
+    ) -> None:
         super().__init__(parent)
+        self._font_size_key = font_size_key
+        self._font_size = config.load_panel_font_size(self._font_size_key, max(8, self.font().pointSize() or 12))
+        self._splitter_key = splitter_key
+        self._splitter_save_timer = QTimer(self)
+        self._splitter_save_timer.setInterval(200)
+        self._splitter_save_timer.setSingleShot(True)
+        self._splitter_save_timer.timeout.connect(self._save_splitter_sizes)
+        self._header_state_key = header_state_key
+        self._header_save_timer = QTimer(self)
+        self._header_save_timer.setInterval(200)
+        self._header_save_timer.setSingleShot(True)
+        self._header_save_timer.timeout.connect(self._save_header_state)
 
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search tasks…")
@@ -134,6 +153,14 @@ class TaskPanel(QWidget):
         self.task_tree.setFocusPolicy(Qt.StrongFocus)
         self.task_tree.installEventFilter(self)
         self.task_tree.setFocusPolicy(Qt.StrongFocus)
+        saved_header = config.load_header_state(self._header_state_key)
+        if saved_header:
+            try:
+                self.task_tree.header().restoreState(QByteArray.fromBase64(saved_header.encode("ascii")))
+            except Exception:
+                pass
+        self.task_tree.header().sectionMoved.connect(lambda *_: self._header_save_timer.start())
+        self.task_tree.header().sectionResized.connect(lambda *_: self._header_save_timer.start())
 
         sidebar = QVBoxLayout()
         # Tags row with filter indicators
@@ -168,6 +195,14 @@ class TaskPanel(QWidget):
         splitter.addWidget(sidebar_widget)
         splitter.addWidget(self.task_tree)
         splitter.setSizes([180, 360])
+        self.splitter = splitter
+        sizes = config.load_splitter_sizes(self._splitter_key)
+        if sizes:
+            try:
+                self.splitter.setSizes(sizes)
+            except Exception:
+                pass
+        self.splitter.splitterMoved.connect(lambda *_: self._splitter_save_timer.start())
 
         # Header row with horizontal toggles then search
         header_row = QHBoxLayout()
@@ -175,6 +210,18 @@ class TaskPanel(QWidget):
             header_row.addWidget(cb)
         header_row.addSpacing(6)
         header_row.addWidget(self.search, 1)
+        self.zoom_out_btn = QToolButton()
+        self.zoom_out_btn.setText("−")
+        self.zoom_out_btn.setToolTip("Decrease font size")
+        self.zoom_out_btn.setAutoRaise(True)
+        self.zoom_out_btn.clicked.connect(lambda: self._adjust_font_size(-1))
+        header_row.addWidget(self.zoom_out_btn)
+        self.zoom_in_btn = QToolButton()
+        self.zoom_in_btn.setText("+")
+        self.zoom_in_btn.setToolTip("Increase font size")
+        self.zoom_in_btn.setAutoRaise(True)
+        self.zoom_in_btn.clicked.connect(lambda: self._adjust_font_size(1))
+        header_row.addWidget(self.zoom_in_btn)
 
         layout = QVBoxLayout()
         layout.addLayout(header_row)
@@ -189,6 +236,7 @@ class TaskPanel(QWidget):
         self._tag_source_tasks: list[dict] = []
         self._setup_focus_defaults()
         self._update_filter_indicator()
+        self._apply_font_size()
 
     def _setup_focus_defaults(self) -> None:
         """Ensure sensible default focus inside the Tasks tab."""
@@ -252,6 +300,54 @@ class TaskPanel(QWidget):
             )
         else:
             self.filter_label.setStyleSheet("")
+
+    def _adjust_font_size(self, delta: int) -> None:
+        """Bump panel font size (Ctrl +/-) in tabs or popouts."""
+        new_size = max(8, min(24, self._font_size + delta))
+        if new_size == self._font_size:
+            return
+        self._font_size = new_size
+        self._apply_font_size()
+        config.save_panel_font_size(self._font_size_key, self._font_size)
+
+    def adjust_font_size(self, delta: int) -> None:
+        """Public wrapper used by parent containers to adjust fonts."""
+        self._adjust_font_size(delta)
+
+    def _apply_font_size(self) -> None:
+        font = self.font()
+        font.setPointSize(self._font_size)
+        for widget in (
+            self.search,
+            self.tag_list,
+            self.task_tree,
+            self.filter_label,
+            self.filter_checkbox,
+            self.journal_checkbox,
+            self.show_completed,
+            self.show_future,
+            self.show_actionable,
+            self.zoom_in_btn,
+            self.zoom_out_btn,
+        ):
+            try:
+                widget.setFont(font)
+            except Exception:
+                pass
+
+    def _save_splitter_sizes(self) -> None:
+        try:
+            sizes = self.splitter.sizes()
+        except Exception:
+            return
+        config.save_splitter_sizes(self._splitter_key, sizes)
+
+    def _save_header_state(self) -> None:
+        try:
+            state = bytes(self.task_tree.header().saveState().toBase64()).decode("ascii")
+        except Exception:
+            return
+        config.save_header_state(self._header_state_key, state)
 
     @staticmethod
     def _normalize_task_path(path: Optional[str]) -> str:

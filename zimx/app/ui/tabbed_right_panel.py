@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, QTimer
 from PySide6.QtWidgets import QTabWidget, QWidget, QMenu
 from PySide6.QtCore import Qt
 from zimx.app import config
@@ -56,11 +56,11 @@ class TabbedRightPanel(QWidget):
         self._http_client = http_client
         
         # Create Tasks tab (now includes calendar)
-        self.task_panel = TaskPanel()
+        self.task_panel = TaskPanel(font_size_key="task_font_size_tabbed", splitter_key="task_splitter_tabbed")
         self.tabs.addTab(self.task_panel, "Tasks")
 
         # Create Calendar tab
-        self.calendar_panel = CalendarPanel()
+        self.calendar_panel = CalendarPanel(font_size_key="calendar_font_size_tabbed", splitter_key="calendar_splitter_tabbed")
         self.tabs.addTab(self.calendar_panel, "Calendar")
         
         # Create Attachments tab
@@ -113,6 +113,11 @@ class TabbedRightPanel(QWidget):
             self.task_panel.set_vault_root(vault_root)
             self.calendar_panel.set_vault_root(vault_root)
         self.attachments_panel.set_vault_root(vault_root)
+        try:
+            self.link_panel.reload_mode_from_config()
+            self.link_panel.reload_layout_from_config()
+        except Exception:
+            pass
         if self.ai_chat_panel:
             self.ai_chat_panel.set_vault_root(vault_root)
     
@@ -271,7 +276,7 @@ class TabbedRightPanel(QWidget):
         if not self.ai_chat_panel or self.ai_chat_index is None:
             return
         self.tabs.setCurrentIndex(self.ai_chat_index)
-        self.ai_chat_panel.focus_input()
+        QTimer.singleShot(0, self.ai_chat_panel.focus_input)
 
     def _emit_chat_navigation(self, path: str) -> None:
         """Forward AI chat navigation requests."""

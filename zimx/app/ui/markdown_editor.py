@@ -306,6 +306,7 @@ class AIActionOverlay(QWidget):
                 self._entries.append(AIActionOverlay.Entry("Start AI chat with this page", "start_chat"))
             elif self._has_chat and not self._chat_active:
                 self._entries.append(AIActionOverlay.Entry("Load the chat for this page", "load_chat"))
+            self._entries.append(AIActionOverlay.Entry("Load Global Chat", "load_global"))
             self._entries.append(AIActionOverlay.Entry("Send Selection to AI Chat", "default"))
             # One-shot prompt: send selected text directly to the configured model
             # and replace the selection with the model response (does not add to chat history).
@@ -406,6 +407,9 @@ class AIActionOverlay(QWidget):
             self.hide()
         elif entry.kind == "load_chat":
             self.loadChat.emit()
+            self.hide()
+        elif entry.kind == "load_global":
+            self.actionTriggered.emit("Load Global Chat", "")
             self.hide()
         elif entry.kind == "group":
             self._current_group = entry.group
@@ -1192,6 +1196,7 @@ class MarkdownEditor(QTextEdit):
         self._vi_activation_timer: Optional[QTimer] = None
         self._heading_outline: list[dict] = []
         self._dialog_block_input: bool = False
+        self._read_only_mode: bool = False
         self._ai_actions_enabled: bool = True
         self._ai_chat_available: bool = False
         self._ai_chat_active: bool = False
@@ -1269,6 +1274,19 @@ class MarkdownEditor(QTextEdit):
         if cursor.hasSelection():
             return cursor.selectedText().replace("\u2029", "\n")
         return ""
+
+    def set_read_only_mode(self, read_only: bool) -> None:
+        """Enable or disable user edits while keeping navigation intact."""
+        self._read_only_mode = bool(read_only)
+        self.setReadOnly(self._read_only_mode)
+        if self._read_only_mode and self._vi_feature_enabled:
+            # Exit insert/replace states so vi navigation keys keep working
+            self._vi_insert_mode = False
+            self._vi_replace_pending = False
+            try:
+                self._enter_vi_navigation_mode()
+            except Exception:
+                pass
 
     def search_find_next(self, query: str, *, backwards: bool = False, wrap: bool = True, case_sensitive: bool = False) -> bool:
         found, wrapped = self._search_engine.find_next(
@@ -1604,60 +1622,139 @@ class MarkdownEditor(QTextEdit):
         if self._display_guard:
             return
         current_text = self.toPlainText()
+        # Remember current cursor location (block + column) to restore precisely
+        cur = self.textCursor()
+        orig_block_num = cur.blockNumber()
+        orig_col = cur.position() - cur.block().position()
         storage_text = self._from_display(current_text)
         converted = self._convert_camelcase_links(storage_text)
         if converted == storage_text:
             self._last_camel_trigger = None
             self._last_camel_cursor_pos = None
             return
-        # Re-render with updated links
-        self._display_guard = True
+        # Re-render only the changed blocks instead of resetting the whole document
         display_text = self._to_display(converted)
-        cursor_pos = self.textCursor().position()
-        self.document().setPlainText(display_text)
+        current_lines = current_text.splitlines()
+        new_lines = display_text.splitlines()
+        # If line counts diverge, fall back to full render as a safety net
+        if len(current_lines) != len(new_lines):
+            self._display_guard = True
+            self.document().setPlainText(display_text)
+            restored_block = self.document().findBlockByNumber(orig_block_num)
+            target_pos = restored_block.position() + min(orig_col, max(0, restored_block.length() - 1))
+            new_cursor = self.textCursor()
+            new_cursor.setPosition(min(target_pos, len(display_text)))
+            self.setTextCursor(new_cursor)
+            self._position_cursor_after_camel(new_cursor, display_text, orig_block_num, orig_col)
+            self._render_images(display_text)
+            self._display_guard = False
+            self._schedule_heading_outline()
+            self._apply_scroll_past_end_margin()
+            return
+
+        # Replace only the blocks that changed
+        changed_indices = [i for i, (old, new) in enumerate(zip(current_lines, new_lines)) if old != new]
+        if not changed_indices:
+            self._last_camel_trigger = None
+            self._last_camel_cursor_pos = None
+            return
+
+        self._display_guard = True
+        # Collect blocks once to avoid repeated iteration
+        blocks = []
+        block = self.document().begin()
+        while block.isValid():
+            blocks.append(block)
+            block = block.next()
+
+        for idx in changed_indices:
+            if idx >= len(blocks):
+                continue
+            block = blocks[idx]
+            start = block.position()
+            text_len = len(block.text())
+            tc = QTextCursor(self.document())
+            tc.setPosition(start)
+            tc.setPosition(start + text_len, QTextCursor.KeepAnchor)
+            tc.insertText(new_lines[idx])
+
+        # Restore cursor to original line/column, clamped to new line length
+        restored_block = self.document().findBlockByNumber(orig_block_num)
+        target_pos = restored_block.position() + min(orig_col, max(0, restored_block.length() - 1))
         new_cursor = self.textCursor()
-        new_cursor.setPosition(min(cursor_pos, len(display_text)))
-        # After conversion, move cursor appropriately based on trigger
-        self._position_cursor_after_camel(new_cursor, display_text)
+        new_cursor.setPosition(min(target_pos, len(display_text)))
         self.setTextCursor(new_cursor)
+        self._position_cursor_after_camel(new_cursor, display_text, orig_block_num, orig_col)
         self._render_images(display_text)
         self._display_guard = False
         self._schedule_heading_outline()
         self._apply_scroll_past_end_margin()
 
-    def _position_cursor_after_camel(self, cursor: QTextCursor, text: str) -> None:
-        """Place cursor after the converted link based on last trigger (space/enter)."""
+    def _position_cursor_after_camel(
+        self,
+        cursor: QTextCursor,
+        display_text: str,
+        orig_block_num: int | None = None,
+        orig_col: int | None = None,
+    ) -> None:
+        """Place cursor after the converted link, keeping typing flow natural."""
         trigger = self._last_camel_trigger
         origin_pos = self._last_camel_cursor_pos
         self._last_camel_trigger = None
         self._last_camel_cursor_pos = None
-        if not trigger:
+
+        # Resolve an absolute origin position
+        abs_origin = None
+        if orig_block_num is not None and orig_col is not None:
+            block = self.document().findBlockByNumber(orig_block_num)
+            abs_origin = block.position() + max(0, min(orig_col, len(block.text())))
+        elif origin_pos is not None:
+            abs_origin = origin_pos
+        if abs_origin is None:
             return
 
-        # Find the last converted link at or before the original cursor position
+        # Pick the nearest link at/after the origin, otherwise the last before it
         chosen = None
-        for m in WIKI_LINK_DISPLAY_PATTERN.finditer(text):
-            if origin_pos is None or m.start() <= origin_pos:
+        fallback_before = None
+        for m in WIKI_LINK_DISPLAY_PATTERN.finditer(display_text):
+            if m.start() <= abs_origin <= m.end():
                 chosen = m
+                break
+            if m.start() > abs_origin and chosen is None:
+                chosen = m
+                break
+            fallback_before = m
+        if chosen is None and fallback_before is not None:
+            chosen = fallback_before
         if not chosen:
             return
 
-        # Position after the closing sentinel of the chosen link
         target_pos = chosen.end()
-        cursor.setPosition(min(target_pos, len(text)))
-
         if trigger == "space":
-            # Land after the space the user just typed (or insert one if missing)
-            if target_pos < len(text) and text[target_pos] == " ":
-                cursor.setPosition(min(target_pos + 1, len(text)))
+            if target_pos < len(display_text) and display_text[target_pos] == " ":
+                target_pos += 1
             else:
+                cursor.beginEditBlock()
+                cursor.setPosition(target_pos)
                 cursor.insertText(" ")
+                cursor.endEditBlock()
+                target_pos += 1
         elif trigger == "enter":
-            # Land on the next line (or insert a newline if missing)
-            if target_pos < len(text) and text[target_pos] == "\n":
-                cursor.setPosition(min(target_pos + 1, len(text)))
+            if target_pos < len(display_text) and display_text[target_pos] == "\n":
+                target_pos += 1
             else:
+                cursor.beginEditBlock()
+                cursor.setPosition(target_pos)
                 cursor.insertText("\n")
+                cursor.endEditBlock()
+                target_pos += 1
+
+        cursor.setPosition(min(target_pos, len(display_text)))
+        # Ensure we are not left inside hidden link sentinels for vi/arrow navigation
+        try:
+            self._handle_link_boundary_navigation(Qt.Key_Right)
+        except Exception:
+            pass
 
     def set_font_point_size(self, size: int) -> None:
         # Clamp to a sensible, positive point size to avoid Qt warnings
@@ -1684,7 +1781,7 @@ class MarkdownEditor(QTextEdit):
     def end_dialog_block(self) -> None:
         """Re-enable editor input and interaction after a modal dialog closes."""
         self._dialog_block_input = False
-        self.setReadOnly(False)
+        self.setReadOnly(self._read_only_mode)
         self.setEnabled(True)
         self.setContextMenuPolicy(Qt.DefaultContextMenu)
         self.viewport().unsetCursor()
@@ -2082,10 +2179,60 @@ class MarkdownEditor(QTextEdit):
         super().focusOutEvent(event)
         self.focusLost.emit()
 
+    def _handle_read_only_keypress(self, event: QKeyEvent) -> bool:
+        """Allow navigation/copy but block mutations when read-only."""
+        mods = event.modifiers() & ~Qt.KeypadModifier
+        key = event.key()
+        # Allow common non-mutating shortcuts (copy/find/select-all)
+        for seq in (
+            QKeySequence.Copy,
+            QKeySequence.Find,
+            QKeySequence.FindNext,
+            QKeySequence.FindPrevious,
+            QKeySequence.SelectAll,
+        ):
+            if event.matches(seq):
+                super().keyPressEvent(event)
+                return True
+        # Let vi navigation continue to work; editing commands are guarded inside handler
+        if self._vi_feature_enabled and self._handle_vi_keypress(event):
+            return True
+        nav_keys = {
+            Qt.Key_Left,
+            Qt.Key_Right,
+            Qt.Key_Up,
+            Qt.Key_Down,
+            Qt.Key_Home,
+            Qt.Key_End,
+            Qt.Key_PageUp,
+            Qt.Key_PageDown,
+        }
+        if key in nav_keys or (mods & Qt.ShiftModifier and key in nav_keys):
+            super().keyPressEvent(event)
+            return True
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            cursor = self.textCursor()
+            if self._is_cursor_at_link_activation_point(cursor):
+                link = self._link_under_cursor(cursor)
+                if link:
+                    self.linkActivated.emit(link)
+            return True
+        # Allow other modifier combos (e.g., Ctrl+something) to propagate for non-editing shortcuts
+        if mods & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
+            super().keyPressEvent(event)
+            return True
+        # Swallow everything else (typing) to keep buffer unchanged
+        if event.text():
+            self._status_message("Vault is read-only; editing is disabled.")
+        return True
+
     def keyPressEvent(self, event):  # type: ignore[override]
         if self._dialog_block_input:
             event.ignore()
             return
+        if self._read_only_mode:
+            if self._handle_read_only_keypress(event):
+                return
         # Markdown formatting shortcuts and undo/redo (Ctrl+Z/Ctrl+Y)
         if event.modifiers() == Qt.ControlModifier:
             if event.key() == Qt.Key_B:
@@ -2748,6 +2895,12 @@ class MarkdownEditor(QTextEdit):
             if qt_key == Qt.Key_Right and hasattr(window, "_navigate_history_forward"):
                 window._navigate_history_forward()
                 return
+            if qt_key == Qt.Key_Up and hasattr(window, "_navigate_history_back"):
+                window._navigate_history_back()
+                return
+            if qt_key == Qt.Key_Down and hasattr(window, "_navigate_history_forward"):
+                window._navigate_history_forward()
+                return
         except Exception:
             pass
         press = QKeyEvent(QEvent.KeyPress, qt_key, Qt.AltModifier)
@@ -3244,6 +3397,11 @@ class MarkdownEditor(QTextEdit):
         # Copy link/heading (Ctrl+Shift+L) even in vi navigation mode
         key = event.key()
         text_char = event.text() or ""
+        read_only = self._read_only_mode
+
+        def _block_vi_edit() -> bool:
+            self._status_message("Vault is read-only; editing is disabled.")
+            return True
         if mods == (Qt.ControlModifier | Qt.ShiftModifier) and key == Qt.Key_L:
             copied = self._copy_link_or_heading()
             window = self.window()
@@ -3282,6 +3440,9 @@ class MarkdownEditor(QTextEdit):
                 self._vi_replace_pending = False
                 self._enter_vi_navigation_mode()
                 return True
+            if read_only:
+                self._vi_replace_pending = False
+                return _block_vi_edit()
             text = event.text()
             if text:
                 char = text[0]
@@ -3295,6 +3456,8 @@ class MarkdownEditor(QTextEdit):
             if key == Qt.Key_Escape and not shift:
                 self._enter_vi_navigation_mode()
                 return True
+            if read_only:
+                return _block_vi_edit()
             return False
 
         # Navigation mode commands
@@ -3361,7 +3524,7 @@ class MarkdownEditor(QTextEdit):
             self._vi_move_to_line_end(select=shift)
             return True
         if key == Qt.Key_Colon:
-            self._open_vi_command_prompt()
+            # Ignore colon in nav mode to avoid popping the command prompt or other actions.
             return True
 
         if key == Qt.Key_J and not shift:
@@ -3401,12 +3564,18 @@ class MarkdownEditor(QTextEdit):
             return True
 
         if key == Qt.Key_I and not shift:
+            if read_only:
+                return _block_vi_edit()
             self._vi_insert_before_cursor()
             return True
         if key == Qt.Key_A and not shift:
+            if read_only:
+                return _block_vi_edit()
             self._vi_insert_after_cursor()
             return True
         if key == Qt.Key_O:
+            if read_only:
+                return _block_vi_edit()
             if shift:
                 self._vi_open_line_above()
             else:
@@ -3414,30 +3583,44 @@ class MarkdownEditor(QTextEdit):
             return True
 
         if (key == Qt.Key_P or text_char.lower() == "p") and not shift:
+            if read_only:
+                return _block_vi_edit()
             inserted = self._vi_paste_buffer()
             if inserted:
                 self._vi_last_edit = lambda text=inserted: self._vi_insert_text(text)
             return True
 
         if key == Qt.Key_X and not shift:
+            if read_only:
+                return _block_vi_edit()
             self._vi_cut_selection_or_char()
             self._vi_last_edit = self._vi_cut_selection_or_char
             return True
         if key == Qt.Key_D and not shift:
+            if read_only:
+                return _block_vi_edit()
             self._vi_delete_selection_or_line()
             self._vi_last_edit = self._vi_delete_selection_or_line
             return True
         if key == Qt.Key_R and not shift:
+            if read_only:
+                return _block_vi_edit()
             self._vi_replace_pending = True
             self._enter_vi_insert_mode()
             return True
         if key == Qt.Key_U and not shift:
+            if read_only:
+                return _block_vi_edit()
             self._undo_or_status()
             return True
         if key == Qt.Key_Y and not shift:
+            if read_only:
+                return _block_vi_edit()
             self._redo_or_status()
             return True
         if key == Qt.Key_Period and not shift:
+            if read_only:
+                return _block_vi_edit()
             self._vi_repeat_last_edit()
             return True
 
@@ -3448,6 +3631,8 @@ class MarkdownEditor(QTextEdit):
                     link = self._link_under_cursor(cursor)
                     if link:
                         self.linkActivated.emit(link)
+            if read_only and key in (Qt.Key_Backspace, Qt.Key_Delete):
+                return _block_vi_edit()
             return True
 
         if key in (Qt.Key_Tab, Qt.Key_Backtab):
@@ -3455,6 +3640,8 @@ class MarkdownEditor(QTextEdit):
 
         text = event.text()
         if text:
+            if read_only:
+                return _block_vi_edit()
             return True
         return False
 

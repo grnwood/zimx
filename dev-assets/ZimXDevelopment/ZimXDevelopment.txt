@@ -17,16 +17,16 @@ Logbook of all the development efforts on zim. yes!
 (x)  on cal panel insights for day page show all the headings in a clickable outline @cal
 (x) keep the filter across days applied, add a 'clear filter' above insight panel @cal
 	(this is great for clicking around on a filtered view or either review or context on next steps).
-( )  add a 'today' button on the calendar widget @cal
+(x)  add a 'today' button on the calendar widget @cal
 ---
 
 ### File Nav
 ---
-( )  need to implement a true 'delete' @file
-( ) need to implement a true 'rename' @file
-( ) need to implement a true drag drop/move @file
+(x)  need to implement a true 'delete' @file
+(x) need to implement a true 'rename' @file
+(x) need to implement a true drag drop/move @file
 [:FileNavResearch|FileNavResearch]
-( )  add a collapse all to top of nav, also a right click expand and collapse feature @file
+(x)  add a collapse all to top of nav, also a right click expand and collapse feature @file
 
 
 ### Editor
@@ -45,7 +45,8 @@ Logbook of all the development efforts on zim. yes!
 (x)  give the toc widget more prominence when hovering over a heading @edit
 ( ) implement the full text search with your chatgpt vetted feature @edit
 	[:FullTextSearch|FullTextSearch]
-	 ( )  when i paste a link i copied from a header or toc bar and paste into page it doesnt create the link in link navigator @edit
+	
+( )  when i paste a link i copied from a header or toc bar and paste into page it doesnt create the link in link navigator @edit
 	Ai is really not handling this well, I'm going to have to debug / fix this one myself.
 ( )  i added redo along with undo.  there is still something funky here but its mostly all usable, so leaving alone for now.  @edit
 ( )  there is a c++/dump issue sometimes messing around in the jump to or link view, need to investigate. @edit

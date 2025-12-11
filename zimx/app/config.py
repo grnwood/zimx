@@ -498,6 +498,60 @@ def save_show_future_tasks(show: bool) -> None:
     )
     conn.commit()
 
+def load_link_navigator_mode(default: str = "graph") -> str:
+    """Load preferred Link Navigator view mode (graph|raw) for the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return default
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("link_navigator_mode",))
+    row = cur.fetchone()
+    if not row:
+        return default
+    mode = str(row[0]).strip().lower()
+    return mode if mode in {"graph", "raw"} else default
+
+
+def save_link_navigator_mode(mode: str) -> None:
+    """Persist Link Navigator view mode (graph|raw) for the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return
+    normalized = (mode or "").strip().lower()
+    if normalized not in {"graph", "raw"}:
+        normalized = "graph"
+    conn.execute(
+        "REPLACE INTO kv(key, value) VALUES(?, ?)",
+        ("link_navigator_mode", normalized),
+    )
+    conn.commit()
+
+def load_link_navigator_layout(default: str = "default") -> str:
+    """Load preferred Link Navigator layout (default|layered|treemap) for the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return default
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("link_navigator_layout",))
+    row = cur.fetchone()
+    if not row:
+        return default
+    layout = str(row[0]).strip().lower()
+    return layout if layout in {"default", "layered", "treemap"} else default
+
+
+def save_link_navigator_layout(layout: str) -> None:
+    """Persist Link Navigator layout (default|layered|treemap) for the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return
+    normalized = (layout or "").strip().lower()
+    if normalized not in {"default", "layered", "treemap"}:
+        normalized = "default"
+    conn.execute(
+        "REPLACE INTO kv(key, value) VALUES(?, ?)",
+        ("link_navigator_layout", normalized),
+    )
+    conn.commit()
+
 
 def load_last_file() -> Optional[str]:
     """Load the last opened file path. Returns None if no file was previously opened."""
@@ -748,6 +802,73 @@ def save_font_size(size: int) -> None:
         return
     conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("font_size", str(size)))
     conn.commit()
+
+
+# --- Global (application-level) panel/editor font sizes ----------------------
+
+def load_panel_font_size(key: str, default: int = 12) -> int:
+    """Load a panel font size from the global config JSON (not vault)."""
+    payload = _read_global_config()
+    try:
+        size = int(payload.get(key, default))
+        return max(6, min(32, size))
+    except Exception:
+        return default
+
+
+def save_panel_font_size(key: str, size: int) -> None:
+    """Persist a panel font size to the global config JSON (not vault)."""
+    try:
+        clamped = max(6, min(32, int(size)))
+    except Exception:
+        return
+    _update_global_config({key: clamped})
+
+
+def load_global_editor_font_size(default: int = 14) -> int:
+    """Load the main editor font size from the global config JSON."""
+    return load_panel_font_size("editor_font_size", default)
+
+
+def save_global_editor_font_size(size: int) -> None:
+    """Persist the main editor font size to the global config JSON."""
+    save_panel_font_size("editor_font_size", size)
+
+
+# --- Global splitter sizes ---------------------------------------------------
+
+def load_splitter_sizes(key: str) -> list[int] | None:
+    """Load splitter sizes (list of ints) from the global config JSON."""
+    payload = _read_global_config()
+    sizes = payload.get(key)
+    if isinstance(sizes, list) and all(isinstance(v, (int, float)) for v in sizes):
+        return [int(v) for v in sizes]
+    return None
+
+
+def save_splitter_sizes(key: str, sizes: list[int]) -> None:
+    """Persist splitter sizes to the global config JSON."""
+    try:
+        clean = [int(v) for v in sizes]
+    except Exception:
+        return
+    _update_global_config({key: clean})
+
+
+# --- Global header states (column order/width) -------------------------------
+
+def load_header_state(key: str) -> Optional[str]:
+    """Load a saved header state (base64 string) from global config."""
+    payload = _read_global_config()
+    state = payload.get(key)
+    return str(state) if isinstance(state, str) and state else None
+
+
+def save_header_state(key: str, state: str) -> None:
+    """Persist a header state (base64 string) to global config."""
+    if not isinstance(state, str) or not state:
+        return
+    _update_global_config({key: state})
 
 
 def save_cursor_position(path: str, position: int) -> None:
@@ -1217,6 +1338,7 @@ def fetch_tasks(
     base = f"{select_cols} FROM tasks t LEFT JOIN task_tags tt ON tt.task_id = t.task_id"
     conditions = []
     params: list = []
+    having_clause = ""
     if query:
         conditions.append("lower(t.text) LIKE ?")
         params.append(f"%{query.lower()}%")
@@ -1224,6 +1346,8 @@ def fetch_tasks(
         placeholders = ",".join("?" for _ in tags)
         conditions.append(f"tt.tag IN ({placeholders})")
         params.extend(tags)
+        # Require that all selected tags are present on the task (AND semantics)
+        having_clause = f"HAVING COUNT(DISTINCT tt.tag) = {len(tags)}"
     if not include_done:
         conditions.append("t.status != 'done'")
     if actionable_only:
@@ -1231,7 +1355,11 @@ def fetch_tasks(
     where = ""
     if conditions:
         where = "WHERE " + " AND ".join(conditions)
-    sql = f"{base} {where} GROUP BY t.task_id ORDER BY t.path, COALESCE(t.line, 0), COALESCE(t.level, 0)"
+    sql = (
+        f"{base} {where} GROUP BY t.task_id "
+        f"{having_clause} "
+        "ORDER BY t.path, COALESCE(t.line, 0), COALESCE(t.level, 0)"
+    )
     cur = conn.execute(sql, params)
     rows = cur.fetchall()
 

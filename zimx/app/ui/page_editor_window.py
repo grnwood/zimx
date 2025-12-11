@@ -44,6 +44,7 @@ class PageEditorWindow(QMainWindow):
         self.editor.set_font_point_size(self._font_size)
         self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
         self.editor.set_vi_mode_enabled(config.load_vi_mode_enabled())
+        self.editor.set_read_only_mode(self._read_only)
         self.editor.linkActivated.connect(self._forward_link_to_main)
         self.editor.focusLost.connect(lambda: self._save_current_file(auto=True))
         self.setCentralWidget(self.editor)
@@ -78,6 +79,19 @@ class PageEditorWindow(QMainWindow):
         zoom_out = QShortcut(QKeySequence.ZoomOut, self)
         zoom_in.activated.connect(lambda: self._adjust_font_size(1))
         zoom_out.activated.connect(lambda: self._adjust_font_size(-1))
+
+    def set_read_only(self, read_only: bool) -> None:
+        """Toggle read-only state and refresh window badges/title."""
+        self._read_only = bool(read_only)
+        try:
+            self.editor.set_read_only_mode(self._read_only)
+        except Exception:
+            try:
+                self.editor.setReadOnly(self._read_only)
+            except Exception:
+                pass
+        self._update_title()
+        self._update_dirty_indicator()
 
     def _size_and_center(self, parent=None) -> None:
         """Size the popup similar to the parent editor and center it."""

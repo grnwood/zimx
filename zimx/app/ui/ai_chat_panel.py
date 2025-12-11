@@ -37,7 +37,7 @@ from zimx.rag.attachment_text import extract_attachment_text
 from markdown import markdown
 
 # Use zimx_config for global config storage
-from zimx.app import config as zimx_config
+from zimx.app import config, config as zimx_config
 from zimx.ai.manager import AIManager, ContextItem
 from zimx.rag.index import RetrievedChunk
 from .path_utils import path_to_colon
@@ -1130,7 +1130,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self.system_prompts: list[dict[str, str]] = []
         self.system_prompts_tree: dict = {}
         self.current_system_prompt = None
-        self.font_size = font_size
+        self.font_size = config.load_panel_font_size("ai_chat_font_size", font_size)
         self.condense_prompt = self._load_condense_prompt()
         self._condense_buffer = ""
         self._summary_content = None
@@ -1144,13 +1144,6 @@ class AIChatPanel(QtWidgets.QWidget):
         self._load_chat_tree()
         self._select_default_chat()
         self._update_stop_button()
-        # Allow AI actions overlay from within the chat panel
-        self._ai_overlay_shortcut = QShortcut(QKeySequence("Ctrl+Shift+P"), self)
-        try:
-            self._ai_overlay_shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
-        except Exception:
-            pass
-        self._ai_overlay_shortcut.activated.connect(self._trigger_ai_overlay_from_chat)
         self._reset_warning_shown = False
 
     def _config_default_server(self) -> Optional[str]:
@@ -1171,6 +1164,19 @@ class AIChatPanel(QtWidgets.QWidget):
         layout.setSpacing(6)
         icon_row = QtWidgets.QHBoxLayout()
         icon_row.setSpacing(4)
+        # Global chat button + context label
+        global_icon_path = _get_asset_directory() / "global.svg"
+        self.global_btn = QtWidgets.QToolButton()
+        self.global_btn.setIcon(_load_white_icon(global_icon_path, QSize(18, 18)))
+        self.global_btn.setToolTip("Switch to Global Chat")
+        self.global_btn.setAutoRaise(True)
+        self.global_btn.clicked.connect(lambda: self.open_chat_for_page(None))
+        icon_row.addWidget(self.global_btn)
+        self.context_label = QtWidgets.QLabel("")
+        self.context_label.setStyleSheet("color: #e0e0e0; font-weight: bold;")
+        icon_row.addWidget(self.context_label)
+        icon_row.addStretch()
+        # Move toggles to the right
         self.server_config_btn = QtWidgets.QToolButton()
         settings_path = _get_asset_directory() / "settings.svg"
         self.server_config_btn.setIcon(_load_white_icon(settings_path, QSize(18, 18)))
@@ -1178,7 +1184,6 @@ class AIChatPanel(QtWidgets.QWidget):
         self.server_config_btn.setCheckable(True)
         self.server_config_btn.setChecked(False)
         self.server_config_btn.toggled.connect(self._toggle_server_config)
-        icon_row.addWidget(self.server_config_btn)
         self.show_chats_btn = QtWidgets.QToolButton()
         binoculars_path = _get_asset_directory() / "binoculars.svg"
         self.show_chats_btn.setIcon(_load_white_icon(binoculars_path, QSize(20, 20)))
@@ -1186,8 +1191,22 @@ class AIChatPanel(QtWidgets.QWidget):
         self.show_chats_btn.setChecked(False)
         self.show_chats_btn.setToolTip("Show chats")
         self.show_chats_btn.toggled.connect(self._toggle_chat_list)
+        self.zoom_out_btn = QtWidgets.QToolButton()
+        self.zoom_out_btn.setText("−")
+        self.zoom_out_btn.setToolTip("Decrease font size")
+        self.zoom_out_btn.setAutoRaise(True)
+        self.zoom_out_btn.setFixedSize(22, 22)
+        self.zoom_out_btn.clicked.connect(lambda: self.set_font_size(self.font_size - 1))
+        self.zoom_in_btn = QtWidgets.QToolButton()
+        self.zoom_in_btn.setText("+")
+        self.zoom_in_btn.setToolTip("Increase font size")
+        self.zoom_in_btn.setAutoRaise(True)
+        self.zoom_in_btn.setFixedSize(22, 22)
+        self.zoom_in_btn.clicked.connect(lambda: self.set_font_size(self.font_size + 1))
         icon_row.addWidget(self.show_chats_btn)
-        icon_row.addStretch()
+        icon_row.addWidget(self.server_config_btn)
+        icon_row.addWidget(self.zoom_out_btn)
+        icon_row.addWidget(self.zoom_in_btn)
         self.load_page_chat_label = ClickableLabel("")
         self.load_page_chat_label.setStyleSheet("color:#cc2222; font-weight:bold;")
         self.load_page_chat_label.setVisible(False)
@@ -1409,21 +1428,6 @@ class AIChatPanel(QtWidgets.QWidget):
                 self.input_edit.setFocus(Qt.OtherFocusReason)
         except Exception:
             pass
-        try:
-            if self._suppress_navigation:
-                self._suppress_navigation = False
-                return
-            target_folder = self._current_chat_path
-            if not target_folder:
-                return
-            current_folder = None
-            if self.current_page_path:
-                path_obj = Path(self.current_page_path.lstrip("/"))
-                current_folder = "/" + path_obj.parent.as_posix()
-            if current_folder != target_folder:
-                self.chatNavigateRequested.emit(target_folder)
-        except Exception:
-            return
 
     def _toggle_chat_list(self, checked: bool) -> None:
         self.chat_tree_container.setVisible(checked)
@@ -1648,6 +1652,8 @@ class AIChatPanel(QtWidgets.QWidget):
         return item.page_ref
 
     def _show_context_popup(self) -> None:
+        if self._is_global_chat_path(self._current_chat_path):
+            return
         if not self._context_items:
             QtWidgets.QMessageBox.information(self, "Context", "No context items are configured yet.")
             return
@@ -1676,6 +1682,8 @@ class AIChatPanel(QtWidgets.QWidget):
         return None
 
     def _maybe_open_context_picker(self) -> None:
+        if self._is_global_chat_path(self._current_chat_path):
+            return
         trigger = self._detect_context_trigger()
         if not trigger:
             return
@@ -2785,13 +2793,15 @@ class AIChatPanel(QtWidgets.QWidget):
         if self.current_session_id:
             session = self.store.get_session_by_id(self.current_session_id)
             if session:
-                self._current_chat_path = session.get("path")
+                path_val = session.get("path")
+                self._current_chat_path = None if self._is_global_chat_path(path_val) else path_val
         self._update_load_current_page_button()
 
     def set_font_size(self, size: int) -> None:
         """Apply font size to chat view and input."""
         self.font_size = max(6, min(24, size))
         self._apply_font_size()
+        config.save_panel_font_size("ai_chat_font_size", self.font_size)
 
     def get_font_size(self) -> int:
         return self.font_size
@@ -2977,6 +2987,13 @@ class AIChatPanel(QtWidgets.QWidget):
         existing = self.store.get_session_by_path(folder_path, "chat")
         return bool(existing)
 
+    @staticmethod
+    def _is_global_chat_path(path: Optional[str]) -> bool:
+        """Return True when the chat represents the global/root context."""
+        if not path:
+            return True
+        return path.strip("/") == ""
+
     def _update_load_current_page_button(self) -> None:
         path = self.current_page_path
         show = bool(path and path != self._current_chat_path and self._page_has_existing_chat(path))
@@ -2988,6 +3005,14 @@ class AIChatPanel(QtWidgets.QWidget):
             self.load_page_chat_label.setText(f"Load chat for {display}")
         else:
             self.load_page_chat_label.setText("")
+        # Update context label for header
+        if not self._is_global_chat_path(self._current_chat_path):
+            label = self._page_label(self._current_chat_path) or "Page Chat"
+            self.context_label.setText(f"Page Chat: {label}")
+            self.context_bar.setVisible(True)
+        else:
+            self.context_label.setText("Global Chat")
+            self.context_bar.setVisible(False)
 
     def get_active_chat_path(self) -> Optional[str]:
         """Return the folder path for the currently loaded chat session."""

@@ -1402,8 +1402,12 @@ class LinkNavigatorPanel(QWidget):
         control_row = QHBoxLayout()
         control_row.setContentsMargins(12, 6, 12, 0)
         control_row.setSpacing(6)
+        self.raw_toggle_checkbox = QCheckBox("Show raw links")
+        self.raw_toggle_checkbox.setStyleSheet("color:#f2f2f2; padding:2px 6px; font-size:12px;")
+        self.raw_toggle_checkbox.toggled.connect(lambda checked: self.set_mode("raw" if checked else "graph", persist=True))
         control_row.addWidget(self.layered_checkbox)
         control_row.addWidget(self.treemap_checkbox)
+        control_row.addWidget(self.raw_toggle_checkbox)
         control_row.addStretch(1)
         graph_layout.addLayout(control_row)
         graph_layout.addWidget(self.graph_view, 1)
@@ -1418,6 +1422,8 @@ class LinkNavigatorPanel(QWidget):
         layout.addLayout(self.stack)
         self.setLayout(layout)
         self.legend_widget.setVisible(True)
+        self.reload_mode_from_config()
+        self.reload_layout_from_config()
 
     def set_page(self, page_path: Optional[str]) -> None:
         self.current_page = page_path
@@ -1433,6 +1439,14 @@ class LinkNavigatorPanel(QWidget):
     def refresh(self, page_path: Optional[str] = None) -> None:
         # Preserve focus only if the panel currently has it
         had_focus = self.hasFocus() or self.graph_view.hasFocus() or self.raw_view.hasFocus()
+        try:
+            self.reload_mode_from_config()
+        except Exception:
+            pass
+        try:
+            self.reload_layout_from_config()
+        except Exception:
+            pass
         if page_path is not None:
             self.current_page = page_path
         if not self.current_page or not config.has_active_vault():
@@ -1530,29 +1544,85 @@ class LinkNavigatorPanel(QWidget):
         menu.exec(global_pos)
 
     def _toggle_mode(self) -> None:
-        self.mode = "raw" if self.mode == "graph" else "graph"
+        self.set_mode("raw" if self.mode == "graph" else "graph", persist=True)
+
+    def set_mode(self, mode: str, *, persist: bool = False) -> None:
+        normalized = "raw" if (mode or "").lower() == "raw" else "graph"
+        if self.mode == normalized and not persist:
+            return
+        had_focus = self.hasFocus() or self.graph_view.hasFocus() or self.raw_view.hasFocus()
+        self.mode = normalized
         self.stack.setCurrentIndex(1 if self.mode == "raw" else 0)
-        if self.mode == "graph":
-            self.graph_view.setFocus()
-            self.legend_widget.setVisible(True)
-        else:
-            self.legend_widget.setVisible(False)
+        self.legend_widget.setVisible(self.mode == "graph")
+        try:
+            self.raw_toggle_checkbox.blockSignals(True)
+            self.raw_toggle_checkbox.setChecked(self.mode == "raw")
+        finally:
+            self.raw_toggle_checkbox.blockSignals(False)
+        if persist:
+            try:
+                config.save_link_navigator_mode(self.mode)
+            except Exception:
+                pass
+        if had_focus:
+            target = self.graph_view if self.mode == "graph" else self.raw_view
+            target.setFocus()
+
+    def reload_mode_from_config(self) -> None:
+        try:
+            saved = config.load_link_navigator_mode(self.mode)
+        except Exception:
+            saved = self.mode
+        self.set_mode(saved)
+
+    def _apply_layout_selection(self, layout: str, persist: bool = False) -> None:
+        normalized = layout if layout in {"layered", "treemap"} else "default"
+        # Update checkboxes without retriggering persistence when requested
+        try:
+            self.layered_checkbox.blockSignals(True)
+            self.treemap_checkbox.blockSignals(True)
+            self.layered_checkbox.setChecked(normalized == "layered")
+            self.treemap_checkbox.setChecked(normalized == "treemap")
+        finally:
+            self.layered_checkbox.blockSignals(False)
+            self.treemap_checkbox.blockSignals(False)
+        # Apply to the view
+        self.graph_view.set_layered_mode(normalized == "layered")
+        self.graph_view.set_treemap_mode(normalized == "treemap")
+        if persist:
+            self._persist_layout_choice(normalized)
+
+    def _persist_layout_choice(self, forced: Optional[str] = None) -> None:
+        layout = forced
+        if layout not in {"layered", "treemap"}:
+            if self.treemap_checkbox.isChecked():
+                layout = "treemap"
+            elif self.layered_checkbox.isChecked():
+                layout = "layered"
+            else:
+                layout = "default"
+        try:
+            config.save_link_navigator_layout(layout)
+        except Exception:
+            pass
+
+    def reload_layout_from_config(self) -> None:
+        try:
+            layout = config.load_link_navigator_layout("default")
+        except Exception:
+            layout = "default"
+        self._apply_layout_selection(layout, persist=False)
 
     def _on_layered_toggled(self, checked: bool) -> None:
-        if checked and self.treemap_checkbox.isChecked():
-            self.treemap_checkbox.blockSignals(True)
-            self.treemap_checkbox.setChecked(False)
-            self.treemap_checkbox.blockSignals(False)
-        self.graph_view.set_layered_mode(checked)
+        # Compute desired layout based on both checkboxes and reapply in one place
+        layout = "layered" if checked else ("treemap" if self.treemap_checkbox.isChecked() else "default")
+        self._apply_layout_selection(layout, persist=True)
         if self.mode == "graph":
             self.graph_view.setFocus()
 
     def _on_treemap_toggled(self, checked: bool) -> None:
-        if checked and self.layered_checkbox.isChecked():
-            self.layered_checkbox.blockSignals(True)
-            self.layered_checkbox.setChecked(False)
-            self.layered_checkbox.blockSignals(False)
-        self.graph_view.set_treemap_mode(checked)
+        layout = "treemap" if checked else ("layered" if self.layered_checkbox.isChecked() else "default")
+        self._apply_layout_selection(layout, persist=True)
         if self.mode == "graph":
             self.graph_view.setFocus()
 

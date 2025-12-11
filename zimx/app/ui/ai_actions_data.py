@@ -20,6 +20,12 @@ class AIActionGroup:
 
 AI_ACTION_GROUPS: list[AIActionGroup] = [
     AIActionGroup(
+        title="Chat",
+        actions=[
+            AIActionItem("Load Global Chat", "Switch AI chat to the global/root context."),
+        ],
+    ),
+    AIActionGroup(
         title="Summarize",
         actions=[
             AIActionItem("Short Summary", "Summarize this note in 3–5 sentences."),

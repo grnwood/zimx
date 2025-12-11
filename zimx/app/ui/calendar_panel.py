@@ -6,7 +6,7 @@ import calendar
 from datetime import date as Date
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal, QDate, QEvent
+from PySide6.QtCore import Qt, Signal, QDate, QEvent, QTimer, QByteArray
 from PySide6.QtGui import QFont, QTextCharFormat, QKeyEvent, QColor
 from PySide6.QtWidgets import (
     QApplication,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QCheckBox,
     QSizePolicy,
+    QToolButton,
 )
 from shiboken6 import Shiboken
 
@@ -47,8 +48,28 @@ class CalendarPanel(QWidget):
     taskActivated = Signal(str, int)  # path, line number
     openInWindowRequested = Signal(str)
 
-    def __init__(self, parent=None) -> None:
+    def __init__(
+        self,
+        parent=None,
+        *,
+        font_size_key: str = "calendar_font_size_tabbed",
+        splitter_key: str = "calendar_splitter_tabbed",
+        header_state_key: str = "calendar_tasks_header_tabbed",
+    ) -> None:
         super().__init__(parent)
+        self._font_size_key = font_size_key
+        self._font_size = config.load_panel_font_size(self._font_size_key, max(8, self.font().pointSize() or 12))
+        self._splitter_key = splitter_key
+        self._splitter_save_timer = QTimer(self)
+        self._splitter_save_timer.setInterval(200)
+        self._splitter_save_timer.setSingleShot(True)
+        self._splitter_save_timer.timeout.connect(self._save_splitter_sizes)
+        self._header_state_key = header_state_key
+        self._header_save_timer = QTimer(self)
+        self._header_save_timer.setInterval(200)
+        self._header_save_timer.setSingleShot(True)
+        self._header_save_timer.timeout.connect(self._save_header_state)
+        self._due_task_count: int = 0
 
         self.calendar = QCalendarWidget()
         self.calendar.setGridVisible(True)
@@ -75,8 +96,10 @@ class CalendarPanel(QWidget):
         )
         self.calendar.clicked.connect(self._on_date_clicked)
         self.calendar.currentPageChanged.connect(self._on_month_changed)
+        self.calendar.selectionChanged.connect(self._update_today_visibility)
         self.calendar.setSelectedDate(QDate.currentDate())
         self.calendar.setFocusPolicy(Qt.StrongFocus)
+        self._update_today_visibility()
         self.calendar_view: QTableView | None = None
         self._drag_selecting = False
         self._last_drag_date: Optional[QDate] = None
@@ -109,12 +132,38 @@ class CalendarPanel(QWidget):
         # Add title row (label + optional filter button)
         title_container = QWidget()
         title_container.setLayout(title_row)
+        self.zoom_out_btn = QToolButton()
+        self.zoom_out_btn.setText("−")
+        self.zoom_out_btn.setToolTip("Decrease font size")
+        self.zoom_out_btn.setAutoRaise(True)
+        self.zoom_out_btn.setFixedSize(26, 26)
+        self.zoom_out_btn.clicked.connect(lambda: self._adjust_font_size(-1))
+        self.zoom_in_btn = QToolButton()
+        self.zoom_in_btn.setText("+")
+        self.zoom_in_btn.setToolTip("Increase font size")
+        self.zoom_in_btn.setAutoRaise(True)
+        self.zoom_in_btn.setFixedSize(26, 26)
+        self.zoom_in_btn.clicked.connect(lambda: self._adjust_font_size(1))
+        cal_zoom_row = QHBoxLayout()
+        cal_zoom_row.setContentsMargins(0, 0, 0, 0)
+        cal_zoom_row.setSpacing(6)
+        cal_zoom_row.addStretch(1)
+        cal_zoom_row.addWidget(self.zoom_out_btn)
+        cal_zoom_row.addWidget(self.zoom_in_btn)
         self.day_insights_layout.addWidget(title_container)
         self.day_insights_layout.addWidget(self.insight_counts)
         self.day_insights_layout.addWidget(self.insight_tags)
         self.subpage_list = QListWidget()
         self.subpage_list.itemActivated.connect(self._open_insight_link)
         self.subpage_list.itemClicked.connect(self._open_insight_link)
+        self.subpage_list.setAlternatingRowColors(True)
+        self.subpage_list.setStyleSheet(
+            """
+            QListWidget { background: #2f2f2f; color: #f0f0f0; }
+            QListWidget::item { padding: 2px 4px; background: #2f2f2f; }
+            QListWidget::item:alternate { background: #3a3a3a; }
+            """
+        )
         # Ensure items do not wrap (single-line, elide) and use uniform sizing
         try:
             self.subpage_list.setWordWrap(False)
@@ -125,6 +174,14 @@ class CalendarPanel(QWidget):
         self.headings_list = QListWidget()
         self.headings_list.itemActivated.connect(self._open_insight_link)
         self.headings_list.itemClicked.connect(self._open_insight_link)
+        self.headings_list.setAlternatingRowColors(True)
+        self.headings_list.setStyleSheet(
+            """
+            QListWidget { background: #2f2f2f; color: #f0f0f0; }
+            QListWidget::item { padding: 2px 4px; background: #2f2f2f; }
+            QListWidget::item:alternate { background: #363636; }
+            """
+        )
         try:
             self.headings_list.setWordWrap(False)
             self.headings_list.setUniformItemSizes(True)
@@ -141,7 +198,9 @@ class CalendarPanel(QWidget):
         headings_col_layout = QVBoxLayout()
         headings_col_layout.setContentsMargins(0, 0, 0, 0)
         headings_col_layout.setSpacing(4)
-        headings_col_layout.addWidget(QLabel("Headings:"))
+        headings_label = QLabel("Headings:")
+        headings_label.setStyleSheet("font-weight: bold;")
+        headings_col_layout.addWidget(headings_label)
         headings_col_layout.addWidget(self.headings_list, 1)
         headings_col.setLayout(headings_col_layout)
 
@@ -150,7 +209,9 @@ class CalendarPanel(QWidget):
         subpages_col_layout = QVBoxLayout()
         subpages_col_layout.setContentsMargins(0, 0, 0, 0)
         subpages_col_layout.setSpacing(4)
-        subpages_col_layout.addWidget(QLabel("Sub Pages:"))
+        subpages_label = QLabel("Sub Pages:")
+        subpages_label.setStyleSheet("font-weight: bold;")
+        subpages_col_layout.addWidget(subpages_label)
         subpages_col_layout.addWidget(self.subpage_list, 1)
         subpages_col.setLayout(subpages_col_layout)
 
@@ -174,6 +235,14 @@ class CalendarPanel(QWidget):
         self.tasks_due_list.setColumnWidth(0, 24)
         self.tasks_due_list.setColumnWidth(2, 90)
         self.tasks_due_list.setColumnWidth(3, 140)
+        saved_header = config.load_header_state(self._header_state_key)
+        if saved_header:
+            try:
+                self.tasks_due_list.header().restoreState(QByteArray.fromBase64(saved_header.encode("ascii")))
+            except Exception:
+                pass
+        self.tasks_due_list.header().sectionMoved.connect(lambda *_: self._header_save_timer.start())
+        self.tasks_due_list.header().sectionResized.connect(lambda *_: self._header_save_timer.start())
         due_row = QWidget()
         due_row_layout = QHBoxLayout()
         due_row_layout.setContentsMargins(0, 0, 0, 0)
@@ -205,9 +274,30 @@ class CalendarPanel(QWidget):
         self.journal_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.journal_tree.customContextMenuRequested.connect(self._open_context_menu)
 
+        # Wrap calendar with a top-aligned zoom row
+        cal_container = QWidget()
+        cal_layout = QVBoxLayout()
+        cal_layout.setContentsMargins(0, 0, 0, 0)
+        cal_layout.setSpacing(4)
+        zoom_row = QHBoxLayout()
+        zoom_row.setContentsMargins(0, 0, 0, 0)
+        zoom_row.setSpacing(6)
+        zoom_row.addStretch(1)
+        self.today_btn = QToolButton()
+        self.today_btn.setText("← Today")
+        self.today_btn.setToolTip("Jump to today's date")
+        self.today_btn.setAutoRaise(True)
+        self.today_btn.clicked.connect(lambda: self.set_calendar_date(QDate.currentDate().year(), QDate.currentDate().month(), QDate.currentDate().day()))
+        zoom_row.addWidget(self.today_btn)
+        zoom_row.addWidget(self.zoom_out_btn)
+        zoom_row.addWidget(self.zoom_in_btn)
+        cal_layout.addLayout(zoom_row)
+        cal_layout.addWidget(self.calendar)
+        cal_container.setLayout(cal_layout)
+
         # Vertical splitter for calendar + journal viewer
         self.right_splitter = QSplitter(Qt.Vertical)
-        self.right_splitter.addWidget(self.calendar)
+        self.right_splitter.addWidget(cal_container)
         self.right_splitter.addWidget(self.journal_tree)
         self.right_splitter.setStretchFactor(0, 0)
         self.right_splitter.setStretchFactor(1, 1)
@@ -218,6 +308,14 @@ class CalendarPanel(QWidget):
         self.main_splitter.addWidget(self.right_splitter)
         self.main_splitter.setStretchFactor(0, 0)
         self.main_splitter.setStretchFactor(1, 1)
+        sizes = config.load_splitter_sizes(self._splitter_key)
+        if sizes:
+            try:
+                self.main_splitter.setSizes(sizes)
+            except Exception:
+                pass
+        self.main_splitter.splitterMoved.connect(lambda *_: self._splitter_save_timer.start())
+        self._apply_font_size()
 
         root_layout = QHBoxLayout()
         root_layout.setContentsMargins(0, 0, 0, 0)
@@ -233,6 +331,7 @@ class CalendarPanel(QWidget):
         super().showEvent(event)
         self._attach_calendar_view()
         self._apply_multi_selection_formats()
+        self._update_today_visibility()
 
     def set_vault_root(self, vault_root: Optional[str]) -> None:
         """Set vault root for calendar and tree data."""
@@ -244,6 +343,7 @@ class CalendarPanel(QWidget):
         self._populate_tree()
         self._update_calendar_dates()
         self._update_insights_from_calendar()
+        self._update_today_visibility()
 
     def set_calendar_date(self, year: int, month: int, day: int) -> None:
         """Move the calendar to a specific date and expand the tree."""
@@ -255,6 +355,7 @@ class CalendarPanel(QWidget):
         self._update_day_listing(target)
         self._apply_multi_selection_formats()
         self._update_insights_for_selection()
+        self._update_today_visibility()
 
     def set_current_page(self, rel_path: Optional[str]) -> None:
         """Sync calendar and tree based on an opened journal page."""
@@ -289,6 +390,56 @@ class CalendarPanel(QWidget):
         # Update insights list selection
         self._update_insights_for_selection(rel_path)
 
+    def _adjust_font_size(self, delta: int) -> None:
+        """Adjust panel font size (Ctrl +/-) in tabs or popup windows."""
+        new_size = max(8, min(24, self._font_size + delta))
+        if new_size == self._font_size:
+            return
+        self._font_size = new_size
+        self._apply_font_size()
+        config.save_panel_font_size(self._font_size_key, self._font_size)
+
+    def adjust_font_size(self, delta: int) -> None:
+        """Public wrapper to allow parent containers to forward zoom shortcuts."""
+        self._adjust_font_size(delta)
+
+    def _apply_font_size(self) -> None:
+        font = QFont(self.font())
+        font.setPointSize(self._font_size)
+        for widget in (
+            self.calendar,
+            self.insight_title,
+            self.insight_counts,
+            self.insight_tags,
+            self.subpage_list,
+            self.headings_list,
+            self.tasks_due_list,
+            self.journal_tree,
+            self.overdue_checkbox,
+            self.future_checkbox,
+            self.filter_btn,
+            self.zoom_in_btn,
+            self.zoom_out_btn,
+        ):
+            try:
+                widget.setFont(font)
+            except Exception:
+                pass
+
+    def _save_splitter_sizes(self) -> None:
+        try:
+            sizes = self.main_splitter.sizes()
+        except Exception:
+            return
+        config.save_splitter_sizes(self._splitter_key, sizes)
+
+    def _save_header_state(self) -> None:
+        try:
+            state = bytes(self.tasks_due_list.header().saveState().toBase64()).decode("ascii")
+        except Exception:
+            return
+        config.save_header_state(self._header_state_key, state)
+
     def _on_month_changed(self, year: int, month: int) -> None:
         self._update_calendar_dates(year, month)
         self._update_day_listing(self.calendar.selectedDate())
@@ -302,6 +453,7 @@ class CalendarPanel(QWidget):
             self._update_due_tasks([first, last])
         except Exception:
             pass
+        self._update_today_visibility()
 
     def _on_date_clicked(self, date: QDate) -> None:
         """Emit selected date and sync the tree."""
@@ -313,7 +465,14 @@ class CalendarPanel(QWidget):
         self._expand_to_date(date)
         self._update_day_listing(date)
         self._update_insights_for_selection()
+        self._update_today_visibility()
         self.dateActivated.emit(date.year(), date.month(), date.day())
+
+    def _update_today_visibility(self) -> None:
+        if not hasattr(self, "today_btn"):
+            return
+        today = QDate.currentDate()
+        self.today_btn.setVisible(self.calendar.selectedDate() != today)
 
     def _populate_tree(self) -> None:
         """Build a tree rooted at Journal with year/month/day nodes."""
@@ -748,6 +907,14 @@ class CalendarPanel(QWidget):
         dates_for_tasks: list[QDate] = []
         if self.multi_selected_dates:
             dates = sorted(self.multi_selected_dates, key=lambda d: d.toJulianDay())
+            dates_for_tasks = dates
+        else:
+            date = self.calendar.selectedDate()
+            dates_for_tasks = [date]
+        # Update the due-tasks list first so insight counts reflect the visible rows
+        self._update_due_tasks(dates_for_tasks)
+        if self.multi_selected_dates:
+            dates = sorted(self.multi_selected_dates, key=lambda d: d.toJulianDay())
             if len(dates) == 1:
                 self._update_insights(dates[0], current_path)
             else:
@@ -757,12 +924,9 @@ class CalendarPanel(QWidget):
                 except Exception:
                     pass
                 self._update_insights_multi(dates, current_path)
-            dates_for_tasks = dates
         else:
             date = self.calendar.selectedDate()
             self._update_insights(date, current_path)
-            dates_for_tasks = [date]
-        self._update_due_tasks(dates_for_tasks)
 
     def _update_insights_multi(self, dates: list[QDate], current_path: Optional[str] = None) -> None:
         if not self.vault_root:
@@ -775,7 +939,6 @@ class CalendarPanel(QWidget):
             except Exception:
                 pass
             return
-        tasks = 0
         tags: list[str] = []
         total_files: list[Path] = []
         day_entries = 0
@@ -810,7 +973,6 @@ class CalendarPanel(QWidget):
                 text = file.read_text(encoding="utf-8")
             except Exception:
                 continue
-            tasks += sum(1 for line in text.splitlines() if line.strip().startswith(("-", "(")) and "@" not in line[:2])
             tags.extend(re.findall(r"@(\w+)", text))
         unique_tags = sorted(set(tags))
         entries_count = len(total_files)
@@ -821,7 +983,7 @@ class CalendarPanel(QWidget):
             self.filter_btn.setVisible(True)
         except Exception:
             pass
-        self.insight_counts.setText(f"Entries: {entries_count}  •  Subpages: {subpages_count}  •  Tasks: {tasks}")
+        self.insight_counts.setText(f"Entries: {entries_count}  •  Subpages: {subpages_count}  •  Tasks: {self._due_task_count}")
         self.insight_tags.setText("Tags: " + (", ".join(unique_tags[:8]) if unique_tags else "—"))
         if current_path:
             for idx in range(self.subpage_list.count()):
@@ -842,6 +1004,7 @@ class CalendarPanel(QWidget):
 
     def _clear_due_tasks(self, message: Optional[str] = None) -> None:
         self.tasks_due_list.clear()
+        self._due_task_count = 0
         if message:
             row = QTreeWidgetItem(["", message, "", ""])
             row.setFlags(Qt.NoItemFlags)
@@ -961,6 +1124,7 @@ class CalendarPanel(QWidget):
                 row.setForeground(2, fg)
                 row.setBackground(2, bg)
             self.tasks_due_list.addTopLevelItem(row)
+        self._due_task_count = len(matches)
 
     def _update_insights(self, date: QDate, current_path: Optional[str] = None) -> None:
         if not self.vault_root or not date.isValid():
@@ -993,14 +1157,12 @@ class CalendarPanel(QWidget):
             target = Path(self.vault_root) / rel_path.lstrip("/")
             if target.exists():
                 files.append(target)
-        tasks = 0
         tags = []
         for file in files:
             try:
                 text = file.read_text(encoding="utf-8")
             except Exception:
                 continue
-            tasks += sum(1 for line in text.splitlines() if line.strip().startswith(("-", "(")) and "@" not in line[:2])
             tags.extend(re.findall(r"@(\w+)", text))
         unique_tags = sorted(set(tags))
         subpages_count = max(0, len(files) - 1)
@@ -1010,7 +1172,7 @@ class CalendarPanel(QWidget):
             self.filter_btn.setVisible(False)
         except Exception:
             pass
-        self.insight_counts.setText(f"Entries: {len(files)}  •  Subpages: {subpages_count}  •  Tasks: {tasks}")
+        self.insight_counts.setText(f"Entries: {len(files)}  •  Subpages: {subpages_count}  •  Tasks: {self._due_task_count}")
         self.insight_tags.setText("Tags: " + (", ".join(unique_tags[:8]) if unique_tags else "—"))
         # Populate pages + headings list
         self.subpage_list.clear()
