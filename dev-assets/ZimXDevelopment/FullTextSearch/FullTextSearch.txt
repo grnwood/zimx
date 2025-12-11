@@ -22,16 +22,12 @@ CONTEXT / ASSUMPTIONS
 - Use SQLite FTS5.
 
 If the project already has a DB helper / dependency, reuse it. Otherwise, create a minimal one for this feature.
+[:FullTextSearch:CamelCase|CamelCase]
 
 --------------------------------
 TASK 1 – Create SQLite FTS schema
 --------------------------------
-
-Create (or extend) a SQLite database with two tables:
-
-1) `pages`
-   - Columns:
-     - `id` INTEGER PRIMARY KEY
+		![paste_image_003](./paste_image_003.png)INTEGER PRIMARY KEY
      - `path` TEXT NOT NULL UNIQUE   -- canonical file path or page identifier used by the API
      - `mtime` INTEGER NOT NULL      -- last modified time in epoch seconds
 

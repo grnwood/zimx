@@ -29,7 +29,7 @@ Logbook of all the development efforts on zim. yes!
 (x)  add a collapse all to top of nav, also a right click expand and collapse feature @file
 
 
-### Editor
+### Git
 ---
 (x)  I still see sometimes my page doesn't save, there is some kind of navigation why to lose the buffer, keep an eye out.  @edit
 	pretty sure this is VI navigation (soft keys) doing this, need to make sure it fires a write ALL the time. Gotta hitj ctrl-s for now.
@@ -64,9 +64,10 @@ Logbook of all the development efforts on zim. yes!
 ( )  when you add a camel case link the page reloads to render and puts cursor at top needs to remove location and scroll there @edit
 ( )  when I launch http links (at least win32) it's launching them twice! @edit
 ( )   There is some kind of colon window firing on colon type, remove.  Remove colon links entirely, they are useless and problematic @edit
-( )   When a camelcase link rerenders the page, the images go missing.  Also it jerks to the top, it needs to reload (if thats even necessary) to the original cursor point. @edit
+(x)   When a camelcase link rerenders the page, the images go missing.  Also it jerks to the top, it needs to reload (if thats even necessary) to the original cursor point. @edit
 ( )  i think my alt-left and alt-right is losing cursor position (starting back at the top)... annoying!  @edit
-
+( )  when i use vim 'p' with a image in the buffer it does not paste. default all image pastes to the width of the markdown editor? @edit
+( )  when editing a header item its janky , firm this out so it doesn't lose formatting until done. @edit
 
 ### Git
 ---
