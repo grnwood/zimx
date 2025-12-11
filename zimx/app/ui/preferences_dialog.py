@@ -204,6 +204,28 @@ class PreferencesDialog(QDialog):
             self.force_read_only_checkbox.setChecked(False)
         self.layout.addWidget(self.force_read_only_checkbox)
 
+        # Link update handling
+        link_label = QLabel("Link Update Handling:")
+        row_link = QHBoxLayout()
+        row_link.addWidget(link_label)
+        self.link_update_combo = QComboBox()
+        self.link_update_combo.addItems([
+            "None (do nothing)",
+            "Lazy (rewrite on open/save)",
+            "Reindex (background)",
+        ])
+        mode = config.load_link_update_mode()
+        mode_to_index = {"none": 0, "lazy": 1, "reindex": 2}
+        self.link_update_combo.setCurrentIndex(mode_to_index.get(mode, 2))
+        row_link.addWidget(self.link_update_combo, 1)
+        self.layout.addLayout(row_link)
+        self.update_links_on_index_checkbox = QCheckBox("Update vault page links on reindex")
+        try:
+            self.update_links_on_index_checkbox.setChecked(config.load_update_links_on_index())
+        except Exception:
+            self.update_links_on_index_checkbox.setChecked(True)
+        self.layout.addWidget(self.update_links_on_index_checkbox)
+
         # Dialog buttons
         btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btn_box.accepted.connect(self.accept)
@@ -363,6 +385,15 @@ class PreferencesDialog(QDialog):
             pass
         try:
             config.save_pygments_style(self.pygments_style_combo.currentText() or "monokai")
+        except Exception:
+            pass
+        try:
+            index_to_mode = {0: "none", 1: "lazy", 2: "reindex"}
+            config.save_link_update_mode(index_to_mode.get(self.link_update_combo.currentIndex(), "reindex"))
+        except Exception:
+            pass
+        try:
+            config.save_update_links_on_index(self.update_links_on_index_checkbox.isChecked())
         except Exception:
             pass
         super().accept()

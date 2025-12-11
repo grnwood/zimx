@@ -25,6 +25,7 @@ from PySide6.QtCore import (
     QByteArray,
     QUrl,
     QPropertyAnimation,
+    QMimeData,
 )
 from PySide6.QtGui import (
     QAction,
@@ -34,7 +35,6 @@ from PySide6.QtGui import (
     QStandardItemModel,
     QTextCursor,
     QTextCharFormat,
-    QPainter,
     QColor,
     QFont,
     QPen,
@@ -42,9 +42,14 @@ from PySide6.QtGui import (
     QBrush,
     QDesktopServices,
     QTextFormat,
+    QDrag,
+    QIcon,
+    QPainter,
+    QPixmap,
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QFileDialog,
     QTextEdit,
     QListWidget,
@@ -96,6 +101,8 @@ TYPE_ROLE = PATH_ROLE + 1
 OPEN_ROLE = TYPE_ROLE + 1
 FILTER_BANNER = "__NAV_FILTER_BANNER__"
 _DETAILED_LOGGING = os.getenv("ZIMX_DETAILED_LOGGING", "0") not in ("0", "false", "False", "", None)
+_ANSI_BLUE = "\033[94m"
+_ANSI_RESET = "\033[0m"
 class InlineNameEdit(QLineEdit):
     submitted = Signal(str)
     cancelled = Signal()
@@ -126,6 +133,19 @@ class VaultTreeView(QTreeView):
     arrowNavigated = Signal()
     escapePressed = Signal()
     rowClicked = Signal(QModelIndex)
+    dragStarted = Signal()
+    dragFinished = Signal()
+    moveRequested = Signal(str, str)  # from_path, to_path
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._press_pos: QPoint | None = None
+        self._dragging: bool = False
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDefaultDropAction(Qt.MoveAction)
+        self.setDragDropMode(QAbstractItemView.DragDrop)
 
     def keyPressEvent(self, event):  # type: ignore[override]
         if event.key() == Qt.Key_Escape and event.modifiers() == Qt.NoModifier:
@@ -187,11 +207,86 @@ class VaultTreeView(QTreeView):
 
     def mousePressEvent(self, event):  # type: ignore[override]
         if event.button() == Qt.LeftButton:
+            self._press_pos = event.pos()
+            self._dragging = False
+        self.setFocus(Qt.MouseFocusReason)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):  # type: ignore[override]
+        if (
+            event.buttons() & Qt.LeftButton
+            and self._press_pos is not None
+            and (event.pos() - self._press_pos).manhattanLength() >= QApplication.startDragDistance()
+        ):
+            if not self._dragging:
+                self._dragging = True
+                self.dragStarted.emit()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):  # type: ignore[override]
+        if event.button() == Qt.LeftButton and not self._dragging:
             idx = self.indexAt(event.pos())
             if idx.isValid():
                 self.rowClicked.emit(idx)
-        self.setFocus(Qt.MouseFocusReason)
-        super().mousePressEvent(event)
+        if self._dragging:
+            self.dragFinished.emit()
+        self._dragging = False
+        self._press_pos = None
+        super().mouseReleaseEvent(event)
+
+    def is_dragging(self) -> bool:
+        return self._dragging
+
+    def dropEvent(self, event):  # type: ignore[override]
+        src_indexes = self.selectedIndexes()
+        if not src_indexes:
+            event.ignore()
+            return
+        src_index = src_indexes[0]
+        src_path = src_index.data(PATH_ROLE)
+        if not src_path:
+            event.ignore()
+            return
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        target_index = self.indexAt(pos)
+        drop_pos = self.dropIndicatorPosition()
+        target_path = target_index.data(PATH_ROLE) if target_index.isValid() else "/"
+        dest_parent: str
+        if drop_pos == QAbstractItemView.OnItem:
+            dest_parent = target_path or "/"
+        elif drop_pos in (QAbstractItemView.AboveItem, QAbstractItemView.BelowItem):
+            if target_index.isValid() and target_index.parent().isValid():
+                dest_parent = target_index.parent().data(PATH_ROLE) or "/"
+            else:
+                dest_parent = "/"
+        else:
+            dest_parent = "/"
+        leaf = Path(src_path.rstrip("/")).name
+        dest_parent_clean = (dest_parent or "/").rstrip("/")
+        dest_path = f"{dest_parent_clean}/{leaf}" if dest_parent_clean not in ("", "/") else f"/{leaf}"
+        event.acceptProposedAction()
+        self.moveRequested.emit(src_path, dest_path)
+
+    def startDrag(self, supportedActions):  # type: ignore[override]
+        """Start drag with path text so editor drops can create links."""
+        indexes = self.selectedIndexes()
+        if not indexes:
+            return
+        idx = indexes[0]
+        path = idx.data(OPEN_ROLE) or idx.data(PATH_ROLE)
+        if not path:
+            super().startDrag(supportedActions)
+            return
+        model = self.model()
+        mime = model.mimeData(indexes) if model else QMimeData()
+        mime.setText(path)
+        try:
+            mime.setData("application/x-zimx-path", path.encode("utf-8"))
+        except Exception:
+            pass
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(supportedActions, Qt.MoveAction)
 
 
 class FindReplaceBar(QWidget):
@@ -359,7 +454,25 @@ class MainWindow(QMainWindow):
         # Ensure standard window controls (including maximize) are present.
         self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint)
         self.api_base = api_base.rstrip("/")
-        self.http = httpx.Client(base_url=self.api_base, timeout=10.0)
+        def _log_request(request):
+            try:
+                path = request.url.raw_path.decode("utf-8") if hasattr(request.url, "raw_path") else request.url.path
+            except Exception:
+                path = str(request.url)
+            print(f"{_ANSI_BLUE}[API] {request.method} {path}{_ANSI_RESET}")
+
+        def _log_response(response):
+            try:
+                path = response.request.url.raw_path.decode("utf-8") if hasattr(response.request.url, "raw_path") else response.request.url.path
+            except Exception:
+                path = str(response.request.url)
+            print(f"{_ANSI_BLUE}[API] {response.status_code} {path}{_ANSI_RESET}")
+
+        self.http = httpx.Client(
+            base_url=self.api_base,
+            timeout=10.0,
+            event_hooks={"request": [_log_request], "response": [_log_response]},
+        )
         self.vault_root: Optional[str] = None
         self.vault_root_name: Optional[str] = None
         self.current_path: Optional[str] = None
@@ -372,6 +485,12 @@ class MainWindow(QMainWindow):
         self._popup_index: int = -1
         self._popup_mode: Optional[str] = None  # "history" or "heading"
         self._history_cursor_positions: dict[str, int] = {}
+        self._tree_refresh_in_progress: bool = False
+        self._pending_tree_refresh: bool = False
+        self._pending_link_path_maps: list[dict[str, str]] = []
+        self.link_update_mode: str = config.load_link_update_mode()
+        self._pending_reindex_trigger: bool = False
+        self.update_links_on_index: bool = True
         
         # Page navigation history
         self.page_history: list[str] = []
@@ -411,6 +530,7 @@ class MainWindow(QMainWindow):
         self.tree_view.arrowNavigated.connect(self._mark_tree_arrow_nav)
         self.tree_view.escapePressed.connect(self._clear_nav_filter)
         self.tree_view.rowClicked.connect(self._on_tree_row_clicked)
+        self.tree_view.moveRequested.connect(self._on_tree_move_requested)
         self.dir_icon = self.style().standardIcon(QStyle.SP_DirIcon)
         self.file_icon = self.style().standardIcon(QStyle.SP_FileIcon)
         self._tree_arrow_focus_pending = False
@@ -438,8 +558,34 @@ class MainWindow(QMainWindow):
         )
         self.show_journal_button.toggled.connect(self._on_show_journal_toggled)
         tree_header_layout.addWidget(self.show_journal_button)
-        
+
+        # Manual refresh button to reload tree data from the API
+        self.refresh_tree_button = QToolButton()
+        self.refresh_tree_button.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+        self.refresh_tree_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.refresh_tree_button.setAutoRaise(True)
+        self.refresh_tree_button.setToolTip(
+            f"<div style='color:{tooltip_fg}; background:{tooltip_bg}; padding:2px 4px;'>Refresh tree</div>"
+        )
+        self.refresh_tree_button.clicked.connect(self._refresh_tree)
+        self.refresh_tree_button.setEnabled(False)
+        tree_header_layout.addWidget(self.refresh_tree_button)
+
         tree_header_layout.addStretch()
+
+        # Collapse-all button (aligned to the right)
+        self.collapse_tree_button = QToolButton()
+        icon_path = self._find_asset("collapse.svg")
+        base_icon = self._load_icon(icon_path, Qt.white, size=16) or self.style().standardIcon(QStyle.SP_ToolBarVerticalExtensionButton)
+        self.collapse_tree_button.setIcon(base_icon)
+        self.collapse_tree_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.collapse_tree_button.setAutoRaise(True)
+        self.collapse_tree_button.setToolTip(
+            f"<div style='color:{tooltip_fg}; background:{tooltip_bg}; padding:2px 4px;'>Collapse all folders</div>"
+        )
+        self.collapse_tree_button.clicked.connect(self._collapse_tree_to_root)
+        tree_header_layout.addWidget(self.collapse_tree_button)
+
         self.tree_header_widget.setLayout(tree_header_layout)
         self.tree_header_widget.setStyleSheet("background: palette(midlight); border-bottom: 1px solid #555;")
         
@@ -695,6 +841,11 @@ class MainWindow(QMainWindow):
         ai_window_action = QAction("Open AI Chat Window", self)
         ai_window_action.triggered.connect(self._open_ai_chat_window)
         view_menu.addAction(ai_window_action)
+        tools_menu = self.menuBar().addMenu("Tools")
+        rebuild_index_action = QAction("Rebuild Vault Index", self)
+        rebuild_index_action.setToolTip("Rebuild the vault database from disk (keeps bookmarks/kv/ai tables)")
+        rebuild_index_action.triggered.connect(self._rebuild_vault_index_from_disk)
+        tools_menu.addAction(rebuild_index_action)
 
         self._register_shortcuts()
         self._focus_recent = ["editor", "tree", "right"]
@@ -829,7 +980,9 @@ class MainWindow(QMainWindow):
 
         # Preferences/settings cog icon
         prefs_action = QAction("Preferences", self)
-        prefs_action.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
+        cog_icon_path = self._find_asset("cog.svg")
+        cog_icon = self._load_icon(cog_icon_path, Qt.white, size=18)
+        prefs_action.setIcon(cog_icon if cog_icon else self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
         prefs_action.triggered.connect(self._open_preferences)
         self.toolbar.addAction(prefs_action)
 
@@ -1247,7 +1400,7 @@ class MainWindow(QMainWindow):
             resp = self.http.post("/api/vault/select", json={"path": directory})
             resp.raise_for_status()
         except httpx.HTTPError as exc:
-            self._alert(f"Failed to set vault: {exc}")
+            self._alert_api_error(exc, "Failed to set vault")
             self._release_vault_lock()
             return False
         self.vault_root = resp.json().get("root")
@@ -1275,6 +1428,18 @@ class MainWindow(QMainWindow):
             config.save_last_vault(self.vault_root)
             display_name = vault_name or Path(self.vault_root).name
             config.remember_vault(self.vault_root, display_name)
+            try:
+                self.refresh_tree_button.setEnabled(True)
+            except Exception:
+                pass
+            try:
+                self.link_update_mode = config.load_link_update_mode()
+            except Exception:
+                self.link_update_mode = "reindex"
+            try:
+                self.update_links_on_index = config.load_update_links_on_index()
+            except Exception:
+                self.update_links_on_index = True
             # Restore recent history (including cursor positions) for this vault
             self._restore_recent_history()
             try:
@@ -1339,6 +1504,10 @@ class MainWindow(QMainWindow):
         """Handle Show Journal checkbox toggle."""
         if config.has_active_vault():
             config.save_show_journal(checked)
+        self._populate_vault_tree()
+
+    def _refresh_tree(self) -> None:
+        """Manual refresh of the vault tree from the API."""
         self._populate_vault_tree()
     
     def _load_bookmarks(self) -> None:
@@ -1834,57 +2003,73 @@ class MainWindow(QMainWindow):
         self._cancel_inline_editor()
         if not self.vault_root:
             return
+        # Prevent overlapping resets that can confuse the model/view
+        if self._tree_refresh_in_progress:
+            self._pending_tree_refresh = True
+            return
+        self._tree_refresh_in_progress = True
         try:
             resp = self.http.get("/api/vault/tree")
             resp.raise_for_status()
         except httpx.HTTPError as exc:
-            self._alert(f"Failed to load vault tree: {exc}")
+            self._alert_api_error(exc, "Failed to load vault tree")
+            self._tree_refresh_in_progress = False
             return
         data = resp.json().get("tree", [])
-        self.tree_model.removeRows(0, self.tree_model.rowCount())
 
-        # Add synthetic vault root node (fixed at top, opens vault home page) and nest tree under it
-        synthetic_root_item = None
-        add_synthetic_root = self.vault_root_name and not self._nav_filter_path
-        if add_synthetic_root:
-            synthetic_root = {
-                "name": self.vault_root_name,
-                "path": "/",  # use root path so delete isn't offered
-                "open_path": f"/{self.vault_root_name}{PAGE_SUFFIX}",
-                "children": [],
-            }
-            synthetic_root_item = self._add_tree_node(self.tree_model.invisibleRootItem(), synthetic_root)
-        elif self._nav_filter_path:
-            banner = QStandardItem("Filtered (Remove)")
-            font = banner.font()
-            font.setBold(True)
-            banner.setFont(font)
-            banner.setEditable(False)
-            banner.setForeground(QBrush(QColor("#ffffff")))
-            banner.setBackground(QBrush(QColor("#c62828")))
-            banner.setData(FILTER_BANNER, PATH_ROLE)
-            self.tree_model.invisibleRootItem().appendRow(banner)
-        
-        # Check if Journal should be filtered
-        show_journal = self.show_journal_button.isChecked()
-        
-        self._full_tree_data = data
-        filtered_data = data
-        if self._nav_filter_path:
-            filtered_data = self._filter_tree_data(data, self._nav_filter_path)
+        try:
+            # Clear existing items and rebuild
+            self.tree_model.clear()
+            self.tree_model.setHorizontalHeaderLabels(["Vault"])
+            seen_paths: set[str] = set()
 
-        for node in filtered_data:
-            # Hide the root vault node (path == "/") and render only its children under synthetic root
-            if node.get("path") == "/":
-                for child in node.get("children", []):
-                    # Filter out Journal folder if checkbox is unchecked
-                    if not show_journal and child.get("name") == "Journal":
-                        continue
+            # Add synthetic vault root node (fixed at top, opens vault home page) and nest tree under it
+            synthetic_root_item = None
+            add_synthetic_root = self.vault_root_name and not self._nav_filter_path
+            if add_synthetic_root:
+                synthetic_root = {
+                    "name": self.vault_root_name,
+                    "path": "/",  # use root path so delete isn't offered
+                    "open_path": f"/{self.vault_root_name}{PAGE_SUFFIX}",
+                    "children": [],
+                }
+                synthetic_root_item = self._add_tree_node(self.tree_model.invisibleRootItem(), synthetic_root, seen_paths)
+            elif self._nav_filter_path:
+                banner = QStandardItem("Filtered (Remove)")
+                font = banner.font()
+                font.setBold(True)
+                banner.setFont(font)
+                banner.setEditable(False)
+                banner.setForeground(QBrush(QColor("#ffffff")))
+                banner.setBackground(QBrush(QColor("#c62828")))
+                banner.setData(FILTER_BANNER, PATH_ROLE)
+                self.tree_model.invisibleRootItem().appendRow(banner)
+        
+            # Check if Journal should be filtered
+            show_journal = self.show_journal_button.isChecked()
+        
+            self._full_tree_data = data
+            filtered_data = data
+            if self._nav_filter_path:
+                filtered_data = self._filter_tree_data(data, self._nav_filter_path)
+
+            for node in filtered_data:
+                # Hide the root vault node (path == "/") and render only its children under synthetic root
+                if node.get("path") == "/":
+                    for child in node.get("children", []):
+                        # Filter out Journal folder if checkbox is unchecked
+                        if not show_journal and child.get("name") == "Journal":
+                            continue
+                        parent_item = synthetic_root_item or self.tree_model.invisibleRootItem()
+                        self._add_tree_node(parent_item, child, seen_paths)
+                else:
                     parent_item = synthetic_root_item or self.tree_model.invisibleRootItem()
-                    self._add_tree_node(parent_item, child)
-            else:
-                parent_item = synthetic_root_item or self.tree_model.invisibleRootItem()
-                self._add_tree_node(parent_item, node)
+                    self._add_tree_node(parent_item, node, seen_paths)
+        finally:
+            self._tree_refresh_in_progress = False
+            if self._pending_tree_refresh:
+                self._pending_tree_refresh = False
+                QTimer.singleShot(0, self._populate_vault_tree)
         self.tree_view.expandAll()
         if self._pending_selection:
             self._select_tree_path(self._pending_selection)
@@ -1893,17 +2078,23 @@ class MainWindow(QMainWindow):
         self.right_panel.refresh_calendar()
         self._apply_nav_filter_style()
 
-    def _add_tree_node(self, parent: QStandardItem, node: dict) -> None:
+    def _add_tree_node(self, parent: QStandardItem, node: dict, seen: Optional[set[str]] = None) -> None:
         item = QStandardItem(node["name"])
         folder_path = node.get("path")
         open_path = node.get("open_path")
         has_children = bool(node.get("children"))
+        key = open_path or folder_path
+        if seen is not None and key:
+            if key in seen:
+                return
+            seen.add(key)
         item.setData(folder_path, PATH_ROLE)
         item.setData(has_children, TYPE_ROLE)
         item.setData(open_path, OPEN_ROLE)
         icon = self.dir_icon if has_children or folder_path == "/" else self.file_icon
         item.setIcon(icon)
         item.setEditable(False)
+        item.setFlags(item.flags() | Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled)
         
         # Check if this is a virtual (unsaved) page
         if open_path and open_path in self.virtual_pages:
@@ -1913,7 +2104,7 @@ class MainWindow(QMainWindow):
         
         parent.appendRow(item)
         for child in node.get("children", []):
-            self._add_tree_node(item, child)
+            self._add_tree_node(item, child, seen)
 
     def _filter_tree_data(self, nodes: list[dict], prefix: str) -> list[dict]:
         """Return a pruned copy of the vault tree limited to prefix and its descendants."""
@@ -1935,9 +2126,9 @@ class MainWindow(QMainWindow):
         return result
 
     def _on_selection_changed(self, current: QModelIndex, previous: QModelIndex) -> None:
-        self._debug(
-            f"Tree selection changed: current={self._describe_index(current)}, previous={self._describe_index(previous)}"
-        )
+        self._debug(f"[UI] tree change: {self._describe_index(current)}")
+        if self.tree_view.is_dragging() or (QApplication.mouseButtons() & Qt.LeftButton):
+            return
         restore_tree_focus = self._tree_arrow_focus_pending and self.tree_view.hasFocus()
         # One-shot flag: consume after evaluating
         self._tree_arrow_focus_pending = False
@@ -2009,19 +2200,23 @@ class MainWindow(QMainWindow):
             resp = self.http.post("/api/file/read", json={"path": path})
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            print(f"[ZimX] Failed to read page {path}: status={exc.response.status_code if exc.response else 'unknown'} body={exc.response.text if exc.response else ''}", file=sys.stderr)
+            print(f"[UI] Failed to read page {path}: status={exc.response.status_code if exc.response else 'unknown'} body={exc.response.text if exc.response else ''}", file=sys.stderr)
             detail = exc.response.text if exc.response else str(exc)
             if tracer:
                 tracer.mark(f"api read failed ({detail})")
-            self._alert(f"Failed to open {path}: {detail}")
+            self._alert(f"Reason: {detail}")
             return
         except httpx.HTTPError as exc:
-            print(f"[ZimX] Failed to read page {path}: {exc}", file=sys.stderr)
+            print(f"[UI] Failed to read page {path}: {exc}", file=sys.stderr)
             if tracer:
                 tracer.mark(f"api read failed ({exc})")
-            self._alert(f"Failed to open {path}: {exc}")
+            self._alert_api_error(exc, f"Failed to open {path}")
             return
         content = resp.json().get("content", "")
+        if self.link_update_mode == "lazy":
+            content, rewritten = self._rewrite_links(content)
+            if rewritten:
+                self.statusBar().showMessage("Updated links to reflect recent moves", 3000)
         if tracer:
             try:
                 content_len = len(content.encode("utf-8"))
@@ -2168,13 +2363,21 @@ class MainWindow(QMainWindow):
                     self._alert(f"Failed to create folder for {self.current_path}")
                 return
         
-        payload = {"path": self.current_path, "content": self.editor.to_markdown()}
+        payload_content = self.editor.to_markdown()
+        # Ensure the first non-empty line is a page title; if missing, inject one using leaf name
+        payload_content = self._ensure_page_title(payload_content, self.current_path)
+        if self.link_update_mode == "lazy":
+            rewritten, changed = self._rewrite_links(payload_content)
+            if changed:
+                payload_content = rewritten
+                self._apply_rewritten_editor_content(payload_content)
+        payload = {"path": self.current_path, "content": payload_content}
         try:
             resp = self.http.post("/api/file/write", json=payload)
             resp.raise_for_status()
         except httpx.HTTPError as exc:
             if not auto:
-                self._alert(f"Failed to save {self.current_path}: {exc}")
+                self._alert_api_error(exc, f"Failed to save {self.current_path}")
             return
         if config.has_active_vault():
             indexer.index_page(self.current_path, payload["content"])
@@ -2258,7 +2461,7 @@ class MainWindow(QMainWindow):
             resp = self.http.post("/api/journal/today", json={"template": day_template})
             resp.raise_for_status()
         except httpx.HTTPError as exc:
-            self._alert(f"Failed to create journal entry: {exc}")
+            self._alert_api_error(exc, "Failed to create journal entry")
             return
         payload = resp.json()
         path = payload.get("path")
@@ -2393,6 +2596,54 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Image pasted as {filename}", 5000)
         # Refresh attachments panel to show the new image
         self.right_panel.refresh_attachments()
+
+    def _find_asset(self, name: str) -> Optional[Path]:
+        """Locate an asset in development or PyInstaller layouts."""
+        rel = os.path.join("assets", name)
+        candidates: list[Path] = []
+        base = getattr(sys, "_MEIPASS", None)
+        if base:
+            candidates.append(Path(base) / rel)
+            candidates.append(Path(base) / "_internal" / rel)
+        try:
+            exe_dir = Path(os.path.abspath(os.path.dirname(sys.argv[0])))
+            candidates.append(exe_dir / rel)
+            candidates.append(exe_dir / "_internal" / rel)
+        except Exception:
+            pass
+        pkg_root = Path(__file__).resolve().parent.parent
+        candidates.append(pkg_root / rel)
+        candidates.append(pkg_root / "zimx" / rel)
+        for cand in candidates:
+            if cand.exists():
+                return cand
+        return None
+
+    def _load_icon(self, path: Optional[Path], color: QColor | Qt.GlobalColor | None = None, size: int = 16) -> Optional[QIcon]:
+        """Load an icon from disk and optionally tint it to a given color."""
+        if path is None:
+            return None
+        abs_path = path.resolve()
+        if not abs_path.exists():
+            return None
+        icon = QIcon(str(abs_path))
+        if color is None:
+            return icon
+        pm = icon.pixmap(size, size)
+        if pm.isNull():
+            return icon  # Fall back to untinted icon if SVG can't rasterize
+        colored = QPixmap(pm.size())
+        colored.fill(Qt.transparent)
+        painter = QPainter(colored)
+        painter.drawPixmap(0, 0, pm)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        painter.fillRect(colored.rect(), color)
+        painter.end()
+        return QIcon(colored)
+
+    def _collapse_tree_to_root(self) -> None:
+        """Collapse the navigation tree to top-level folders."""
+        self.tree_view.collapseAll()
 
     def _on_attachment_dropped(self, filename: str) -> None:
         """Force-save the current page after a dropped attachment inserts content."""
@@ -2544,10 +2795,10 @@ class MainWindow(QMainWindow):
                 if exc.response is not None and exc.response.status_code == 409:
                     self.statusBar().showMessage("Page already exists", 4000)
                 else:
-                    self._alert(f"Failed to create page: {exc}")
+                    self._alert_api_error(exc, "Failed to create page")
                 return
             except httpx.HTTPError as exc:
-                self._alert(f"Failed to create page: {exc}")
+                self._alert_api_error(exc, "Failed to create page")
                 return
             
             # Get the file path
@@ -2586,6 +2837,14 @@ class MainWindow(QMainWindow):
             self.editor.set_ai_actions_enabled(config.load_enable_ai_chats())
             # Apply vault read-only preference immediately
             self._apply_vault_read_only_pref()
+            try:
+                self.link_update_mode = config.load_link_update_mode()
+            except Exception:
+                self.link_update_mode = "reindex"
+            try:
+                self.update_links_on_index = config.load_update_links_on_index()
+            except Exception:
+                self.update_links_on_index = True
             try:
                 self.editor.set_pygments_style(config.load_pygments_style("monokai"))
             except Exception:
@@ -3492,10 +3751,10 @@ class MainWindow(QMainWindow):
         except httpx.HTTPStatusError as exc:
             if allow_existing and exc.response is not None and exc.response.status_code == 409:
                 return True
-            self._alert(f"Failed to create page {folder_path}: {exc}")
+            self._alert_api_error(exc, f"Failed to create page {folder_path}")
             return False
         except httpx.HTTPError as exc:
-            self._alert(f"Failed to create page {folder_path}: {exc}")
+            self._alert_api_error(exc, f"Failed to create page {folder_path}")
             return False
 
     def _folder_to_file_path(self, folder_path: str) -> Optional[str]:
@@ -3539,6 +3798,22 @@ class MainWindow(QMainWindow):
             return f"/{path_obj.parent.as_posix()}"
         return file_path
 
+    def _expand_subtree(self, index: QModelIndex) -> None:
+        """Recursively expand the given node and all descendants."""
+        if not index.isValid():
+            return
+        stack = [index]
+        while stack:
+            idx = stack.pop()
+            self.tree_view.expand(idx)
+            model = idx.model()
+            if not model:
+                continue
+            for row in range(model.rowCount(idx)):
+                child = model.index(row, 0, idx)
+                if child.isValid():
+                    stack.append(child)
+
     # --- Tree context menu -------------------------------------------
     def _open_context_menu(self, pos: QPoint) -> None:
         if not self.vault_root:
@@ -3552,6 +3827,14 @@ class MainWindow(QMainWindow):
                 "New Page",
                 lambda checked=False, p=path, idx=index: self._start_inline_creation(p, global_pos, idx),
             )
+            collapse_action = menu.addAction("Collapse")
+            collapse_action.triggered.connect(
+                lambda checked=False, idx=index: self.tree_view.collapse(idx if idx.isValid() else QModelIndex())
+            )
+            expand_action = menu.addAction("Expand")
+            expand_action.triggered.connect(
+                lambda checked=False, idx=index: self._expand_subtree(idx if idx.isValid() else QModelIndex())
+            )
             filter_action = menu.addAction("Filter to this subtree")
             filter_action.triggered.connect(lambda checked=False, p=path: self._set_nav_filter(p))
             if path:
@@ -3559,6 +3842,14 @@ class MainWindow(QMainWindow):
                 open_window_action.triggered.connect(lambda checked=False, p=path: self._open_page_editor_window(p))
             open_path = index.data(OPEN_ROLE)
             if path != "/":
+                rename_action = menu.addAction("Rename")
+                rename_action.triggered.connect(
+                    lambda checked=False, p=path, idx=index: self._start_inline_rename(p, self._parent_path(idx), global_pos, idx)
+                )
+                move_action = menu.addAction("Move…")
+                move_action.triggered.connect(
+                    lambda checked=False, p=path, idx=index: self._move_path_dialog(p, self._parent_path(idx))
+                )
                 delete_action = menu.addAction("Delete")
                 delete_action.triggered.connect(
                     lambda checked=False, p=path, op=open_path: self._delete_path(p, op, global_pos)
@@ -4098,6 +4389,122 @@ class MainWindow(QMainWindow):
             self._pending_selection = file_path
         self._populate_vault_tree()
 
+    def _start_inline_rename(
+        self,
+        path: str,
+        parent_path: str,
+        global_pos: QPoint,
+        anchor_index: Optional[QModelIndex] = None,
+    ) -> None:
+        self._cancel_inline_editor()
+        current_name = Path(path.rstrip("/")).name
+        editor = InlineNameEdit(self.tree_view.viewport())
+        editor.setText(current_name)
+        editor.submitted.connect(lambda name: self._handle_inline_rename(parent_path, path, name))
+        editor.cancelled.connect(self._inline_editor_cancelled)
+        self._inline_editor = editor
+        if anchor_index and anchor_index.isValid():
+            rect = self.tree_view.visualRect(anchor_index)
+            viewport_pos = rect.bottomLeft()
+            viewport_pos.setY(viewport_pos.y() + 4)
+        else:
+            viewport_pos = self.tree_view.viewport().mapFromGlobal(global_pos)
+        editor.move(viewport_pos)
+        width = max(200, self.tree_view.viewport().width() - 40)
+        editor.resize(width, editor.sizeHint().height())
+        editor.show()
+        editor.setFocus()
+
+    def _handle_inline_rename(self, parent_path: str, old_path: str, new_name: str) -> None:
+        self._cancel_inline_editor()
+        new_name = new_name.strip()
+        if not new_name:
+            return
+        if "/" in new_name:
+            self.statusBar().showMessage("Names cannot contain '/'", 4000)
+            return
+        dest_path = self._join_paths(parent_path, new_name)
+        if dest_path == old_path:
+            return
+        if not self._ensure_writable("rename pages or folders"):
+            return
+        old_open_path = self._folder_to_file_path(old_path)
+        if self.current_path and old_open_path and self.current_path == old_open_path:
+            self._save_dirty_page()
+        try:
+            resp = self.http.post("/api/file/rename", json={"from": old_path, "to": dest_path})
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            self._alert_api_error(exc, f"Failed to rename {old_path}")
+            return
+        data = resp.json()
+        self._apply_path_map(data.get("page_map") or {})
+        self._register_link_path_map(data.get("page_map") or {})
+        new_open_path = self._folder_to_file_path(dest_path)
+        if new_open_path:
+            self._pending_selection = new_open_path
+            # Reload editor if this page was open so heading/title changes are reflected
+            if self.current_path == new_open_path:
+                self._open_file(new_open_path, force=True)
+        self._populate_vault_tree()
+
+    def _move_path_dialog(self, folder_path: str, current_parent: str) -> None:
+        if not self._ensure_writable("move pages or folders"):
+            return
+        dlg = JumpToPageDialog(self)
+        dlg.setWindowTitle("Move To…")
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        target_path = dlg.selected_path()
+        if not target_path:
+            return
+        parent_clean = self._file_path_to_folder(target_path) or "/"
+        if not parent_clean.startswith("/"):
+            parent_clean = f"/{parent_clean}"
+        leaf = Path(folder_path.rstrip("/")).name
+        dest_path = self._join_paths(parent_clean, leaf)
+        if dest_path == folder_path:
+            return
+        old_open_path = self._folder_to_file_path(folder_path)
+        if self.current_path and old_open_path and self.current_path == old_open_path:
+            self._save_dirty_page()
+        try:
+            resp = self.http.post("/api/file/move", json={"from": folder_path, "to": dest_path})
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            self._alert_api_error(exc, f"Failed to move {folder_path}")
+            return
+        self._handle_move_response(dest_path, resp.json())
+
+    def _on_tree_move_requested(self, from_path: str, dest_path: str) -> None:
+        if from_path == dest_path:
+            return
+        if not self._ensure_writable("move pages or folders"):
+            return
+        old_open_path = self._folder_to_file_path(from_path)
+        if self.current_path and old_open_path and self.current_path == old_open_path:
+            self._save_dirty_page()
+        try:
+            resp = self.http.post("/api/file/move", json={"from": from_path, "to": dest_path})
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            self._alert_api_error(exc, f"Failed to move {from_path}")
+            return
+        self._handle_move_response(dest_path, resp.json())
+
+    def _handle_move_response(self, dest_path: str, data: dict) -> None:
+        self._apply_path_map(data.get("page_map") or {})
+        self._register_link_path_map(data.get("page_map") or {})
+        new_open_path = self._folder_to_file_path(dest_path)
+        # If we were filtered to a subtree and the item moved outside it, clear the filter so it stays visible
+        if self._nav_filter_path and dest_path and not dest_path.startswith(self._nav_filter_path):
+            self._clear_nav_filter()
+        if new_open_path:
+            self._pending_selection = new_open_path
+            if self.current_path == new_open_path:
+                self._open_file(new_open_path, force=True)
+        self._populate_vault_tree()
+
     def _apply_new_page_template(self, file_path: str, page_name: str) -> None:
         """Apply the preferred template to a newly created page."""
         template_name = "Default"
@@ -4213,13 +4620,6 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
             
-            # Clean up database: delete all pages under this folder
-            # folder_path is like "/PageA/PageB" (folder) not "/PageA/PageB/PageB.txt" (file)
-            try:
-                config.delete_folder_index(folder_path)
-            except Exception as exc:
-                self._alert(f"Deleted files but failed to update index for {folder_path}: {exc}")
-            
             # Clear editor if we just deleted the currently open page
             if self.current_path and open_path and self.current_path == open_path:
                 self.current_path = None
@@ -4266,6 +4666,143 @@ class MainWindow(QMainWindow):
             if found:
                 return found
         return None
+
+    def _apply_path_map(self, path_map: dict[str, str]) -> None:
+        """Update local state (open page, history, bookmarks) after a rename/move."""
+        if not path_map:
+            return
+
+        def _rewrite_list(items: list[str]) -> list[str]:
+            return [path_map.get(item, item) for item in items]
+
+        if self.current_path in path_map:
+            new_current = path_map[self.current_path]
+            self.current_path = new_current
+            try:
+                self.editor.set_context(self.vault_root, new_current)
+            except Exception:
+                pass
+            self._pending_selection = new_current
+
+        self.page_history = _rewrite_list(self.page_history)
+        self.bookmarks = _rewrite_list(self.bookmarks)
+        self._history_cursor_positions = {path_map.get(k, k): v for k, v in self._history_cursor_positions.items()}
+        if getattr(self, "virtual_pages", None) is not None:
+            self.virtual_pages = {path_map.get(p, p) for p in self.virtual_pages}
+        try:
+            config.save_bookmarks(self.bookmarks)
+        except Exception:
+            pass
+        self._refresh_bookmark_buttons()
+
+    def _register_link_path_map(self, path_map: dict[str, str]) -> None:
+        """Track link rewrite hints and trigger background actions based on preference."""
+        if not path_map:
+            return
+        if self.link_update_mode == "none":
+            return
+        if self.link_update_mode == "reindex":
+            self._pending_link_path_maps.append(dict(path_map))
+            if not self._pending_reindex_trigger:
+                self._pending_reindex_trigger = True
+                QTimer.singleShot(0, self._trigger_background_reindex)
+            return
+        # Lazy mode: stash for future open/save rewrites
+        self._pending_link_path_maps.append(dict(path_map))
+
+    def _trigger_background_reindex(self) -> None:
+        """Schedule a background reindex; guard against overlapping calls."""
+        if not self._pending_reindex_trigger:
+            return
+        self._pending_reindex_trigger = False
+        print("[UI] Reindex requested (link update mode=reindex)")
+        self._reindex_vault(show_progress=False)
+
+    def _rewrite_links(self, content: str) -> tuple[str, bool]:
+        """Rewrite links in markdown content using pending path maps (lazy mode)."""
+        if not content or not self._pending_link_path_maps:
+            return content, False
+        updated = content
+        changed = False
+        for mapping in list(self._pending_link_path_maps):
+            for old_path, new_path in mapping.items():
+                try:
+                    old_colon = path_to_colon(old_path)
+                    new_colon = path_to_colon(new_path)
+                except Exception:
+                    old_colon = ""
+                    new_colon = ""
+                replacements = []
+                if old_path and new_path:
+                    replacements.append((old_path, new_path))
+                if old_colon and new_colon:
+                    replacements.append((old_colon, new_colon))
+                for old, new in replacements:
+                    if old and old in updated:
+                        updated = updated.replace(old, new)
+                        changed = True
+        return updated, changed
+
+    def _rewrite_links_on_disk(self) -> None:
+        """Rewrite page links across the vault using pending path maps."""
+        if not self.vault_root or not self._pending_link_path_maps:
+            return
+        merged: dict[str, str] = {}
+        for mapping in self._pending_link_path_maps:
+            merged.update(mapping)
+        if not merged:
+            return
+        try:
+            resp = self.http.post("/api/vault/update-links", json={"path_map": merged})
+            resp.raise_for_status()
+            data = resp.json()
+            touched = data.get("touched") or []
+            for path in touched:
+                print(f"[API] Link rewrite file: {path}")
+        except httpx.HTTPError as exc:
+            self._alert_api_error(exc, "Failed to rewrite links via API")
+
+    def _apply_rewritten_editor_content(self, new_content: str) -> None:
+        """Update editor text after a lazy link rewrite while attempting to preserve cursor."""
+        try:
+            cursor = self.editor.textCursor()
+            pos = cursor.position()
+        except Exception:
+            pos = None
+        self._suspend_autosave = True
+        self.editor.set_markdown(new_content)
+        self._suspend_autosave = False
+        if pos is not None:
+            try:
+                cursor = self.editor.textCursor()
+                cursor.setPosition(min(pos, len(new_content)))
+                self.editor.setTextCursor(cursor)
+            except Exception:
+                pass
+
+    def _ensure_page_title(self, content: str, path: Optional[str]) -> str:
+        """Ensure first non-empty line is a heading matching the leaf name if missing."""
+        if not path:
+            return content
+        leaf = Path(path.rstrip("/")).stem
+        lines = content.splitlines()
+        first_idx = None
+        for idx, line in enumerate(lines):
+            if line.strip():
+                first_idx = idx
+                break
+        if first_idx is None:
+            return f"# {leaf}\n"
+        first = lines[first_idx].lstrip()
+        if first.startswith("#"):
+            heading_text = first.lstrip("#").strip()
+            # If heading already matches leaf, keep as-is; otherwise leave untouched
+            if heading_text.lower() == leaf.lower():
+                lines[first_idx] = f"# {leaf}"
+            return "\n".join(lines)
+        # Insert heading before first content line
+        lines.insert(first_idx, f"# {leaf}")
+        return "\n".join(lines)
 
     def _gather_indexes(self, leaves_only: bool) -> list[QModelIndex]:
         model = self.tree_model
@@ -4742,12 +5279,58 @@ class MainWindow(QMainWindow):
         self.tree_view.setCurrentIndex(target)
         self.tree_view.scrollTo(target)
 
+    def _rebuild_vault_index_from_disk(self) -> None:
+        """Drop and rebuild vault index from source files, preserving bookmarks/kv/ai tables."""
+        if not self.vault_root or not config.has_active_vault():
+            self._alert("Select a vault before rebuilding the index.")
+            return
+        if not self._ensure_writable("rebuild the vault index"):
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Reindex",
+            "Reindex vault from files?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        print("[UI] Rebuild index from disk start")
+        self.statusBar().showMessage("Reindexing vault from files...", 0)
+        try:
+            # Close any active connection and wipe the settings DB so it is rebuilt like first-time startup
+            config.set_active_vault(None)
+            db_path = Path(self.vault_root) / ".zimx" / "settings.db"
+            try:
+                db_path.unlink()
+            except FileNotFoundError:
+                pass
+            config.set_active_vault(self.vault_root)
+        except Exception as exc:
+            self.statusBar().showMessage("Reindex failed", 4000)
+            self._alert(f"Failed to reindex: {exc}")
+            print(f"[UI] Reindex failed: {exc}")
+            return
+        print("[UI] Rebuild index from disk: indexing files")
+        self._reindex_vault(show_progress=True)
+        self.statusBar().showMessage("Reindex complete", 4000)
+        print("[UI] Reindex from files complete")
+
     def _reindex_vault(self, show_progress: bool = False) -> None:
         """Reindex all pages in the vault."""
         if not self.vault_root or not config.has_active_vault():
             return
         if not self._ensure_writable("reindex the vault"):
             return
+        print("[UI] Reindex start")
+        # Optionally rewrite page links on disk before reindexing using pending path maps
+        if self.update_links_on_index and self._pending_link_path_maps:
+            try:
+                self._rewrite_links_on_disk()
+            except Exception as exc:
+                print(f"[UI] Link rewrite during reindex failed: {exc}")
+        # Clear pending maps after optional rewrite to avoid repeated work
+        self._pending_link_path_maps.clear()
         
         root = Path(self.vault_root)
         txt_files = sorted(root.rglob(f"*{PAGE_SUFFIX}"))
@@ -4781,10 +5364,31 @@ class MainWindow(QMainWindow):
             progress.close()
             page_count = len(txt_files)
             self.statusBar().showMessage(f"Index rebuilt: {page_count} pages", 3000)
+        print("[UI] Reindex complete")
 
     # --- Utilities -----------------------------------------------------
     def _alert(self, message: str) -> None:
         QMessageBox.critical(self, "ZimX", message)
+
+    def _alert_api_error(self, exc: httpx.HTTPError, fallback: str) -> None:
+        detail = None
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            try:
+                data = resp.json()
+                if isinstance(data, dict):
+                    detail = data.get("detail") or data.get("message")
+            except Exception:
+                pass
+            if not detail:
+                try:
+                    text = resp.text
+                    if text and text.strip():
+                        detail = text.strip()
+                except Exception:
+                    pass
+        message = detail or fallback or str(exc)
+        self._alert(f"Reason: {message}")
 
     def _update_window_title(self) -> None:
         parts: list[str] = []

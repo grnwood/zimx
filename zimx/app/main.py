@@ -73,6 +73,10 @@ def _qt_message_handler(mode: QtMsgType, context, message: str) -> None:
     # Suppress other known harmless warnings if needed
     if "GetDesignGlyphMetrics failed" in message:
         return
+    if "QTextCursor::setPosition" in message:
+        return
+    if "Accessible invalid" in message or "Could not find accessible on path" in message:
+        return
     # Let other messages through to the default handler
     if mode == QtMsgType.QtDebugMsg:
         print(f"Qt Debug: {message}", file=sys.stderr)
