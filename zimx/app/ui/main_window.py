@@ -2183,9 +2183,8 @@ class MainWindow(QMainWindow):
             return
         self._tree_refresh_in_progress = True
         fetch_path = self._nav_filter_path or "/"
-        recursive = "true" if (self._nav_filter_path and self._nav_filter_path != "/") else "false"
         try:
-            resp = self.http.get("/api/vault/tree", params={"path": fetch_path, "recursive": recursive})
+            resp = self.http.get("/api/vault/tree", params={"path": fetch_path, "recursive": "false"})
             resp.raise_for_status()
         except httpx.HTTPError as exc:
             self._alert_api_error(exc, "Failed to load vault tree")
