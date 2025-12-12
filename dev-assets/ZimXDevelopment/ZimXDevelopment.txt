@@ -4,8 +4,10 @@ Logbook of all the development efforts on zim. yes!
 ### App
 ( )   check the vault lock (at least win32) should be warning, i lost writes over this @app
 ( )  Add menus for both Format and Go.  [:FormatAndGo|FormatAndGo]
- 
+( )  have ai write a zimx vault of for itself. @app
+
 ### Calendar
+---
 (x)  I'm seeing some blue dates on a fresh calendar, i only have the 24th defined?  @cal
 		 	
 (x)  Add Calendar panel  @cal
@@ -84,6 +86,7 @@ Logbook of all the development efforts on zim. yes!
 ￼
 ( )   lets fix the font and make it solid white, maybe have it scale down with the view size @link
 ( )  remember prefered / last used view and persist it @link
+( )  something is still very wrong with camel links and colon link resoultion. @edit
 
 
 ---
@@ -132,5 +135,6 @@ Logbook of all the development efforts on zim. yes!
 ( )   the ai tab when it gets focus should never load anything into the editor unless 'load chat for' is enabled. @ai
 ( )  my wipe confirm thing is wired to 'refresh models' not the refresh chat button :)  @aii
 
+
 ### SVG Vector Repo!
-https://www.svgrepo.com/svg/445655/collapse-vertical
+[https://www.svgrepo.com/svg/445655/collapse-vertical|]
