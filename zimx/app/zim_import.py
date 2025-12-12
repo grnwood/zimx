@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple, Mapping, Optional
 
 from zimx.server.adapters.files import PAGE_SUFFIX
 
@@ -34,6 +34,16 @@ def _dest_path(target_folder: str, rel_stem: str) -> str:
     dest_dir = base_path.joinpath(rel_path)
     dest_file = dest_dir / f"{rel_path.name}{PAGE_SUFFIX}"
     return f"/{dest_file.as_posix()}"
+
+
+def _apply_rename_path(path: str, rename_map: Optional[Mapping[str, str]]) -> str:
+    """Apply segment-wise renames (e.g., 9-Journal -> Journal) to a posix path."""
+    if not rename_map:
+        return path
+    parts = [rename_map.get(part, part) for part in Path(path).parts]
+    # Preserve leading slash if present in input
+    prefix = "/" if path.startswith("/") else ""
+    return prefix + "/".join(parts).lstrip("/")
 
 
 def _ensure_root_colon(link: str) -> str:
@@ -105,7 +115,7 @@ def _convert_inline(text: str) -> str:
     return converted
 
 
-def _rewrite_links(text: str, page_rel: str, page_map: Dict[str, str]) -> str:
+def _rewrite_links(text: str, page_rel: str, page_map: Dict[str, str], rename_map: Optional[Mapping[str, str]]) -> str:
     def replacer(match: re.Match[str]) -> str:
         target = (match.group("target") or "").strip()
         label = match.group("label") or ""
@@ -121,7 +131,7 @@ def _rewrite_links(text: str, page_rel: str, page_map: Dict[str, str]) -> str:
             return f"[{display}](./{normalized})"
 
         # Page link
-        resolved = _resolve_page_target(target, page_rel, page_map)
+        resolved = _resolve_page_target(target, page_rel, page_map, rename_map)
         if resolved:
             display = label or target
             return f"[{_ensure_root_colon(resolved)}|{display}]"
@@ -131,7 +141,9 @@ def _rewrite_links(text: str, page_rel: str, page_map: Dict[str, str]) -> str:
     return re.sub(r"\[\[(?P<target>[^\]|]+)(?:\|(?P<label>[^\]]*))?\]\]", replacer, text)
 
 
-def _resolve_page_target(target: str, page_rel: str, page_map: Dict[str, str]) -> str | None:
+def _resolve_page_target(
+    target: str, page_rel: str, page_map: Dict[str, str], rename_map: Optional[Mapping[str, str]]
+) -> str | None:
     # Normalize and try relative to current page
     base_page = PurePosixPath(page_rel)
     target_clean = target.strip()
@@ -153,10 +165,13 @@ def _resolve_page_target(target: str, page_rel: str, page_map: Dict[str, str]) -
     for key in keys:
         if key in page_map:
             return page_map[key]
-    return None
+    # Fallback: apply rename map to the candidate and return colon-path
+    renamed_candidate = _apply_rename_path(candidate, rename_map)
+    target_path = f"/{renamed_candidate}/{Path(renamed_candidate).name}{PAGE_SUFFIX}"
+    return _path_to_colon(target_path)
 
 
-def convert_content(raw: str, page_rel: str, page_map: Dict[str, str]) -> str:
+def convert_content(raw: str, page_rel: str, page_map: Dict[str, str], rename_map: Optional[Mapping[str, str]]) -> str:
     lines = _strip_headers(raw.splitlines())
     converted_lines = []
     for line in lines:
@@ -165,12 +180,15 @@ def convert_content(raw: str, page_rel: str, page_map: Dict[str, str]) -> str:
         line = _convert_inline(line)
         converted_lines.append(line)
     converted = "\n".join(converted_lines)
-    converted = _rewrite_links(converted, page_rel, page_map)
-    converted = _convert_plus_links(converted, page_rel, page_map)
+    converted = _convert_inline_images(converted, page_rel)
+    converted = _rewrite_links(converted, page_rel, page_map, rename_map)
+    converted = _convert_plus_links(converted, page_rel, page_map, rename_map)
     return converted.strip() + "\n"
 
 
-def _convert_plus_links(text: str, page_rel: str, page_map: Dict[str, str]) -> str:
+def _convert_plus_links(
+    text: str, page_rel: str, page_map: Dict[str, str], rename_map: Optional[Mapping[str, str]]
+) -> str:
     """Convert +CamelCase links to root-colon links relative to the current page."""
     allowed_prefixes = {"(", "[", "{", "<", "'", '"'}
     base_page = PurePosixPath(page_rel)
@@ -189,11 +207,37 @@ def _convert_plus_links(text: str, page_rel: str, page_map: Dict[str, str]) -> s
             if key in page_map:
                 colon = _ensure_root_colon(page_map[key])
                 return f"[{colon}|{link}]"
-        target_path = f"/{target_rel}/{link}{PAGE_SUFFIX}"
+        renamed_rel = _apply_rename_path(target_rel, rename_map)
+        target_path = f"/{renamed_rel}/{Path(renamed_rel).name}{PAGE_SUFFIX}"
         colon = _ensure_root_colon(_path_to_colon(target_path))
         return f"[{colon}|{link}]"
 
     return re.sub(r"\+(?P<link>[A-Z][\w]*)", replacer, text)
+
+
+def _convert_inline_images(text: str, page_rel: str) -> str:
+    """Convert Zim-style inline images {{./img.png?400x300}} → markdown images."""
+    def replacer(match: re.Match[str]) -> str:
+        raw = (match.group("src") or "").strip()
+        if not raw:
+            return match.group(0)
+        path = raw
+        width_attr = ""
+        if "?" in raw:
+            base, query = raw.split("?", 1)
+            path = base
+            size = re.match(r"(?P<w>\d+)(x(?P<h>\d+))?", query)
+            if size and size.group("w"):
+                width_attr = f"{{width={size.group('w')}}}"
+        # Keep relative paths as-is; Zim usually uses ./ relative to the page
+        return f"![]({path}){width_attr}"
+
+    return re.sub(
+        r"\{\{\s*(?P<src>[^}\s][^}]*(?:\.(?:png|jpg|jpeg|gif|svg|webp|bmp))(?:\?[^}]*)?)\s*\}\}",
+        replacer,
+        text,
+        flags=re.IGNORECASE,
+    )
 
 
 def _attachments_for_page(source_root: Path, rel_stem: str) -> List[Path]:
@@ -207,7 +251,11 @@ def _attachments_for_page(source_root: Path, rel_stem: str) -> List[Path]:
     return attachments
 
 
-def plan_import(source_path: Path, target_folder: str) -> Tuple[List[ImportPage], int]:
+def plan_import(
+    source_path: Path,
+    target_folder: str,
+    rename_map: Optional[Mapping[str, str]] = None,
+) -> Tuple[List[ImportPage], int]:
     if not source_path.exists():
         raise FileNotFoundError(source_path)
     source_root = source_path if source_path.is_dir() else source_path.parent
@@ -221,7 +269,8 @@ def plan_import(source_path: Path, target_folder: str) -> Tuple[List[ImportPage]
     for file_path in txt_files:
         rel = file_path.relative_to(source_root)
         rel_stem = rel.with_suffix("").as_posix()
-        dest_path = _dest_path(target_folder, rel_stem)
+        renamed_rel = _apply_rename_path(rel_stem, rename_map)
+        dest_path = _dest_path(target_folder, renamed_rel)
         colon = _path_to_colon(dest_path)
         key = rel_stem.strip("/").lower()
         page_map[key] = colon
@@ -234,9 +283,10 @@ def plan_import(source_path: Path, target_folder: str) -> Tuple[List[ImportPage]
     attachment_count = 0
     for file_path in txt_files:
         rel_stem = rel_map[file_path]
-        dest_path = _dest_path(target_folder, rel_stem)
+        renamed_rel = _apply_rename_path(rel_stem, rename_map)
+        dest_path = _dest_path(target_folder, renamed_rel)
         raw = file_path.read_text(encoding="utf-8")
-        content = convert_content(raw, rel_stem, page_map)
+        content = convert_content(raw, rel_stem, page_map, rename_map)
         attachments = _attachments_for_page(source_root, rel_stem)
         attachment_count += len(attachments)
         pages.append(

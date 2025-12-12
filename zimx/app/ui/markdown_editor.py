@@ -1183,6 +1183,7 @@ class MarkdownEditor(QTextEdit):
     viewportResized = Signal()
     editPageSourceRequested = Signal(str)  # Emits file path when user wants to edit page source
     openFileLocationRequested = Signal(str)  # Emits file path when user wants to open file location
+    locateInNavigatorRequested = Signal(str)  # Emits current page path when locator is requested
     insertDateRequested = Signal()
     attachmentDropped = Signal(str)  # Emits filename when a file is dropped into the editor
     backlinksRequested = Signal(str)  # Emits current page path when backlinks are requested
@@ -2773,6 +2774,8 @@ class MarkdownEditor(QTextEdit):
             # Add Open File Location action (delegates to main window)
             open_loc_action = menu.addAction("Open File Location")
             open_loc_action.triggered.connect(lambda: self.openFileLocationRequested.emit(self._current_path))
+            locate_nav_action = menu.addAction("Locate Page in Navigator")
+            locate_nav_action.triggered.connect(lambda: self.locateInNavigatorRequested.emit(self._current_path or ""))
             if self._open_in_window_callback:
                 open_popup_action = menu.addAction("Open in New Editor")
                 open_popup_action.triggered.connect(lambda: self._open_in_window_callback(self._current_path or ""))

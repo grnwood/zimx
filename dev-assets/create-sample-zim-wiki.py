@@ -92,6 +92,13 @@ def build_page_content(
         lines.append(f"Child page link: +{child}")
     lines.append("")
 
+    if attachment_links:
+        lines.append(zim_heading(4, "Inline Media"))
+        first_att = attachment_links[0]
+        # Zim-style inline image syntax
+        lines.append(f"Embedded inline image: {{{{{./{first_att}}}}}")
+        lines.append("")
+
     lines.append(zim_heading(4, "Formatting"))
     lines.append("**Bold**, //italic//, ~~strikethrough~~, and ''fixed width'' text.")
     lines.append("Nested emphasis: //**bold italic**// demonstrates combined styles.")

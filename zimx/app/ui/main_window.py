@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QListWidget,
     QListWidgetItem,
+    QInputDialog,
     QLineEdit,
     QMenu,
     QMainWindow,
@@ -72,11 +73,94 @@ from PySide6.QtWidgets import (
     QLabel,
     QHBoxLayout,
     QToolButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QMessageBox,
+    QDialogButtonBox,
+    QPushButton,
 )
 
 from zimx.app import config, indexer
 from zimx.server.adapters.files import PAGE_SUFFIX
 from zimx.app import zim_import
+
+
+class PageRenameDialog(QDialog):
+    """Dialog to collect source→target page renames for Zim import."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Rename Pages for Import")
+        self.resize(520, 320)
+
+        self.table = QTableWidget(0, 2, self)
+        self.table.setHorizontalHeaderLabels(["Source segment", "Target segment"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+
+        add_btn = QPushButton("Add…")
+        remove_btn = QPushButton("Remove")
+        add_btn.clicked.connect(self._add_row)
+        remove_btn.clicked.connect(self._remove_selected)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+
+        controls = QHBoxLayout()
+        controls.addWidget(add_btn)
+        controls.addWidget(remove_btn)
+        controls.addStretch(1)
+
+        layout = QVBoxLayout(self)
+        hint = QLabel(
+            "Renames pages in the ZimX import.\n"
+            "Example:\n"
+            "Old Zim Wiki Page:\n"
+            "9-Journal:Page:Link\n"
+            "New Wiki Page:\n"
+            "Journal:Page:Link"
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        layout.addWidget(QLabel("Rename page path segments before import:"))
+        layout.addWidget(self.table, 1)
+        layout.addLayout(controls)
+        layout.addWidget(btns)
+
+    def _add_row(self) -> None:
+        src, ok1 = QInputDialog.getText(self, "Source name", "Source segment (e.g., 9-Journal):")
+        if not ok1 or not src.strip():
+            return
+        dst, ok2 = QInputDialog.getText(self, "Target name", "Target segment (e.g., Journal):", text=src.strip())
+        if not ok2 or not dst.strip():
+            return
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self.table.setItem(row, 0, QTableWidgetItem(src.strip()))
+        self.table.setItem(row, 1, QTableWidgetItem(dst.strip()))
+
+    def _remove_selected(self) -> None:
+        rows = {idx.row() for idx in self.table.selectedIndexes()}
+        for row in sorted(rows, reverse=True):
+            self.table.removeRow(row)
+
+    def mapping(self) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for row in range(self.table.rowCount()):
+            src_item = self.table.item(row, 0)
+            dst_item = self.table.item(row, 1)
+            if not src_item or not dst_item:
+                continue
+            src = src_item.text().strip()
+            dst = dst_item.text().strip()
+            if src and dst:
+                result[src] = dst
+        return result
 
 from .markdown_editor import MarkdownEditor
 from .tabbed_right_panel import TabbedRightPanel
@@ -611,6 +695,7 @@ class MainWindow(QMainWindow):
         self.editor.insertDateRequested.connect(self._insert_date)
         self.editor.editPageSourceRequested.connect(self._view_page_source)
         self.editor.openFileLocationRequested.connect(self._open_tree_file_location)
+        self.editor.locateInNavigatorRequested.connect(self._locate_current_page_in_tree)
         self.editor.attachmentDropped.connect(self._on_attachment_dropped)
         self.editor.backlinksRequested.connect(
             lambda path="": self._show_link_navigator_for_path(path or self.current_path)
@@ -1561,8 +1646,9 @@ class MainWindow(QMainWindow):
         
         # Check if index is empty and rebuild if needed
         needs_index = index_dir_missing or config.is_vault_index_empty()
-        self._reindex_vault(show_progress=needs_index)
-        
+        if needs_index:
+            self._reindex_vault(show_progress=True)
+
         self._load_bookmarks()
         if self.vault_root:
             self.right_panel.set_vault_root(self.vault_root)
@@ -1814,14 +1900,8 @@ class MainWindow(QMainWindow):
             self.history_layout.addWidget(btn)
 
     def _open_history_page(self, page_path: str) -> None:
-        """Open a page from history and update tree selection."""
-        # Path is already in colon format, just open it directly (same as bookmarks)
+        """Open a page from history without updating tree selection."""
         self._remember_history_cursor()
-        try:
-            self._suspend_selection_open = True
-            self._select_tree_path(page_path)
-        finally:
-            self._suspend_selection_open = False
         self._open_file(page_path, add_to_history=False, restore_history_cursor=True)  # Don't add to history again
 
     def _show_history_context_menu(self, pos: QPoint, page_path: str, button: QWidget) -> None:
@@ -1844,7 +1924,6 @@ class MainWindow(QMainWindow):
             try:
                 abs_path = Path(self.vault_root) / last_file.lstrip("/")
                 if abs_path.exists():
-                    self._select_tree_path(last_file)
                     self._open_file(last_file)
                     return
             except Exception:
@@ -1871,7 +1950,6 @@ class MainWindow(QMainWindow):
 
     def _open_bookmark(self, path: str) -> None:
         """Open a bookmarked page."""
-        self._select_tree_path(path)
         self._open_file(path)
 
     def _show_bookmark_context_menu(self, pos: QPoint, bookmark_path: str, button: QWidget) -> None:
@@ -2824,7 +2902,6 @@ class MainWindow(QMainWindow):
         if result == QDialog.Accepted:
             target = dlg.selected_path()
             if target:
-                self._select_tree_path(target)
                 self._open_file(target)
         
 
@@ -3087,7 +3164,6 @@ class MainWindow(QMainWindow):
         self.right_panel.set_font_size(ai_font_size)
 
     def _open_task_from_panel(self, path: str, line: int) -> None:
-        self._select_tree_path(path)
         self._open_file(path)
         # Focus first, then go to line so the selection isn't cleared
         self.editor.setFocus()
@@ -3110,12 +3186,10 @@ class MainWindow(QMainWindow):
                 or normalized == f"{self.vault_root_name}/{self.vault_root_name}{PAGE_SUFFIX}"
             ):
                 main_page = f"/{self.vault_root_name}{PAGE_SUFFIX}"
-                self._select_tree_path(main_page)
                 self._open_file(main_page)
                 self.right_panel.focus_link_tab(main_page)
                 self._apply_navigation_focus("navigator")
                 return
-        self._select_tree_path(path)
         self._open_file(path)
         # Scroll to anchor if provided
         try:
@@ -3133,7 +3207,6 @@ class MainWindow(QMainWindow):
         # Handle possible anchor fragment in calendar links
         base, anchor = self._split_link_anchor(path)
         norm = self._normalize_editor_path(base)
-        self._select_tree_path(norm)
         self._open_file(norm)
         try:
             slug = self._anchor_slug(anchor)
@@ -3396,7 +3469,6 @@ class MainWindow(QMainWindow):
             if refresh_only and self.current_path == target:
                 self._reload_page_preserve_cursor(target)
             elif not refresh_only:
-                self._select_tree_path(target)
                 self._open_file(target, force=force)
             return
         # Otherwise treat as page link
@@ -4135,7 +4207,6 @@ class MainWindow(QMainWindow):
         result = dlg.exec()
         if result == QMessageBox.Ok:
             # Reload and render page (force reload even if already current)
-            self._select_tree_path(file_path)
             self._open_file(file_path, force=True)
     
     def _open_tree_file_location(self, file_path: str) -> None:
@@ -4540,7 +4611,6 @@ class MainWindow(QMainWindow):
         # Keep AI Chat tab visible while navigating
         self.right_panel.focus_ai_chat(chat_folder)
         try:
-            self._select_tree_path(file_path)
             # Open base file then scroll to anchor if provided
             self._open_file(file_path, force=True)
             try:
@@ -4818,14 +4888,24 @@ class MainWindow(QMainWindow):
         target_folder = self._prompt_import_target_folder()
         if target_folder is None:
             return
+        rename_map: dict[str, str] = {}
+        rename_dlg = PageRenameDialog(self)
+        if rename_dlg.exec() == QDialog.Accepted:
+            rename_map = rename_dlg.mapping()
         try:
-            pages, attachment_count = zim_import.plan_import(source, target_folder)
+            pages, attachment_count = zim_import.plan_import(source, target_folder, rename_map or None)
         except Exception as exc:
             self._alert(f"Import failed: {exc}")
             return
         if not pages:
             self._alert("No .txt files found to import.")
             return
+
+        def _short_name(name: str, limit: int = 40) -> str:
+            clean = name or ""
+            if len(clean) <= limit:
+                return clean
+            return clean[:limit] + "..."
 
         total_steps = len(pages) + attachment_count
         progress = QProgressDialog("Importing Zim wiki...", None, 0, max(1, total_steps), self)
@@ -4836,8 +4916,12 @@ class MainWindow(QMainWindow):
         progress.show()
 
         steps_done = 0
+        attachments_done = 0
         for idx, page in enumerate(pages, start=1):
-            progress.setLabelText(f"Importing {page.rel_stem} ({idx}/{len(pages)})")
+            name = _short_name(page.rel_stem)
+            progress.setLabelText(
+                f"Pages {idx}/{len(pages)}, attachments {attachments_done}/{attachment_count} — {name}"
+            )
             QApplication.processEvents()
             try:
                 resp = self.http.post("/api/file/write", json={"path": page.dest_path, "content": page.content})
@@ -4851,7 +4935,10 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
 
             if page.attachments:
-                progress.setLabelText(f"Copying {len(page.attachments)} attachment(s) for {page.rel_stem}")
+                progress.setLabelText(
+                    f"Copying {len(page.attachments)} attachment(s) for {name} "
+                    f"({attachments_done}/{attachment_count} done)"
+                )
                 QApplication.processEvents()
                 files_payload = []
                 open_files = []
@@ -4878,17 +4965,25 @@ class MainWindow(QMainWindow):
                         except Exception:
                             pass
                 steps_done += len(page.attachments)
+                attachments_done += len(page.attachments)
                 progress.setValue(steps_done)
                 QApplication.processEvents()
 
+        # Indicate tree refresh while it runs
+        progress.setRange(0, total_steps + 1)
+        progress.setLabelText("Updating tree…")
+        QApplication.processEvents()
         progress.setValue(total_steps)
-        progress.close()
+        QApplication.processEvents()
         self._populate_vault_tree()
+        progress.setValue(total_steps + 1)
+        progress.close()
         self.statusBar().showMessage(f"Imported {len(pages)} page(s) from Zim", 5000)
         QMessageBox.information(
             self,
             "Import complete",
-            f"Imported {len(pages)} page(s) and {attachment_count} attachment(s).",
+            f"Import complete: imported {len(pages)} page(s) and {attachment_count} attachment(s).\n"
+            "You probably need to reindex the vault.",
         )
 
     def _handle_move_response(self, dest_path: str, data: dict) -> None:
@@ -5054,6 +5149,14 @@ class MainWindow(QMainWindow):
             self.tree_view.setCurrentIndex(index)
             self.tree_view.scrollTo(index)
 
+    def _locate_current_page_in_tree(self) -> None:
+        """Manually locate the current page in the navigator."""
+        if not self.current_path:
+            self.statusBar().showMessage("No page to locate", 3000)
+            return
+        self._select_tree_path(self.current_path)
+        self._apply_navigation_focus("navigator")
+
     def _find_item(self, parent: QStandardItem, target: str) -> Optional[QStandardItem]:
         for row in range(parent.rowCount()):
             child = parent.child(row)
@@ -5100,13 +5203,7 @@ class MainWindow(QMainWindow):
             return
         if self.link_update_mode == "none":
             return
-        if self.link_update_mode == "reindex":
-            self._pending_link_path_maps.append(dict(path_map))
-            if not self._pending_reindex_trigger:
-                self._pending_reindex_trigger = True
-                QTimer.singleShot(0, self._trigger_background_reindex)
-            return
-        # Lazy mode: stash for future open/save rewrites
+        # Always stash path maps; reindexing is user-initiated unless index is missing.
         self._pending_link_path_maps.append(dict(path_map))
 
     def _trigger_background_reindex(self) -> None:
@@ -5226,11 +5323,6 @@ class MainWindow(QMainWindow):
         self._remember_history_cursor()
         self.history_index -= 1
         target_path = self.page_history[self.history_index]
-        self._suspend_selection_open = True
-        try:
-            self._select_tree_path(target_path)
-        finally:
-            self._suspend_selection_open = False
         self._open_file(target_path, add_to_history=False, restore_history_cursor=True)
         QTimer.singleShot(0, self.editor.setFocus)
 
@@ -5241,11 +5333,6 @@ class MainWindow(QMainWindow):
         self._remember_history_cursor()
         self.history_index += 1
         target_path = self.page_history[self.history_index]
-        self._suspend_selection_open = True
-        try:
-            self._select_tree_path(target_path)
-        finally:
-            self._suspend_selection_open = False
         self._open_file(target_path, add_to_history=False, restore_history_cursor=True)
         QTimer.singleShot(0, self.editor.setFocus)
     
@@ -5441,7 +5528,6 @@ class MainWindow(QMainWindow):
         if mode == "history" and target:
             saved_pos = self._history_cursor_positions.get(target)
             self._remember_history_cursor()
-            self._select_tree_path(target)
             self._open_file(target, add_to_history=False, force=True, restore_history_cursor=True)
             if saved_pos is not None:
                 cursor = self.editor.textCursor()
