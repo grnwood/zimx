@@ -20,7 +20,9 @@ this is just *italic*
 
 this is ~~strikethrough~~.
 
-~~this is a multi line 1strikethrough none of this applies.~~
+~~this is a~~
+~~multiline strike through~~
+~~of stuff~~
 
 this is a `single fixed width` thing.
 

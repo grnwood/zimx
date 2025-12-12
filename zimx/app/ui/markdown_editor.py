@@ -2093,6 +2093,27 @@ class MarkdownEditor(QTextEdit):
     
     # (Removed old _copy_link_to_location; newer implementation exists later in file)
 
+    def style_operations(self) -> list[tuple[str, QKeySequence, Callable[[], None], str]]:
+        """Return available inline style operations and their handlers."""
+        return [
+            ("Bold", QKeySequence("Ctrl+B"), self._toggle_bold, "Toggle bold (**text**)"),
+            ("Italic", QKeySequence("Ctrl+I"), self._toggle_italic, "Toggle italic (*text*)"),
+            ("Strikethrough", QKeySequence("Ctrl+K"), self._toggle_strikethrough, "Toggle strikethrough (~~text~~)"),
+            ("Highlight", QKeySequence("Ctrl+U"), self._toggle_highlight, "Toggle highlight (==text==)"),
+            ("Verbatim", QKeySequence("Ctrl+T"), self._toggle_verbatim, "Wrap selection in backticks"),
+            ("Heading 1", QKeySequence("Ctrl+1"), lambda: self._apply_heading_level(1), "Convert line to H1 (#)"),
+            ("Heading 2", QKeySequence("Ctrl+2"), lambda: self._apply_heading_level(2), "Convert line to H2 (##)"),
+            ("Heading 3", QKeySequence("Ctrl+3"), lambda: self._apply_heading_level(3), "Convert line to H3 (###)"),
+            ("Heading 4", QKeySequence("Ctrl+4"), lambda: self._apply_heading_level(4), "Convert line to H4 (####)"),
+            ("Heading 5", QKeySequence("Ctrl+5"), lambda: self._apply_heading_level(5), "Convert line to H5 (#####)"),
+            ("Remove Heading", QKeySequence("Ctrl+7"), self._remove_heading, "Strip heading markers on this line"),
+            ("Bullet List", QKeySequence(), lambda: self._apply_list_style("bullet"), "Turn selection into bullet list"),
+            ("Dash List", QKeySequence(), lambda: self._apply_list_style("dash"), "Turn selection into dash list"),
+            ("Checkbox List", QKeySequence(), lambda: self._apply_list_style("task"), "Turn selection into checkbox list"),
+            ("Clear List", QKeySequence(), lambda: self._apply_list_style("clear"), "Remove list markers from selection"),
+            ("Clear Formatting", QKeySequence("Ctrl+9"), self._clear_inline_formatting, "Restore selection to plain text"),
+        ]
+
     def _toggle_markdown_format(self, prefix: str, suffix: str = None) -> None:
         """Toggle markdown formatting around selected text or word at cursor.
         
@@ -2112,52 +2133,75 @@ class MarkdownEditor(QTextEdit):
         selected_text = cursor.selectedText()
         if not selected_text:
             return
-        
-        start = cursor.selectionStart()
-        end = cursor.selectionEnd()
-        
-        # Get the full document text to check surrounding characters
-        doc_text = self.toPlainText()
-        
-        # Check if selection is already wrapped with these markers
+        selected = selected_text.replace("\u2029", "\n")
         prefix_len = len(prefix)
         suffix_len = len(suffix)
-        
+
+        # Multi-line selection: apply/remove per line
+        lines = selected.split("\n")
+        if len(lines) > 1:
+            def line_wrapped(line: str) -> bool:
+                return len(line) >= prefix_len + suffix_len and line.startswith(prefix) and line.endswith(suffix)
+
+            non_empty_lines = [ln for ln in lines if ln]
+            all_wrapped = bool(non_empty_lines) and all(line_wrapped(line) for line in non_empty_lines)
+            new_lines: list[str] = []
+            if all_wrapped:
+                for line in lines:
+                    if line and line_wrapped(line):
+                        new_lines.append(line[prefix_len : len(line) - suffix_len])
+                    else:
+                        new_lines.append(line)
+            else:
+                for line in lines:
+                    if not line:
+                        new_lines.append(line)
+                    else:
+                        new_lines.append(f"{prefix}{line}{suffix}")
+            new_text = "\n".join(new_lines)
+            start = cursor.selectionStart()
+            cursor.beginEditBlock()
+            cursor.insertText(new_text)
+            cursor.endEditBlock()
+            new_cursor = self.textCursor()
+            new_cursor.setPosition(start)
+            new_cursor.setPosition(start + len(new_text), QTextCursor.KeepAnchor)
+            self.setTextCursor(new_cursor)
+            return
+
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+        doc_text = self.toPlainText()
+
         already_wrapped = False
-        if (start >= prefix_len and end + suffix_len <= len(doc_text)):
-            before = doc_text[start - prefix_len:start]
-            after = doc_text[end:end + suffix_len]
+        if start >= prefix_len and end + suffix_len <= len(doc_text):
+            before = doc_text[start - prefix_len : start]
+            after = doc_text[end : end + suffix_len]
             if before == prefix and after == suffix:
                 already_wrapped = True
-        
+
         cursor.beginEditBlock()
-        
+
         if already_wrapped:
-            # Remove the wrapping markers
-            # First remove suffix
             cursor.setPosition(end)
             cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, suffix_len)
             cursor.removeSelectedText()
-            
-            # Then remove prefix
+
             cursor.setPosition(start - prefix_len)
             cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, prefix_len)
             cursor.removeSelectedText()
-            
-            # Restore selection without the markers
+
             cursor.setPosition(start - prefix_len)
             cursor.setPosition(start - prefix_len + len(selected_text), QTextCursor.KeepAnchor)
         else:
-            # Add the wrapping markers
             cursor.setPosition(start)
             cursor.setPosition(end, QTextCursor.KeepAnchor)
             wrapped_text = f"{prefix}{selected_text}{suffix}"
             cursor.insertText(wrapped_text)
-            
-            # Select the content (without the markers)
+
             cursor.setPosition(start + prefix_len)
             cursor.setPosition(start + prefix_len + len(selected_text), QTextCursor.KeepAnchor)
-        
+
         cursor.endEditBlock()
         self.setTextCursor(cursor)
     
@@ -2202,6 +2246,161 @@ class MarkdownEditor(QTextEdit):
     def _toggle_highlight(self) -> None:
         """Toggle highlight formatting (==text==)."""
         self._toggle_markdown_format('==')
+
+    def _toggle_verbatim(self) -> None:
+        """Wrap selection in backticks for inline code."""
+        self._toggle_markdown_format('`')
+
+    def _strip_heading(self, text: str) -> tuple[str, str]:
+        """Return (indent, content) without any heading markers/sentinels."""
+        stripped = text.lstrip(" \t")
+        indent = text[: len(text) - len(stripped)]
+        if not stripped:
+            return indent, ""
+        level = heading_level_from_char(stripped[0])
+        if level:
+            return indent, stripped[1:].lstrip()
+        if stripped.startswith("#"):
+            hashes = len(stripped) - len(stripped.lstrip("#"))
+            return indent, stripped[hashes:].lstrip()
+        return indent, stripped
+
+    def _apply_heading_level(self, level: int) -> None:
+        """Set current line to heading level (1-5)."""
+        level = max(1, min(level, HEADING_MAX_LEVEL))
+        cursor = self.textCursor()
+        block = cursor.block()
+        if not block.isValid():
+            return
+        text = block.text()
+        indent, content = self._strip_heading(text)
+        sentinel = heading_sentinel(level)
+        new_line = f"{indent}{sentinel}{content}"
+        cursor.beginEditBlock()
+        line_cursor = QTextCursor(block)
+        line_cursor.select(QTextCursor.LineUnderCursor)
+        line_cursor.insertText(new_line)
+        new_pos = block.position() + len(indent) + len(sentinel)
+        cursor.setPosition(min(new_pos, block.position() + len(new_line)))
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+        self._schedule_heading_outline()
+
+    def _remove_heading(self) -> None:
+        """Remove heading markers from the current line."""
+        cursor = self.textCursor()
+        block = cursor.block()
+        if not block.isValid():
+            return
+        text = block.text()
+        indent, content = self._strip_heading(text)
+        new_line = indent + content
+        cursor.beginEditBlock()
+        line_cursor = QTextCursor(block)
+        line_cursor.select(QTextCursor.LineUnderCursor)
+        line_cursor.insertText(new_line)
+        cursor.setPosition(block.position() + len(indent))
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+        self._schedule_heading_outline()
+
+    def _selected_blocks(self) -> list:
+        """Return all blocks touched by the selection (or current line)."""
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            block = cursor.block()
+            return [block] if block.isValid() else []
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+        doc = self.document()
+        start_block = doc.findBlock(start)
+        end_block = doc.findBlock(max(start, end - 1))
+        if not start_block.isValid() or not end_block.isValid():
+            return []
+        blocks = []
+        block = start_block
+        while block.isValid():
+            blocks.append(block)
+            if block == end_block:
+                break
+            block = block.next()
+        return blocks
+
+    def _split_list_content(self, text: str) -> tuple[str, str]:
+        """Return indent and content stripped of list markers."""
+        indent = text[: len(text) - len(text.lstrip(" \t"))]
+        kind, _, remainder = self._list_line_info(text)
+        content = remainder
+        if kind == "bullet":
+            if content.startswith(("• ", "* ")):
+                content = content[2:]
+        elif kind == "dash":
+            if content.startswith("- "):
+                content = content[2:]
+        elif kind == "task":
+            if content.startswith(("☐ ", "☑ ")):
+                content = content[2:]
+            else:
+                m = re.match(r"\((?:[ xX])\)\s*(.*)", content)
+                if m:
+                    content = m.group(1)
+        content = content.lstrip()
+        return indent, content
+
+    def _apply_list_style(self, list_type: str) -> None:
+        """Apply list style to selection: bullet, dash, task, or clear."""
+        blocks = self._selected_blocks()
+        if not blocks:
+            return
+        cursor = self.textCursor()
+        first_pos = blocks[0].position()
+        last_block = blocks[-1]
+        cursor.beginEditBlock()
+        for block in blocks:
+            text = block.text()
+            indent, content = self._split_list_content(text)
+            if list_type == "clear":
+                new_line = indent + content
+            elif list_type == "bullet":
+                new_line = f"{indent}• {content}"
+            elif list_type == "dash":
+                new_line = f"{indent}- {content}"
+            else:
+                new_line = f"{indent}☐ {content}"
+            line_cursor = QTextCursor(block)
+            line_cursor.select(QTextCursor.LineUnderCursor)
+            line_cursor.insertText(new_line)
+        cursor.endEditBlock()
+        end_pos = last_block.position() + max(0, last_block.length() - 1)
+        new_cursor = self.textCursor()
+        new_cursor.setPosition(first_pos)
+        new_cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
+        self.setTextCursor(new_cursor)
+        self._schedule_heading_outline()
+
+    def _clear_inline_formatting(self) -> None:
+        """Remove common markdown markers from the selection."""
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            cursor.select(QTextCursor.WordUnderCursor)
+        if not cursor.hasSelection():
+            return
+        text = cursor.selectedText().replace("\u2029", "\n")
+        # Strip common wrappers
+        patterns = [
+            (r"\*\*\*(.+?)\*\*\*", r"\1"),
+            (r"\*\*(.+?)\*\*", r"\1"),
+            (r"\*(.+?)\*", r"\1"),
+            (r"~~(.+?)~~", r"\1"),
+            (r"==(.+?)==", r"\1"),
+            (r"`(.+?)`", r"\1"),
+        ]
+        for pat, repl in patterns:
+            text = re.sub(pat, repl, text, flags=re.DOTALL)
+        cursor.beginEditBlock()
+        cursor.insertText(text)
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
 
     def focusOutEvent(self, event):  # type: ignore[override]
         super().focusOutEvent(event)
@@ -2275,6 +2474,26 @@ class MarkdownEditor(QTextEdit):
                 self._toggle_strikethrough()
                 event.accept()
                 return
+            elif event.key() == Qt.Key_U:
+                self._toggle_highlight()
+                event.accept()
+                return
+            elif event.key() == Qt.Key_T:
+                self._toggle_verbatim()
+                event.accept()
+                return
+            elif event.key() in (Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4, Qt.Key_5):
+                self._apply_heading_level(event.key() - Qt.Key_0)
+                event.accept()
+                return
+            elif event.key() == Qt.Key_7:
+                self._remove_heading()
+                event.accept()
+                return
+            elif event.key() == Qt.Key_9:
+                self._clear_inline_formatting()
+                event.accept()
+                return
             elif event.key() == Qt.Key_Z:
                 self._undo_or_status()
                 event.accept()
@@ -2283,12 +2502,6 @@ class MarkdownEditor(QTextEdit):
                 self._redo_or_status()
                 event.accept()
                 return
-        if event.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
-            if event.key() == Qt.Key_H:
-                self._toggle_highlight()
-                event.accept()
-                return
-        
         if self._vi_feature_enabled and self._handle_vi_keypress(event):
             event.accept()
             return
@@ -3568,11 +3781,9 @@ class MarkdownEditor(QTextEdit):
                 self._vi_move_cursor(QTextCursor.Up, select=True)
             return True
 
-        if key == Qt.Key_Semicolon:
-            self._vi_move_to_line_end(select=shift)
-            return True
-        if key == Qt.Key_Colon:
-            # Ignore colon in nav mode to avoid popping the command prompt or other actions.
+        if key in (Qt.Key_Semicolon, Qt.Key_Colon):
+            # ';' moves to EOL; with Shift (':') we select to EOL.
+            self._vi_move_to_line_end(select=shift or key == Qt.Key_Colon)
             return True
 
         if key == Qt.Key_J and not shift:

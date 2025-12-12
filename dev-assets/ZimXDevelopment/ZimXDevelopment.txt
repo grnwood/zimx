@@ -106,9 +106,9 @@ Logbook of all the development efforts on zim. yes!
 	
 ### Page Templates
 ---
-( )  ctrl-n should default to the `New Page` template.  @page
+(x)  ctrl-n should default to the `New Page` template.  @page
 ( ) Add some more?  @page
-( )  need to fix template engine. add a open template folder (users .zimx folder overrides). @page
+(x)  need to fix template engine. add a open template folder (users .zimx folder overrides). @page
 	probably add !qotd! in there too for fun, any others?
 ( )  concept of project template? @page
 	thinking something like:  right click / new project / TSD template.  This might create the folder / page structure automatically.

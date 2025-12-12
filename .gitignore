@@ -32,3 +32,4 @@ dev-assets/specs/slipstream-ai.md
 dev-assets/ZimXDevelopment/.zimx/ai-chats.db
 .env
 dev-assets/ZimXDevelopment/.zimx/zimx.lock
+dev-assets/sample-zim-wiki/*

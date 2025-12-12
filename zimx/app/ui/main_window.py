@@ -76,6 +76,7 @@ from PySide6.QtWidgets import (
 
 from zimx.app import config, indexer
 from zimx.server.adapters.files import PAGE_SUFFIX
+from zimx.app import zim_import
 
 from .markdown_editor import MarkdownEditor
 from .tabbed_right_panel import TabbedRightPanel
@@ -597,6 +598,10 @@ class MainWindow(QMainWindow):
         self.tree_view.setHeaderHidden(True)
 
         self.editor = MarkdownEditor()
+        self.autosave_timer = QTimer(self)
+        self.autosave_timer.setInterval(30_000)
+        self.autosave_timer.setSingleShot(True)
+        self.autosave_timer.timeout.connect(lambda: self._save_current_file(auto=True))
         self.editor.imageSaved.connect(self._on_image_saved)
         self.editor.textChanged.connect(lambda: self.autosave_timer.start())
         self.editor.focusLost.connect(lambda: (self._remember_history_cursor(), self._save_current_file(auto=True)))
@@ -717,10 +722,6 @@ class MainWindow(QMainWindow):
         self._ai_badge_icon: Optional[QIcon] = None
         self._page_windows: list[PageEditorWindow] = []
         self._apply_read_only_state()
-        self.autosave_timer = QTimer(self)
-        self.autosave_timer.setInterval(30_000)
-        self.autosave_timer.setSingleShot(True)
-        self.autosave_timer.timeout.connect(lambda: self._save_current_file(auto=True))
 
         # Geometry save timer (debounce frequent resize/splitter move events)
         self.geometry_save_timer = QTimer(self)
@@ -830,6 +831,12 @@ class MainWindow(QMainWindow):
         open_templates_action.setToolTip("Open or create ~/.zimx/templates in your file manager")
         open_templates_action.triggered.connect(self._open_user_templates_folder)
         vault_menu.addAction(open_templates_action)
+        import_menu = file_menu.addMenu("Import")
+        zim_import_action = QAction("Zim Wiki…", self)
+        zim_import_action.setToolTip("Import pages from a Zim wiki folder or .txt file")
+        zim_import_action.triggered.connect(self._import_zim_wiki)
+        import_menu.addAction(zim_import_action)
+        self._build_format_menu()
         view_menu = self.menuBar().addMenu("&View")
         reset_view_action = QAction("Reset View/Layout", self)
         reset_view_action.setToolTip("Reset window size and splitter positions to defaults")
@@ -1153,6 +1160,22 @@ class MainWindow(QMainWindow):
         reload_page.activated.connect(self._reload_current_page)
         toggle_left.activated.connect(self._toggle_left_panel)
         toggle_right.activated.connect(self._toggle_right_panel)
+
+    def _build_format_menu(self) -> None:
+        """Add a Format menu that mirrors markdown styling shortcuts."""
+        format_menu = self.menuBar().addMenu("F&ormat")
+        for label, shortcut, handler, description in self.editor.style_operations():
+            action = QAction(label, self)
+            action.setShortcut(shortcut)
+            action.setShortcutContext(Qt.WindowShortcut)
+            action.setStatusTip(description)
+            action.triggered.connect(lambda checked=False, func=handler: self._invoke_editor_style(func))
+            format_menu.addAction(action)
+
+    def _invoke_editor_style(self, formatter: Callable[[], None]) -> None:
+        """Focus the editor before applying a format operation."""
+        self.editor.setFocus(Qt.ShortcutFocusReason)
+        formatter()
 
     def _selected_text_for_search(self) -> str:
         cursor = self.editor.textCursor()
@@ -4718,6 +4741,120 @@ class MainWindow(QMainWindow):
             self._alert_api_error(exc, f"Failed to move {from_path}")
             return
         self._handle_move_response(dest_path, resp.json())
+
+    # --- Zim import --------------------------------------------------
+
+    def _prompt_zim_source(self) -> Optional[Path]:
+        dialog = QFileDialog(self, "Select Zim wiki folder or .txt file")
+        dialog.setFileMode(QFileDialog.Directory)
+        dialog.setOption(QFileDialog.ShowDirsOnly, True)
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+        dialog.setNameFilter("Zim wiki (*.txt);;All files (*)")
+        if self.vault_root:
+            dialog.setDirectory(self.vault_root)
+        if dialog.exec() != QFileDialog.Accepted:
+            return None
+        files = dialog.selectedFiles()
+        if not files:
+            return None
+        return Path(files[0])
+
+    def _prompt_import_target_folder(self) -> Optional[str]:
+        dlg = JumpToPageDialog(self)
+        dlg.setWindowTitle("Import Target")
+        result = dlg.exec()
+        if result != QDialog.Accepted:
+            return None
+        target_path = dlg.selected_path()
+        if not target_path:
+            return None
+        folder = self._file_path_to_folder(target_path)
+        return folder or "/"
+
+    def _import_zim_wiki(self) -> None:
+        if not self.vault_root or not config.has_active_vault():
+            self._alert("Select a vault before importing.")
+            return
+        if not self._ensure_writable("import pages"):
+            return
+        source = self._prompt_zim_source()
+        if not source:
+            return
+        target_folder = self._prompt_import_target_folder()
+        if target_folder is None:
+            return
+        try:
+            pages, attachment_count = zim_import.plan_import(source, target_folder)
+        except Exception as exc:
+            self._alert(f"Import failed: {exc}")
+            return
+        if not pages:
+            self._alert("No .txt files found to import.")
+            return
+
+        total_steps = len(pages) + attachment_count
+        progress = QProgressDialog("Importing Zim wiki...", None, 0, max(1, total_steps), self)
+        progress.setWindowTitle("Importing")
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        steps_done = 0
+        for idx, page in enumerate(pages, start=1):
+            progress.setLabelText(f"Importing {page.rel_stem} ({idx}/{len(pages)})")
+            QApplication.processEvents()
+            try:
+                resp = self.http.post("/api/file/write", json={"path": page.dest_path, "content": page.content})
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                progress.close()
+                self._alert_api_error(exc, f"Failed to import {page.rel_stem}")
+                return
+            steps_done += 1
+            progress.setValue(steps_done)
+            QApplication.processEvents()
+
+            if page.attachments:
+                progress.setLabelText(f"Copying {len(page.attachments)} attachment(s) for {page.rel_stem}")
+                QApplication.processEvents()
+                files_payload = []
+                open_files = []
+                try:
+                    for attachment in page.attachments:
+                        fh = attachment.open("rb")
+                        open_files.append(fh)
+                        files_payload.append(("files", (attachment.name, fh, "application/octet-stream")))
+                    resp = self.http.post("/files/attach", data={"page_path": page.dest_path}, files=files_payload)
+                    resp.raise_for_status()
+                except Exception as exc:
+                    progress.close()
+                    self._alert(f"Failed to copy attachments for {page.rel_stem}: {exc}")
+                    for fh in open_files:
+                        try:
+                            fh.close()
+                        except Exception:
+                            pass
+                    return
+                finally:
+                    for fh in open_files:
+                        try:
+                            fh.close()
+                        except Exception:
+                            pass
+                steps_done += len(page.attachments)
+                progress.setValue(steps_done)
+                QApplication.processEvents()
+
+        progress.setValue(total_steps)
+        progress.close()
+        self._populate_vault_tree()
+        self.statusBar().showMessage(f"Imported {len(pages)} page(s) from Zim", 5000)
+        QMessageBox.information(
+            self,
+            "Import complete",
+            f"Imported {len(pages)} page(s) and {attachment_count} attachment(s).",
+        )
 
     def _handle_move_response(self, dest_path: str, data: dict) -> None:
         self._apply_path_map(data.get("page_map") or {})
