@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+import html
 import re
 from typing import Iterable, Optional
 
@@ -237,6 +238,33 @@ class TaskPanel(QWidget):
         self._setup_focus_defaults()
         self._update_filter_indicator()
         self._apply_font_size()
+
+    def _format_task_text(self, text: str) -> str:
+        """Return plain text with link labels (or URLs) inlined, no markup."""
+        if not text:
+            return ""
+
+        def _replace_md(match: re.Match[str]) -> str:
+            label = (match.group("label") or "").strip()
+            url = (match.group("url") or "").strip()
+            return label or url
+
+        def _replace_wiki(match: re.Match[str]) -> str:
+            link = (match.group("link") or "").strip()
+            label = (match.group("label") or "").strip()
+            return label or link
+
+        rendered = re.sub(
+            r"\[(?P<label>[^\]]+)\]\((?P<url>https?://[^\s)]+)\)",
+            _replace_md,
+            text,
+        )
+        rendered = re.sub(
+            r"\[(?P<link>[^\]|]+)\|(?P<label>[^\]]+)\]",
+            _replace_wiki,
+            rendered,
+        )
+        return rendered
 
     def _setup_focus_defaults(self) -> None:
         """Ensure sensible default focus inside the Tasks tab."""
@@ -543,29 +571,41 @@ class TaskPanel(QWidget):
     def _refresh_tags(self) -> None:
         self.tag_list.blockSignals(True)
         self.tag_list.clear()
+        include_done = self.show_completed.isChecked()
+
+        def _count_tags(tasks: list[dict]) -> list[tuple[str, int]]:
+            counts: dict[str, int] = {}
+            for task in tasks:
+                if not include_done and task.get("status") == "done":
+                    continue
+                tag_set = set(task.get("tags", []))
+                text = task.get("text", "") or ""
+                for token in re.findall(r"@[A-Za-z0-9_]+", text):
+                    tag_set.add(token)
+                for tag in tag_set:
+                    counts[tag] = counts.get(tag, 0) + 1
+            return sorted(counts.items())
+
         if self._tag_source_tasks:
-            counts: dict[str, int] = {}
-            source_tasks = self._tag_source_tasks
-            for task in source_tasks:
-                tag_set = set(task.get("tags", []))
-                text = task.get("text", "") or ""
-                for token in re.findall(r"@[A-Za-z0-9_]+", text):
-                    tag_set.add(token)
-                for tag in tag_set:
-                    counts[tag] = counts.get(tag, 0) + 1
-            tag_items = sorted(counts.items())
+            tag_items = _count_tags(self._tag_source_tasks)
         elif self._nav_filter_prefix and self._nav_filter_enabled:
-            counts: dict[str, int] = {}
-            for task in self._visible_tasks:
-                tag_set = set(task.get("tags", []))
-                text = task.get("text", "") or ""
-                for token in re.findall(r"@[A-Za-z0-9_]+", text):
-                    tag_set.add(token)
-                for tag in tag_set:
-                    counts[tag] = counts.get(tag, 0) + 1
-            tag_items = sorted(counts.items())
+            tag_items = _count_tags(self._visible_tasks)
         else:
-            tag_items = config.fetch_task_tags()
+            try:
+                all_tasks = config.fetch_tasks(
+                    "",
+                    [],
+                    include_done=include_done,
+                    include_ancestors=True,
+                    actionable_only=False,
+                )
+                tag_items = _count_tags(list(all_tasks))
+            except Exception:
+                tag_items = [
+                    (tag, count)
+                    for tag, count in config.fetch_task_tags()
+                    if include_done or count > 0
+                ]
         self._available_tags = {tag for tag, _ in tag_items}
         # Drop active tags that are no longer available in the current view
         if self.active_tags:
@@ -653,8 +693,11 @@ class TaskPanel(QWidget):
             priority = "!" * priority_level
             due = task.get("due", "") or ""
             text = task["text"]
+            display_text = self._format_task_text(text)
             display_path = self._present_path(task["path"])
-            item = QTreeWidgetItem([priority, text, due, display_path])
+            item = QTreeWidgetItem([priority, "", due, display_path])
+            item.setText(1, display_text)
+            item.setToolTip(1, text)
             item.setData(0, Qt.UserRole, task)
             item.setToolTip(1, text)
             due_fg_bg = self._due_colors(task)

@@ -1137,6 +1137,16 @@ class AIChatPanel(QtWidgets.QWidget):
         self._cancel_pending_send = False
         self._cancel_pending_condense = False
         self._suppress_navigation = False
+        # Stream coalescing to keep UI responsive
+        self._pending_stream_chunks: dict[int, list[str]] = {}
+        self._stream_flush_timer = QtCore.QTimer(self)
+        self._stream_flush_timer.setInterval(40)
+        self._stream_flush_timer.setSingleShot(True)
+        self._stream_flush_timer.timeout.connect(self._flush_pending_stream_chunks)
+        self._condense_flush_timer = QtCore.QTimer(self)
+        self._condense_flush_timer.setInterval(40)
+        self._condense_flush_timer.setSingleShot(True)
+        self._condense_flush_timer.timeout.connect(self._flush_condense_buffer)
         self._build_ui()
         self._load_system_prompts()
         self._refresh_server_dropdown()
@@ -2594,11 +2604,9 @@ class AIChatPanel(QtWidgets.QWidget):
     def _handle_chunk(self, idx: int, chunk: str) -> None:
         if self._cancel_pending_send:
             return
-        if 0 <= idx < len(self.messages):
-            role, existing = self.messages[idx]
-            if role == "assistant":
-                self.messages[idx] = (role, existing + chunk)
-                self._render_messages()
+        self._pending_stream_chunks.setdefault(idx, []).append(chunk)
+        if not self._stream_flush_timer.isActive():
+            self._stream_flush_timer.start()
 
     def _handle_finished(self, idx: int, full: str) -> None:
         if self._cancel_pending_send:
@@ -2631,7 +2639,8 @@ class AIChatPanel(QtWidgets.QWidget):
         if self._cancel_pending_condense:
             return
         self._condense_buffer += chunk
-        self._render_messages()
+        if not self._condense_flush_timer.isActive():
+            self._condense_flush_timer.start()
 
     def _handle_condense_finished(self, full: str) -> None:
         if self._cancel_pending_condense:
@@ -2660,6 +2669,30 @@ class AIChatPanel(QtWidgets.QWidget):
         else:
             self._set_status(f"Condense failed: {err}")
         self._update_stop_button()
+
+    def _flush_pending_stream_chunks(self) -> None:
+        if self._cancel_pending_send:
+            self._pending_stream_chunks.clear()
+            return
+        updated = False
+        for idx, chunks in list(self._pending_stream_chunks.items()):
+            if not chunks:
+                continue
+            if 0 <= idx < len(self.messages):
+                role, existing = self.messages[idx]
+                if role == "assistant":
+                    self.messages[idx] = (role, existing + "".join(chunks))
+                    updated = True
+            self._pending_stream_chunks[idx] = []
+        if updated:
+            self._render_messages()
+
+    def _flush_condense_buffer(self) -> None:
+        if self._cancel_pending_condense:
+            self._condense_buffer = ""
+            return
+        if self._condense_buffer:
+            self._render_messages()
 
     def _handle_error(self, err: str) -> None:
         if self.messages and self.messages[-1][0] == "assistant" and not self.messages[-1][1]:
