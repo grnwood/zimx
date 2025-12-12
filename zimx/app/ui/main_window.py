@@ -2838,6 +2838,9 @@ class MainWindow(QMainWindow):
         
         # Get selected text if any
         editor_cursor = self.editor.textCursor()
+        # Remember caret/selection so the modal dialog can't reset it
+        saved_cursor_pos = editor_cursor.position()
+        saved_anchor_pos = editor_cursor.anchor()
         selection_range: tuple[int, int] | None = None
         selected_text = ""
         if editor_cursor.hasSelection():
@@ -2846,6 +2849,20 @@ class MainWindow(QMainWindow):
             # Clean up selected text - remove line breaks and paragraph separators
             # Qt returns paragraph separators as U+2029 which cause line breaks in links
             selected_text = selected_text.replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ').strip()
+
+        def _restore_cursor() -> QTextCursor:
+            """Restore the cursor/selection captured before opening the dialog."""
+            doc_len = len(self.editor.toPlainText())
+            anchor = max(0, min(saved_anchor_pos, doc_len))
+            pos = max(0, min(saved_cursor_pos, doc_len))
+            cursor = QTextCursor(self.editor.document())
+            cursor.setPosition(anchor)
+            cursor.setPosition(
+                pos,
+                QTextCursor.KeepAnchor if anchor != pos else QTextCursor.MoveAnchor,
+            )
+            self.editor.setTextCursor(cursor)
+            return cursor
         
         filter_prefix = self._nav_filter_path
         filter_label = path_to_colon(filter_prefix) if filter_prefix else None
@@ -2861,22 +2878,27 @@ class MainWindow(QMainWindow):
             result = dlg.exec()
         finally:
             self.editor.end_dialog_block()
+            # Restore cursor/selection to the pre-dialog location
+            restore_cursor = _restore_cursor()
             # Always restore focus to the editor after dialog closes
             QTimer.singleShot(0, self.editor.setFocus)
 
         inserted = False
         if result == QDialog.Accepted:
+            # Ensure we're still at the pre-dialog caret before mutating text
+            restore_cursor = _restore_cursor()
             colon_path = dlg.selected_colon_path()
             link_name = dlg.selected_link_name()
             if colon_path:
                 # If there was selected text, replace it with the link
                 if selection_range:
-                    cursor = self.editor.textCursor()
-                    start, end = selection_range
-                    cursor.setPosition(start)
-                    cursor.setPosition(end, QTextCursor.KeepAnchor)
-                    cursor.removeSelectedText()
-                    self.editor.setTextCursor(cursor)
+                    doc_len = len(self.editor.toPlainText())
+                    start = max(0, min(selection_range[0], doc_len))
+                    end = max(0, min(selection_range[1], doc_len))
+                    restore_cursor.setPosition(start)
+                    restore_cursor.setPosition(end, QTextCursor.KeepAnchor)
+                    restore_cursor.removeSelectedText()
+                    self.editor.setTextCursor(restore_cursor)
                 label = link_name or selected_text or colon_path
                 self.editor.insert_link(colon_path, label)
                 inserted = True
@@ -2887,16 +2909,29 @@ class MainWindow(QMainWindow):
         if not self.vault_root:
             self._alert("Select a vault before inserting dates.")
             return
+        cursor = self.editor.textCursor()
+        saved_cursor_pos = cursor.position()
+        saved_anchor_pos = cursor.anchor()
         cursor_rect = self.editor.cursorRect()
         anchor = self.editor.viewport().mapToGlobal(cursor_rect.bottomRight() + QPoint(0, 4))
         dlg = DateInsertDialog(self, anchor_pos=anchor)
         result = dlg.exec()
+        # Restore cursor/selection to where the user triggered the dialog
+        doc_len = len(self.editor.toPlainText())
+        anchor_pos = max(0, min(saved_anchor_pos, doc_len))
+        cursor_pos = max(0, min(saved_cursor_pos, doc_len))
+        restore_cursor = QTextCursor(self.editor.document())
+        restore_cursor.setPosition(anchor_pos)
+        restore_cursor.setPosition(
+            cursor_pos,
+            QTextCursor.KeepAnchor if anchor_pos != cursor_pos else QTextCursor.MoveAnchor,
+        )
+        self.editor.setTextCursor(restore_cursor)
         if result == QDialog.Accepted:
             text = dlg.selected_date_text()
             if text:
-                cursor = self.editor.textCursor()
-                cursor.insertText(text)
-                self.editor.setTextCursor(cursor)
+                restore_cursor.insertText(text)
+                self.editor.setTextCursor(restore_cursor)
                 self.statusBar().showMessage(f"Inserted date: {text}", 3000)
         
 
