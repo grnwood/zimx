@@ -161,9 +161,9 @@ def select_vault(payload: VaultSelectPayload) -> dict:
 
 
 @app.get("/api/vault/tree")
-def vault_tree() -> dict:
+def vault_tree(path: str = "/", recursive: bool = True) -> dict:
     root = vault_state.get_root()
-    tree = files.list_dir(root)
+    tree = files.list_dir(root, subpath=path, recursive=recursive)
     order_map = config.fetch_display_order_map()
     _sort_tree_nodes(tree, order_map)
     return {"root": str(root), "tree": tree}

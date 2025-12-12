@@ -72,8 +72,21 @@ def write_file(root: Path, path: str, content: str) -> None:
     target.write_text(content, encoding="utf-8")
 
 
-def list_dir(root: Path) -> List[Dict]:
+def list_dir(root: Path, subpath: str = "/", recursive: bool = True) -> List[Dict]:
+    """List directories under the given subpath.
+
+    Args:
+        root: vault root
+        subpath: vault-relative folder ("/" for root)
+        recursive: when False, only include direct children and mark has_children
+    """
     _ensure_page_scaffold(root)
+    try:
+        target = _resolve(root, subpath) if subpath and subpath != "/" else root
+    except FileNotFoundError:
+        return []
+    if not target.exists() or not target.is_dir():
+        return []
 
     def build(directory: Path) -> Dict:
         page_name = directory.name if directory != root else root.name
@@ -84,19 +97,40 @@ def list_dir(root: Path) -> List[Dict]:
                 continue
             if child.name.startswith("."):
                 continue
-            children.append(build(child))
+            if recursive:
+                children.append(build(child))
+            else:
+                grand_dirs = [
+                    d
+                    for d in child.iterdir()
+                    if d.is_dir() and not d.name.startswith(".")
+                ]
+                page_file = _page_file_for(child)
+                rel_file = page_file.relative_to(root).as_posix()
+                children.append(
+                    {
+                        "name": child.name,
+                        "path": f"/{child.relative_to(root).as_posix()}",
+                        "is_dir": bool(grand_dirs),
+                        "has_children": bool(grand_dirs),
+                        "open_path": f"/{rel_file}",
+                        "children": [],
+                    }
+                )
         page_file = _page_file_for(directory)
         rel_file = page_file.relative_to(root).as_posix()
+        has_children = bool(children)
         node = {
             "name": page_name,
             "path": f"/{rel_dir}" if rel_dir else "/",
-            "is_dir": bool(children),
+            "is_dir": has_children,
+            "has_children": has_children,
             "open_path": f"/{rel_file}",
             "children": children,
         }
         return node
 
-    return [build(root)]
+    return [build(target)]
 
 
 def ensure_journal_today(root: Path, template: str | None = None) -> tuple[Path, bool]:

@@ -2760,13 +2760,8 @@ class MarkdownEditor(QTextEdit):
             copy_action.triggered.connect(
                 lambda: self._copy_link_to_location(link_text=None, anchor_text=heading_text)
             )
-            backlinks_action = menu.addAction("Backlinks / Navigator")
-            backlinks_action.triggered.connect(
-                lambda: self.backlinksRequested.emit(self._current_path or "")
-            )
             insert_date_action = menu.addAction("Insert Date…")
             insert_date_action.triggered.connect(self.insertDateRequested)
-            
             # Add Edit Page Source action (delegates to main window)
             edit_src_action = menu.addAction("Edit Page Source")
             edit_src_action.triggered.connect(lambda: self.editPageSourceRequested.emit(self._current_path))
@@ -2779,8 +2774,18 @@ class MarkdownEditor(QTextEdit):
             if self._open_in_window_callback:
                 open_popup_action = menu.addAction("Open in New Editor")
                 open_popup_action.triggered.connect(lambda: self._open_in_window_callback(self._current_path or ""))
+            # Navigation actions
+            menu.addSeparator()
+            backlinks_action = menu.addAction("Locate Backlinks/Link Navigator")
+            backlinks_action.triggered.connect(
+                lambda: self.backlinksRequested.emit(self._current_path or "")
+            )
+            locate_tree_action = menu.addAction("Locate in Page Tree")
+            locate_tree_action.triggered.connect(
+                lambda: self.locateInNavigatorRequested.emit(self._current_path or "")
+            )
             if self._filter_nav_callback and self._current_path:
-                filter_action = menu.addAction("Filter navigator to this subtree")
+                filter_action = menu.addAction("Filter Page Tree From Here")
                 filter_action.triggered.connect(lambda: self._filter_nav_callback(self._current_path or ""))
             menu.exec(event.globalPos())
             return

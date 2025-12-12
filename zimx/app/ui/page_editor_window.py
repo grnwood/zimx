@@ -79,6 +79,10 @@ class PageEditorWindow(QMainWindow):
         zoom_out = QShortcut(QKeySequence.ZoomOut, self)
         zoom_in.activated.connect(lambda: self._adjust_font_size(1))
         zoom_out.activated.connect(lambda: self._adjust_font_size(-1))
+        plus_shortcut = QShortcut(QKeySequence("+"), self)
+        minus_shortcut = QShortcut(QKeySequence("-"), self)
+        plus_shortcut.activated.connect(lambda: self._adjust_font_size(1))
+        minus_shortcut.activated.connect(lambda: self._adjust_font_size(-1))
 
     def set_read_only(self, read_only: bool) -> None:
         """Toggle read-only state and refresh window badges/title."""
@@ -133,6 +137,15 @@ class PageEditorWindow(QMainWindow):
         save_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
         save_action.triggered.connect(lambda: self._save_current_file(auto=False))
         toolbar.addAction(save_action)
+        toolbar.addSeparator()
+        font_up = QAction("A+", self)
+        font_up.setToolTip("Increase font size")
+        font_up.triggered.connect(lambda: self._adjust_font_size(1))
+        font_down = QAction("A-", self)
+        font_down.setToolTip("Decrease font size")
+        font_down.triggered.connect(lambda: self._adjust_font_size(-1))
+        toolbar.addAction(font_down)
+        toolbar.addAction(font_up)
 
         self.addToolBar(Qt.TopToolBarArea, toolbar)
 

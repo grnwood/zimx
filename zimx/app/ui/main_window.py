@@ -572,6 +572,7 @@ class MainWindow(QMainWindow):
         self._history_cursor_positions: dict[str, int] = {}
         self._tree_refresh_in_progress: bool = False
         self._pending_tree_refresh: bool = False
+        self._tree_cache: dict[str, list[dict]] = {}
         self._pending_link_path_maps: list[dict[str, str]] = []
         self.link_update_mode: str = config.load_link_update_mode()
         self._pending_reindex_trigger: bool = False
@@ -616,6 +617,7 @@ class MainWindow(QMainWindow):
         self.tree_view.escapePressed.connect(self._clear_nav_filter)
         self.tree_view.rowClicked.connect(self._on_tree_row_clicked)
         self.tree_view.moveRequested.connect(self._on_tree_move_requested)
+        self.tree_view.expanded.connect(self._on_tree_expanded)
         self.dir_icon = self.style().standardIcon(QStyle.SP_DirIcon)
         self.file_icon = self.style().standardIcon(QStyle.SP_FileIcon)
         self._tree_arrow_focus_pending = False
@@ -1986,7 +1988,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._populate_vault_tree()
-        self.tree_view.expandAll()
+        try:
+            self.tree_view.expandToDepth(1)
+        except Exception:
+            pass
         self._apply_nav_filter_style()
 
     def _clear_nav_filter(self) -> None:
@@ -2177,14 +2182,17 @@ class MainWindow(QMainWindow):
             self._pending_tree_refresh = True
             return
         self._tree_refresh_in_progress = True
+        fetch_path = self._nav_filter_path or "/"
+        recursive = "true" if (self._nav_filter_path and self._nav_filter_path != "/") else "false"
         try:
-            resp = self.http.get("/api/vault/tree")
+            resp = self.http.get("/api/vault/tree", params={"path": fetch_path, "recursive": recursive})
             resp.raise_for_status()
         except httpx.HTTPError as exc:
             self._alert_api_error(exc, "Failed to load vault tree")
             self._tree_refresh_in_progress = False
             return
         data = resp.json().get("tree", [])
+        self._tree_cache.clear()
 
         try:
             # Clear existing items and rebuild
@@ -2225,6 +2233,7 @@ class MainWindow(QMainWindow):
             for node in filtered_data:
                 # Hide the root vault node (path == "/") and render only its children under synthetic root
                 if node.get("path") == "/":
+                    self._cache_children(node)
                     for child in node.get("children", []):
                         # Filter out Journal folder if checkbox is unchecked
                         if not show_journal and child.get("name") == "Journal":
@@ -2232,6 +2241,7 @@ class MainWindow(QMainWindow):
                         parent_item = synthetic_root_item or self.tree_model.invisibleRootItem()
                         self._add_tree_node(parent_item, child, seen_paths)
                 else:
+                    self._cache_children(node)
                     parent_item = synthetic_root_item or self.tree_model.invisibleRootItem()
                     self._add_tree_node(parent_item, node, seen_paths)
         finally:
@@ -2239,7 +2249,11 @@ class MainWindow(QMainWindow):
             if self._pending_tree_refresh:
                 self._pending_tree_refresh = False
                 QTimer.singleShot(0, self._populate_vault_tree)
-        self.tree_view.expandAll()
+        self.tree_view.collapseAll()
+        try:
+            self.tree_view.expandToDepth(1)
+        except Exception:
+            pass
         if self._pending_selection:
             self._select_tree_path(self._pending_selection)
             self._pending_selection = None
@@ -2247,36 +2261,23 @@ class MainWindow(QMainWindow):
         self.right_panel.refresh_calendar()
         self._apply_nav_filter_style()
 
-    def _add_tree_node(self, parent: QStandardItem, node: dict, seen: Optional[set[str]] = None) -> None:
-        item = QStandardItem(node["name"])
+    def _add_tree_node(self, parent: QStandardItem, node: dict, seen: Optional[set[str]] = None) -> QStandardItem:
+        item = QStandardItem(node.get("name") or "")
         folder_path = node.get("path")
         open_path = node.get("open_path")
-        has_children = bool(node.get("children"))
+        children = node.get("children") or []
+        has_children = node.get("has_children")
+        if has_children is None:
+            has_children = bool(children)
         key = open_path or folder_path
         if seen is not None and key:
             if key in seen:
-                return
+                return item
             seen.add(key)
         item.setData(folder_path, PATH_ROLE)
-        item.setData(has_children, TYPE_ROLE)
+        item.setData(bool(has_children), TYPE_ROLE)
         item.setData(open_path, OPEN_ROLE)
         icon = self.dir_icon if has_children or folder_path == "/" else self.file_icon
-        has_ai_chat = False
-        store = self._ai_chat_store
-        if store:
-            try:
-                if open_path and store.has_chat_for_path(open_path):
-                    has_ai_chat = True
-                elif folder_path:
-                    norm_folder = folder_path or "/"
-                    if store.has_chat_for_path(norm_folder):
-                        has_ai_chat = True
-                    elif store.has_chats_under(norm_folder):
-                        has_ai_chat = True
-            except Exception:
-                has_ai_chat = False
-        if has_ai_chat:
-            icon = self._badge_icon(icon)
         item.setIcon(icon)
         item.setEditable(False)
         item.setFlags(item.flags() | Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled)
@@ -2288,8 +2289,15 @@ class MainWindow(QMainWindow):
             item.setFont(font)
         
         parent.appendRow(item)
-        for child in node.get("children", []):
-            self._add_tree_node(item, child, seen)
+        if children:
+            for child in children:
+                self._add_tree_node(item, child, seen)
+        elif has_children:
+            # placeholder to show the expand arrow; real children loaded on demand
+            placeholder = QStandardItem("loading…")
+            placeholder.setEnabled(False)
+            item.appendRow(placeholder)
+        return item
 
     def _filter_tree_data(self, nodes: list[dict], prefix: str) -> list[dict]:
         """Return a pruned copy of the vault tree limited to prefix and its descendants."""
@@ -2309,6 +2317,105 @@ class MainWindow(QMainWindow):
             elif filtered_children:
                 result.extend(filtered_children)
         return result
+
+    def _cache_children(self, node: dict) -> None:
+        path = self._normalize_tree_path(node.get("path"))
+        children = node.get("children") or []
+        has_children = bool(node.get("has_children")) or bool(children)
+        # Only cache populated children; if we know it has children but none are loaded yet, skip cache entry
+        if path and children:
+            self._tree_cache[path] = list(children)
+        for child in children:
+            self._cache_children(child)
+
+    @staticmethod
+    def _normalize_tree_path(path: Optional[str]) -> str:
+        if not path or path == "/":
+            return "/"
+        return path.rstrip("/") or "/"
+
+    def _on_tree_expanded(self, index: QModelIndex) -> None:
+        """Lazy-load children when a node is expanded."""
+        item = self.tree_model.itemFromIndex(index)
+        if not item:
+            return
+        path = self._normalize_tree_path(item.data(PATH_ROLE))
+        if not path:
+            return
+        # If already populated and not just a placeholder, skip
+        if path in self._tree_cache and item.rowCount() > 0 and not (
+            item.rowCount() == 1 and not item.child(0).isEnabled()
+        ):
+            return
+        self._load_children_for_path(item, path)
+
+    def _load_children_for_path(self, item: QStandardItem, path: str) -> None:
+        """Fetch children for a path (cached, then API) and populate the node."""
+        norm_path = self._normalize_tree_path(path)
+        children = self._tree_cache.get(norm_path)
+        has_children_flag = bool(item.data(TYPE_ROLE))
+        if children is None or (not children and has_children_flag):
+            try:
+                resp = self.http.get("/api/vault/tree", params={"path": norm_path, "recursive": "false"})
+                resp.raise_for_status()
+                tree = resp.json().get("tree") or []
+                if tree:
+                    children = tree[0].get("children") or []
+                    if children:
+                        self._tree_cache[norm_path] = list(children)
+            except httpx.HTTPError:
+                return
+        if children is None:
+            return
+        # Clear placeholders
+        item.removeRows(0, item.rowCount())
+        seen: set[str] = set()
+        for child in children:
+            self._add_tree_node(item, child, seen)
+
+    def _ensure_tree_path_loaded(self, target_path: str) -> None:
+        """Ensure the tree has loaded nodes along the target path."""
+        if not target_path:
+            return
+        folder_path = self._file_path_to_folder(target_path) or "/"
+        parts = [p for p in folder_path.strip("/").split("/") if p]
+        current_path = "/"
+        # Prefer the active filter root or synthetic root if present
+        root_lookup = self._nav_filter_path or "/"
+        root_item = (
+            self._find_item(self.tree_model.invisibleRootItem(), root_lookup)
+            or self._find_item(self.tree_model.invisibleRootItem(), "/")
+            or self.tree_model.invisibleRootItem()
+        )
+        if self._nav_filter_path and self._nav_filter_path != "/":
+            current_path = self._nav_filter_path
+            prefix_parts = [p for p in current_path.strip("/").split("/") if p]
+            # Skip already-included parts in traversal
+            parts = parts[len(prefix_parts):]
+        parent_item = root_item
+        # Load root children
+        self._load_children_for_path(parent_item, current_path)
+        try:
+            self.tree_view.expand(parent_item.index())
+        except Exception:
+            pass
+        for part in parts:
+            next_path = f"{current_path.rstrip('/')}/{part}" if current_path != "/" else f"/{part}"
+            self._load_children_for_path(parent_item, current_path)
+            child = self._find_item(parent_item, next_path)
+            if not child:
+                # Attempt global search as fallback
+                child = self._find_item(self.tree_model.invisibleRootItem(), next_path)
+            if not child:
+                break
+            parent_item = child
+            current_path = next_path
+            try:
+                self.tree_view.expand(parent_item.index())
+            except Exception:
+                pass
+        # Finally load the folder containing the file so the file entry is present
+        self._load_children_for_path(parent_item, current_path)
 
     def _on_selection_changed(self, current: QModelIndex, previous: QModelIndex) -> None:
         self._debug(f"[UI] tree change: {self._describe_index(current)}")
@@ -4174,6 +4281,11 @@ class MainWindow(QMainWindow):
                 open_loc = menu.addAction("Open File Location")
                 open_loc.triggered.connect(lambda checked=False, fp=file_path: self._open_tree_file_location(fp))
                 
+                copy_link_action = menu.addAction("Copy Link to this Location")
+                copy_link_action.triggered.connect(
+                    lambda checked=False, p=path, op=open_path: self._copy_tree_location_link(p, op)
+                )
+                
                 backlinks_action = menu.addAction("Backlinks…")
                 backlinks_action.triggered.connect(
                     lambda checked=False, fp=file_path: self._show_link_navigator_for_path(fp)
@@ -4219,6 +4331,29 @@ class MainWindow(QMainWindow):
         opened = self._open_in_file_manager(folder_path)
         if not opened:
             self._alert(f"Could not open folder: {folder_path}")
+
+    def _copy_tree_location_link(self, path: str, open_path: Optional[str]) -> None:
+        """Copy a colon-style link for the selected tree item."""
+        target = open_path or self._folder_to_file_path(path) or path
+        colon = ""
+        try:
+            colon = path_to_colon(target)
+        except Exception:
+            colon = ""
+        if not colon and path:
+            try:
+                colon = ensure_root_colon_link(path_to_colon(f"{path.rstrip('/')}/{Path(path).name}{PAGE_SUFFIX}"))
+            except Exception:
+                colon = ensure_root_colon_link(path.replace("/", ":"))
+        colon = ensure_root_colon_link(colon)
+        if not colon:
+            self.statusBar().showMessage("Could not copy link for this item", 3000)
+            return
+        try:
+            QApplication.clipboard().setText(colon)
+            self.statusBar().showMessage(f"Copied link: {colon}", 3000)
+        except Exception:
+            self.statusBar().showMessage("Failed to copy link", 3000)
 
     def _show_link_navigator_for_path(self, file_path: Optional[str]) -> None:
         """Open the Link Navigator tab for the given page."""
@@ -5154,6 +5289,7 @@ class MainWindow(QMainWindow):
         if not self.current_path:
             self.statusBar().showMessage("No page to locate", 3000)
             return
+        self._ensure_tree_path_loaded(self.current_path)
         self._select_tree_path(self.current_path)
         self._apply_navigation_focus("navigator")
 
