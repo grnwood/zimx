@@ -133,10 +133,17 @@ def _rewrite_links(text: str, page_rel: str, page_map: Dict[str, str]) -> str:
 
 def _resolve_page_target(target: str, page_rel: str, page_map: Dict[str, str]) -> str | None:
     # Normalize and try relative to current page
-    base = PurePosixPath(page_rel).parent
+    base_page = PurePosixPath(page_rel)
     target_clean = target.strip()
     target_clean = target_clean[:-4] if target_clean.endswith(PAGE_SUFFIX) else target_clean
-    candidate = base.joinpath(target_clean).as_posix().strip("/")
+    plus_child = target_clean.startswith("+")
+    if plus_child:
+        target_clean = target_clean.lstrip("+")
+        candidate_base = base_page  # +Child refers to a subpage of the current page
+    else:
+        candidate_base = base_page.parent
+
+    candidate = candidate_base.joinpath(target_clean).as_posix().strip("/")
     keys = [
         candidate,
         candidate.lower(),
@@ -159,7 +166,34 @@ def convert_content(raw: str, page_rel: str, page_map: Dict[str, str]) -> str:
         converted_lines.append(line)
     converted = "\n".join(converted_lines)
     converted = _rewrite_links(converted, page_rel, page_map)
+    converted = _convert_plus_links(converted, page_rel, page_map)
     return converted.strip() + "\n"
+
+
+def _convert_plus_links(text: str, page_rel: str, page_map: Dict[str, str]) -> str:
+    """Convert +CamelCase links to root-colon links relative to the current page."""
+    allowed_prefixes = {"(", "[", "{", "<", "'", '"'}
+    base_page = PurePosixPath(page_rel)
+
+    def replacer(match: re.Match[str]) -> str:
+        start = match.start()
+        if start > 0:
+            prev = text[start - 1]
+            if not prev.isspace() and prev not in allowed_prefixes:
+                return match.group(0)
+        link = match.group("link")
+        if not link:
+            return match.group(0)
+        target_rel = base_page.joinpath(link).as_posix().strip("/")
+        for key in (target_rel, target_rel.lower()):
+            if key in page_map:
+                colon = _ensure_root_colon(page_map[key])
+                return f"[{colon}|{link}]"
+        target_path = f"/{target_rel}/{link}{PAGE_SUFFIX}"
+        colon = _ensure_root_colon(_path_to_colon(target_path))
+        return f"[{colon}|{link}]"
+
+    return re.sub(r"\+(?P<link>[A-Z][\w]*)", replacer, text)
 
 
 def _attachments_for_page(source_root: Path, rel_stem: str) -> List[Path]:

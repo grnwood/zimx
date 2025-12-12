@@ -25,6 +25,7 @@ ZIM_HEADER = [
 class PageSpec:
     name: str  # e.g., "Home" or "Projects/Alpha"
     attachments: int = 2
+    plus_children: list[str] | None = None
 
 
 def zim_heading(level: int, text: str) -> str:
@@ -49,7 +50,12 @@ def sample_paragraphs(count: int) -> List[str]:
     return paras
 
 
-def build_page_content(title: str, page_links: Iterable[str], attachment_links: Iterable[str]) -> str:
+def build_page_content(
+    title: str,
+    page_links: Iterable[str],
+    attachment_links: Iterable[str],
+    plus_links: Iterable[str],
+) -> str:
     today = date.today()
     lines: List[str] = []
     lines.extend(
@@ -82,6 +88,8 @@ def build_page_content(title: str, page_links: Iterable[str], attachment_links: 
         lines.append(f"See also [[{link}|related page]].")
     for att in attachment_links:
         lines.append(f"Attached file: [[./{att}|{att.split('/')[-1]}]]")
+    for child in plus_links:
+        lines.append(f"Child page link: +{child}")
     lines.append("")
 
     lines.append(zim_heading(4, "Formatting"))
@@ -114,7 +122,8 @@ def write_page(root: Path, spec: PageSpec, links: Iterable[str]) -> None:
         rel_path = full_path.relative_to(page_dir).as_posix()
         attachment_links.append(rel_path)
 
-    content = build_page_content(stem, links, attachment_links)
+    plus_links = spec.plus_children or []
+    content = build_page_content(stem, links, attachment_links, plus_links)
     header = [line.format(created=FAKER.date_time().isoformat()) for line in ZIM_HEADER]
     payload = "\n".join(header) + content
     page_file.write_text(payload, encoding="utf-8")
@@ -142,11 +151,13 @@ def main() -> None:
     FAKER.seed_instance(1234)
 
     specs = [
-        PageSpec("Home", attachments=2),
-        PageSpec("Wiki", attachments=3),
+        PageSpec("Home", attachments=2, plus_children=["Journal"]),
+        PageSpec("Home/Journal", attachments=1),
+        PageSpec("Wiki", attachments=3, plus_children=["Tasks"]),
         PageSpec("Wiki/Tasks", attachments=2),
-        PageSpec("Projects", attachments=2),
+        PageSpec("Projects", attachments=2, plus_children=["Alpha", "Beta"]),
         PageSpec("Projects/Alpha", attachments=3),
+        PageSpec("Projects/Beta", attachments=2),
     ]
 
     link_targets = [spec.name for spec in specs]
