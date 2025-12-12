@@ -46,6 +46,22 @@ def _apply_rename_path(path: str, rename_map: Optional[Mapping[str, str]]) -> st
     return prefix + "/".join(parts).lstrip("/")
 
 
+def _apply_rename_colon(colon_path: str, rename_map: Optional[Mapping[str, str]]) -> str:
+    """Apply renames to colon-separated links."""
+    if not rename_map or not colon_path:
+        return colon_path
+    anchor = ""
+    base = colon_path
+    if "#" in colon_path:
+        base, anchor = colon_path.split("#", 1)
+    clean = base.lstrip(":")
+    parts = [rename_map.get(p, p) for p in clean.split(":") if p]
+    renamed = ":".join(parts)
+    if anchor:
+        renamed = f"{renamed}#{anchor}"
+    return f":{renamed}" if renamed else colon_path
+
+
 def _ensure_root_colon(link: str) -> str:
     text = (link or "").strip()
     if not text or text.startswith(":") or text.startswith("#"):
@@ -123,7 +139,7 @@ def _rewrite_links(text: str, page_rel: str, page_map: Dict[str, str], rename_ma
             return match.group(0)
         if re.match(r"https?://", target, flags=re.IGNORECASE):
             display = label or target
-            return f"[{display}]({target})"
+            return f"[{target}|{display}]"
         # Attachment/file link (has extension)
         if re.search(r"\.[A-Za-z0-9]{1,8}$", target):
             display = label or target
@@ -148,6 +164,10 @@ def _resolve_page_target(
     base_page = PurePosixPath(page_rel)
     target_clean = target.strip()
     target_clean = target_clean[:-4] if target_clean.endswith(PAGE_SUFFIX) else target_clean
+    # Absolute colon link: apply rename and return
+    if ":" in target_clean:
+        renamed = _apply_rename_colon(target_clean, rename_map)
+        return renamed
     plus_child = target_clean.startswith("+")
     if plus_child:
         target_clean = target_clean.lstrip("+")
