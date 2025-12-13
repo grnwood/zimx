@@ -292,6 +292,87 @@ def load_pygments_style(default: str = "monokai") -> str:
         return style.strip()
     return default
 
+
+def _merge_mode_settings(payload: dict, defaults: dict) -> dict:
+    """Merge persisted mode settings with defaults, dropping unexpected keys."""
+    merged = defaults.copy()
+    if not isinstance(payload, dict):
+        return merged
+    for key, default_val in defaults.items():
+        val = payload.get(key, default_val)
+        if isinstance(default_val, bool):
+            merged[key] = bool(val)
+        else:
+            try:
+                merged[key] = type(default_val)(val)
+            except Exception:
+                merged[key] = default_val
+    return merged
+
+
+def load_focus_mode_settings() -> dict:
+    """Return focus mode preferences merged with defaults."""
+    defaults = {
+        "center_column": True,
+        "max_column_width_chars": 80,
+        "typewriter_scrolling": False,
+        "paragraph_focus": False,
+    }
+    payload = _read_global_config()
+    merged = _merge_mode_settings(payload.get("focus_mode", {}), defaults)
+    try:
+        merged["max_column_width_chars"] = max(40, min(999, int(merged.get("max_column_width_chars", defaults["max_column_width_chars"]))))
+    except Exception:
+        merged["max_column_width_chars"] = defaults["max_column_width_chars"]
+    return merged
+
+
+def save_focus_mode_settings(settings: dict) -> None:
+    """Persist focus mode preferences."""
+    defaults = load_focus_mode_settings()
+    merged = _merge_mode_settings(settings or {}, defaults)
+    _update_global_config({"focus_mode": merged})
+
+
+def load_audience_mode_settings() -> dict:
+    """Return audience mode preferences merged with defaults."""
+    defaults = {
+        "hide_side_panels": True,
+        "hide_toolbars": True,
+        "font_scale": 1.15,
+        "line_height_scale": 1.15,
+        "cursor_spotlight": True,
+        "paragraph_highlight": True,
+        "soft_autoscroll": True,
+        "show_floating_tools": True,
+        "center_column": True,
+        "max_column_width_chars": 120,
+    }
+    payload = _read_global_config()
+    settings = payload.get("audience_mode", {})
+    merged = _merge_mode_settings(settings if isinstance(settings, dict) else {}, defaults)
+    # Clamp reasonable ranges for numeric settings
+    try:
+        merged["font_scale"] = max(1.0, min(2.5, float(merged.get("font_scale", defaults["font_scale"]))))
+    except Exception:
+        merged["font_scale"] = defaults["font_scale"]
+    try:
+        merged["line_height_scale"] = max(1.0, min(2.5, float(merged.get("line_height_scale", defaults["line_height_scale"]))))
+    except Exception:
+        merged["line_height_scale"] = defaults["line_height_scale"]
+    try:
+        merged["max_column_width_chars"] = max(40, min(999, int(merged.get("max_column_width_chars", defaults["max_column_width_chars"]))))
+    except Exception:
+        merged["max_column_width_chars"] = defaults["max_column_width_chars"]
+    return merged
+
+
+def save_audience_mode_settings(settings: dict) -> None:
+    """Persist audience mode preferences."""
+    defaults = load_audience_mode_settings()
+    merged = _merge_mode_settings(settings or {}, defaults)
+    _update_global_config({"audience_mode": merged})
+
 def save_pygments_style(style: str) -> None:
     """Persist preferred Pygments style for code fences (global, not per-vault)."""
     _update_global_config({"pygments_style": style})
@@ -319,6 +400,39 @@ def load_default_ai_model() -> Optional[str]:
     payload = _read_global_config()
     model = payload.get("default_ai_model")
     return str(model) if model else None
+
+
+def load_enable_main_soft_scroll(default: bool = True) -> bool:
+    """Return whether main editor soft auto-scroll is enabled."""
+    payload = _read_global_config()
+    val = payload.get("enable_main_soft_scroll")
+    if val is None:
+        return default
+    return bool(val)
+
+
+def save_enable_main_soft_scroll(enabled: bool) -> None:
+    """Persist preference for main editor soft auto-scroll."""
+    _update_global_config({"enable_main_soft_scroll": bool(enabled)})
+
+
+def load_main_soft_scroll_lines(default: int = 5) -> int:
+    """Return how many lines to scroll when soft auto-scroll triggers."""
+    payload = _read_global_config()
+    try:
+        val = int(payload.get("main_soft_scroll_lines", default))
+        return max(1, min(50, val))
+    except Exception:
+        return default
+
+
+def save_main_soft_scroll_lines(lines: int) -> None:
+    """Persist soft auto-scroll threshold (lines from edge)."""
+    try:
+        val = max(1, min(50, int(lines)))
+    except Exception:
+        val = 5
+    _update_global_config({"main_soft_scroll_lines": val})
 
 
 def save_default_ai_model(model: Optional[str]) -> None:

@@ -37,6 +37,7 @@ from .state import vault_state
 from .vector import vector_manager
 from zimx.rag.index import RetrievedChunk
 from zimx.app import config
+from datetime import date as Date
 
 _ANSI_BLUE = "\033[94m"
 _ANSI_RESET = "\033[0m"
@@ -101,6 +102,11 @@ class RenameMovePayload(BaseModel):
 
 class UpdateLinksPayload(BaseModel):
     path_map: dict[str, str]
+
+
+class ModifiedRangePayload(BaseModel):
+    start_date: str
+    end_date: str
 
 
 class AttachmentDeletePayload(BaseModel):
@@ -189,6 +195,22 @@ def file_write(payload: FileWritePayload) -> dict:
     except FileAccessError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True}
+
+
+@app.post("/api/files/modified")
+def files_modified(payload: ModifiedRangePayload) -> dict:
+    try:
+        start = Date.fromisoformat(payload.start_date)
+        end = Date.fromisoformat(payload.end_date)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid date format: {exc}") from exc
+    print(f"{_ANSI_BLUE}[API] POST /api/files/modified {payload.start_date} -> {payload.end_date}{_ANSI_RESET}")
+    root = vault_state.get_root()
+    try:
+        items = files.list_files_modified_between(root, start, end)
+    except FileAccessError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"items": items}
 
 
 @app.post("/api/journal/today")

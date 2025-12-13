@@ -61,7 +61,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QCheckBox,
     QSizePolicy,
     QSplitter,
     QStyle,
@@ -85,6 +84,29 @@ from PySide6.QtWidgets import (
 from zimx.app import config, indexer
 from zimx.server.adapters.files import PAGE_SUFFIX
 from zimx.app import zim_import
+
+_ONE_SHOT_PROMPT_CACHE: Optional[str] = None
+
+
+def _load_one_shot_prompt() -> str:
+    """Load the one-shot system prompt once and cache it."""
+    global _ONE_SHOT_PROMPT_CACHE
+    if _ONE_SHOT_PROMPT_CACHE is not None:
+        return _ONE_SHOT_PROMPT_CACHE
+    default_prompt = "you are a helpful assistent, you will respond with markdown formatting"
+    try:
+        prompt_path = Path(__file__).parent.parent / "one-shot-prompt.txt"
+        if prompt_path.exists():
+            content = prompt_path.read_text(encoding="utf-8").strip()
+            if content:
+                _ONE_SHOT_PROMPT_CACHE = content
+                return content
+    except Exception:
+        pass
+    _ONE_SHOT_PROMPT_CACHE = default_prompt
+    return default_prompt
+
+_ONE_SHOT_PROMPT_CACHE: Optional[str] = None
 
 
 class PageRenameDialog(QDialog):
@@ -180,6 +202,8 @@ from .date_insert_dialog import DateInsertDialog
 from .open_vault_dialog import OpenVaultDialog
 from .page_editor_window import PageEditorWindow
 from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
+from .mode_window import ModeWindow
+from .find_replace_bar import FindReplaceBar
 
 
 PATH_ROLE = int(Qt.ItemDataRole.UserRole)
@@ -372,166 +396,6 @@ class VaultTreeView(QTreeView):
             pass
         drag = QDrag(self)
         drag.setMimeData(mime)
-        drag.exec(supportedActions, Qt.MoveAction)
-
-
-class FindReplaceBar(QWidget):
-    findNextRequested = Signal(str, bool, bool)  # query, backwards, case_sensitive
-    replaceRequested = Signal(str)  # replacement text
-    replaceAllRequested = Signal(str, str, bool)  # query, replacement, case_sensitive
-    closed = Signal()
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self.setVisible(False)
-        self.setStyleSheet(
-            "QWidget {"
-            "  background: palette(base);"
-            "  border-top: 1px solid #555;"
-            "}"
-            "QLineEdit {"
-            "  border: 1px solid #777;"
-            "  border-radius: 4px;"
-            "  padding: 4px 6px;"
-            "}"
-            "QLineEdit:focus {"
-            "  border: 1px solid #5aa1ff;"
-            "}"
-            "QPushButton {"
-            "  padding: 4px 8px;"
-            "}"
-        )
-        self._pending_backwards: Optional[bool] = None
-        self._last_backwards: bool = False
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 4, 6, 4)
-        layout.setSpacing(4)
-
-        row1 = QHBoxLayout()
-        row1.setContentsMargins(0, 0, 0, 0)
-        row1.addWidget(QLabel("Find:"))
-        self.query_edit = QLineEdit()
-        row1.addWidget(self.query_edit, 1)
-        layout.addLayout(row1)
-
-        self.replace_row = QHBoxLayout()
-        self.replace_row.setContentsMargins(0, 0, 0, 0)
-        replace_label = QLabel("Replace:")
-        replace_label.setMinimumWidth(70)
-        first_label = row1.itemAt(0).widget()
-        if first_label:
-            first_label.setMinimumWidth(70)
-        self.replace_row.addWidget(replace_label)
-        self.replace_edit = QLineEdit()
-        self.replace_row.addWidget(self.replace_edit, 1)
-        self.replace_btn = QPushButton("Replace")
-        self.replace_btn.clicked.connect(self._emit_replace)
-        self.replace_row.addWidget(self.replace_btn)
-        self.replace_all_btn = QPushButton("Replace All")
-        self.replace_all_btn.clicked.connect(self._emit_replace_all)
-        self.replace_row.addWidget(self.replace_all_btn)
-        layout.addLayout(self.replace_row)
-
-        # Buttons row (keeps tab order after inputs)
-        actions_row = QHBoxLayout()
-        actions_row.setContentsMargins(0, 0, 0, 0)
-        self.find_prev_btn = QPushButton("Find Prev")
-        self.find_prev_btn.clicked.connect(lambda: self._emit_find(backwards=True))
-        actions_row.addWidget(self.find_prev_btn)
-        self.find_next_btn = QPushButton("Find Next")
-        self.find_next_btn.clicked.connect(lambda: self._emit_find(backwards=False))
-        actions_row.addWidget(self.find_next_btn)
-        self.case_checkbox = QCheckBox("Case sensitive")
-        self.case_checkbox.setChecked(False)
-        actions_row.addWidget(self.case_checkbox)
-        self.close_btn = QPushButton("Close")
-        self.close_btn.clicked.connect(self.hide_bar)
-        actions_row.addWidget(self.close_btn)
-        actions_row.addStretch()
-        layout.addLayout(actions_row)
-
-        self.query_edit.installEventFilter(self)
-        self.replace_edit.installEventFilter(self)
-        self.setFocusPolicy(Qt.NoFocus)
-        self._set_replace_mode(False)
-
-    def _emit_find(self, backwards: Optional[bool] = None) -> None:
-        direction: bool
-        if backwards is not None:
-            direction = backwards
-        elif self._pending_backwards is not None:
-            direction = self._pending_backwards
-        else:
-            direction = self._last_backwards
-        self._pending_backwards = None
-        self._last_backwards = direction
-        self.findNextRequested.emit(self.query_edit.text(), direction, self.case_checkbox.isChecked())
-
-    def _emit_replace(self) -> None:
-        self.replaceRequested.emit(self.replace_edit.text())
-        self._emit_find()
-
-    def _emit_replace_all(self) -> None:
-        self.replaceAllRequested.emit(self.query_edit.text(), self.replace_edit.text(), self.case_checkbox.isChecked())
-
-    def show_bar(self, *, replace: bool, query: str, backwards: bool) -> None:
-        self._set_replace_mode(replace)
-        self._pending_backwards = backwards
-        self._last_backwards = backwards
-        if query:
-            self.query_edit.setText(query)
-            self.query_edit.selectAll()
-        self.setVisible(True)
-        self.query_edit.setFocus(Qt.ShortcutFocusReason)
-        self.raise_()
-
-    def hide_bar(self) -> None:
-        self.setVisible(False)
-        self.closed.emit()
-
-    def current_query(self) -> str:
-        return self.query_edit.text()
-
-    def current_replacement(self) -> str:
-        return self.replace_edit.text()
-
-    def focus_query(self) -> None:
-        self.query_edit.setFocus(Qt.ShortcutFocusReason)
-        self.query_edit.selectAll()
-
-    def _set_replace_mode(self, enabled: bool) -> None:
-        self.replace_btn.setVisible(enabled)
-        self.replace_all_btn.setVisible(enabled)
-        self.replace_edit.setVisible(enabled)
-        for i in range(self.replace_row.count()):
-            item = self.replace_row.itemAt(i)
-            widget = item.widget()
-            if widget:
-                widget.setVisible(enabled)
-        self.replace_row.setEnabled(enabled)
-
-    def eventFilter(self, obj: QObject, event: QEvent):  # type: ignore[override]
-        if event.type() == QEvent.KeyPress:
-            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-                if obj == self.query_edit:
-                    backwards = bool(event.modifiers() & Qt.ShiftModifier)
-                    self._emit_find(backwards=backwards)
-                    return True
-                if obj == self.replace_edit:
-                    self._emit_replace()
-                    return True
-            if event.key() == Qt.Key_Escape:
-                self.hide_bar()
-                return True
-        return super().eventFilter(obj, event)
-
-    def keyPressEvent(self, event):  # type: ignore[override]
-        if event.key() == Qt.Key_Escape:
-            self.hide_bar()
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
 class MainWindow(QMainWindow):
 
     def __init__(self, api_base: str) -> None:
@@ -578,6 +442,14 @@ class MainWindow(QMainWindow):
         self.link_update_mode: str = config.load_link_update_mode()
         self._pending_reindex_trigger: bool = False
         self.update_links_on_index: bool = True
+        try:
+            self._main_soft_scroll_enabled = config.load_enable_main_soft_scroll()
+        except Exception:
+            self._main_soft_scroll_enabled = True
+        try:
+            self._main_soft_scroll_lines = config.load_main_soft_scroll_lines(5)
+        except Exception:
+            self._main_soft_scroll_lines = 5
         
         # Page navigation history
         self.page_history: list[str] = []
@@ -729,14 +601,18 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            app_family = config.load_application_font()
             app_font_size = config.load_application_font_size() or QApplication.instance().font().pointSize()
         except Exception:
+            app_family = None
             app_font_size = 14
-        # Apply application font size immediately (respect user preference)
+        # Apply application font immediately (respect user preference)
         app = QApplication.instance()
         if app and app_font_size:
             try:
                 font = app.font()
+                if app_family:
+                    font.setFamily(app_family)
                 font.setPointSize(max(6, app_font_size))
                 app.setFont(font)
                 config.save_application_font_size(app_font_size)
@@ -810,6 +686,7 @@ class MainWindow(QMainWindow):
         self._ai_chat_store: Optional[AIChatStore] = None
         self._ai_badge_icon: Optional[QIcon] = None
         self._page_windows: list[PageEditorWindow] = []
+        self._mode_window: Optional[ModeWindow] = None
         self._apply_read_only_state()
 
         # Geometry save timer (debounce frequent resize/splitter move events)
@@ -1207,6 +1084,12 @@ class MainWindow(QMainWindow):
         open_vault_shortcut.activated.connect(lambda: self._select_vault(spawn_new_process=False))
         open_vault_new_win_shortcut = QShortcut(QKeySequence("Ctrl+Shift+O"), self)
         open_vault_new_win_shortcut.activated.connect(lambda: self._select_vault(spawn_new_process=True))
+        focus_mode_shortcut = QShortcut(QKeySequence("Ctrl+Alt+F"), self)
+        focus_mode_shortcut.setContext(Qt.ApplicationShortcut)
+        focus_mode_shortcut.activated.connect(lambda: self._toggle_mode_overlay("focus"))
+        audience_mode_shortcut = QShortcut(QKeySequence("Ctrl+Alt+A"), self)
+        audience_mode_shortcut.setContext(Qt.ApplicationShortcut)
+        audience_mode_shortcut.activated.connect(lambda: self._toggle_mode_overlay("audience"))
         focus_toggle = QShortcut(QKeySequence("Ctrl+Shift+Space"), self)
         focus_toggle.activated.connect(self._toggle_focus_between_tree_and_editor)
         redo_shortcut = QShortcut(QKeySequence("Ctrl+Y"), self)
@@ -1240,6 +1123,9 @@ class MainWindow(QMainWindow):
         reload_page = QShortcut(QKeySequence("Ctrl+R"), self)
         toggle_left = QShortcut(QKeySequence("Ctrl+Shift+B"), self)
         toggle_right = QShortcut(QKeySequence("Ctrl+Shift+N"), self)
+        prefs_shortcut = QShortcut(QKeySequence("Ctrl+."), self)
+        prefs_shortcut.setContext(Qt.ApplicationShortcut)
+        prefs_shortcut.activated.connect(self._open_preferences)
         nav_back.activated.connect(self._navigate_history_back)
         nav_forward.activated.connect(self._navigate_history_forward)
         nav_up.activated.connect(self._navigate_hierarchy_up)
@@ -1961,6 +1847,8 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         open_win = menu.addAction("Open in Editor Window")
         open_win.triggered.connect(lambda: self._open_page_editor_window(bookmark_path))
+        filter_action = menu.addAction("Filter nav from here")
+        filter_action.triggered.connect(lambda: self._set_nav_filter(bookmark_path))
         menu.addSeparator()
         remove_action = menu.addAction("Remove")
         remove_action.triggered.connect(lambda: self._remove_bookmark(bookmark_path))
@@ -3223,26 +3111,34 @@ class MainWindow(QMainWindow):
                 self.update_links_on_index = config.load_update_links_on_index()
             except Exception:
                 self.update_links_on_index = True
-            try:
-                self.editor.set_pygments_style(config.load_pygments_style("monokai"))
-            except Exception:
-                pass
-            self._apply_application_fonts_immediate()
-            # If AI chat panel exists, refresh its server/model selections immediately
-            try:
-                if self.right_panel.ai_chat_panel:
-                    # Refresh server dropdown (this will respect saved default server)
-                    try:
-                        self.right_panel.ai_chat_panel._refresh_server_dropdown()
-                    except Exception:
-                        pass
-                    # Refresh model dropdown and apply default model
-                    try:
-                        self.right_panel.ai_chat_panel._refresh_model_dropdown(initial=True)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+        try:
+            self.editor.set_pygments_style(config.load_pygments_style("monokai"))
+        except Exception:
+            pass
+        try:
+            self._main_soft_scroll_enabled = config.load_enable_main_soft_scroll()
+        except Exception:
+            self._main_soft_scroll_enabled = True
+        try:
+            self._main_soft_scroll_lines = config.load_main_soft_scroll_lines(5)
+        except Exception:
+            self._main_soft_scroll_lines = 5
+        self._apply_application_fonts_immediate()
+        # If AI chat panel exists, refresh its server/model selections immediately
+        try:
+            if self.right_panel.ai_chat_panel:
+                # Refresh server dropdown (this will respect saved default server)
+                try:
+                    self.right_panel.ai_chat_panel._refresh_server_dropdown()
+                except Exception:
+                    pass
+                # Refresh model dropdown and apply default model
+                try:
+                    self.right_panel.ai_chat_panel._refresh_model_dropdown(initial=True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _apply_application_fonts_immediate(self) -> None:
         """Apply application/editor/AI chat fonts immediately after preferences change."""
@@ -3263,11 +3159,7 @@ class MainWindow(QMainWindow):
                 app.setFont(font)
             except Exception:
                 pass
-        # Update editor font size baseline
-        if app_size:
-            self.font_size = max(6, app_size)
-            self.editor.set_font_point_size(self.font_size)
-        # Update AI chat font baseline (two points below app, but honoring saved override)
+        # Preserve editor font size; only update AI chat size relative to current editor size
         base_ai_font = max(6, (self.font_size or 14) - 2)
         ai_font_size = config.load_ai_chat_font_size(base_ai_font)
         self.right_panel.set_font_size(ai_font_size)
@@ -3389,7 +3281,11 @@ class MainWindow(QMainWindow):
         if not config.has_active_vault():
             self._alert("Open a vault first.")
             return
-        panel = CalendarPanel(font_size_key="calendar_font_size_detached")
+        panel = CalendarPanel(
+            font_size_key="calendar_font_size_detached",
+            http_client=self.http,
+            api_base=self.api_base,
+        )
         panel.set_vault_root(self.vault_root or "")
         panel.dateActivated.connect(self.right_panel.calendar_panel.dateActivated.emit)
         panel.pageActivated.connect(self._open_calendar_page)
@@ -3520,6 +3416,74 @@ class MainWindow(QMainWindow):
             window.destroyed.connect(lambda: self._page_windows.remove(window) if window in self._page_windows else None)
         except Exception as exc:
             self._alert(f"Failed to open editor window: {exc}")
+
+    def _toggle_mode_overlay(self, mode: str) -> None:
+        """Toggle Focus/Audience mode full-screen overlay."""
+        normalized = (mode or "").lower()
+        if normalized not in {"focus", "audience"}:
+            return
+        if self._mode_window and getattr(self._mode_window, "mode", "") == normalized:
+            try:
+                self._mode_window.close()
+            except Exception:
+                pass
+            self._mode_window = None
+            return
+        if not (self.current_path or self.editor.toPlainText().strip()):
+            self.statusBar().showMessage("Open a page before entering Focus/Audience mode", 3000)
+            return
+        # Remember cursor to seed overlay and restore later
+        try:
+            self._last_cursor_for_mode = int(self.editor.textCursor().position())
+        except Exception:
+            self._last_cursor_for_mode = 0
+        if self._mode_window:
+            try:
+                self._mode_window.close()
+            except Exception:
+                pass
+            self._mode_window = None
+        settings = config.load_focus_mode_settings() if normalized == "focus" else config.load_audience_mode_settings()
+        try:
+            window = ModeWindow(
+                normalized,
+                self.editor,
+                vault_root=self.vault_root,
+                page_path=self.current_path,
+                read_only=self._read_only,
+                heading_provider=lambda: list(self._toc_headings or []),
+                settings=settings,
+                initial_cursor=getattr(self, "_last_cursor_for_mode", 0),
+                parent=self,
+            )
+            window.closed.connect(self._on_mode_overlay_closed)
+            self._mode_window = window
+            window.show()
+        except Exception as exc:
+            self._alert(f"Unable to open {normalized.title()} mode: {exc}")
+
+    def _on_mode_overlay_closed(self, mode: str, cursor_pos: int) -> None:
+        """Reset state after an overlay window closes."""
+        self._mode_window = None
+        try:
+            cursor = self.editor.textCursor()
+            cursor.setPosition(max(0, int(cursor_pos)))
+            self.editor.setTextCursor(cursor)
+        except Exception:
+            pass
+        QTimer.singleShot(0, lambda: (self.editor.setFocus(Qt.ShortcutFocusReason), self._scroll_cursor_top_quarter()))
+
+    def _scroll_cursor_top_quarter(self) -> None:
+        """Keep cursor near the top quarter of the viewport when regaining focus."""
+        sb = self.editor.verticalScrollBar()
+        viewport = self.editor.viewport()
+        if not sb or not viewport:
+            return
+        rect = self.editor.cursorRect()
+        target = int(viewport.height() * 0.25)
+        delta = rect.top() - target
+        if delta:
+            sb.setValue(max(sb.minimum(), min(sb.maximum(), sb.value() + delta)))
 
     def _toggle_left_panel(self) -> None:
         """Show/hide the navigation (tree) panel."""
@@ -4468,6 +4432,10 @@ class MainWindow(QMainWindow):
         if not text or not text.strip():
             self.statusBar().showMessage("Select text to run One-Shot Prompt on.", 4000)
             return
+        cursor = self.editor.textCursor()
+        if not cursor.hasSelection():
+            self.statusBar().showMessage("Select text to run One-Shot Prompt on.", 4000)
+            return
         panel = self.right_panel.ai_chat_panel
         if not panel:
             self.statusBar().showMessage("AI Chat panel not available; enable AI Chats.", 4000)
@@ -4512,210 +4480,142 @@ class MainWindow(QMainWindow):
                 getattr(panel, "model_combo", None).currentText() if getattr(panel, "model_combo", None) else None
             ) or "gpt-3.5-turbo"
         # Build messages: fixed system prompt, then user content
-        system_prompt = "you are a helpful assistent, you will respond with markdown formatting"
+        system_prompt = _load_one_shot_prompt()
         messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": text}]
         # ApiWorker already imported above with ServerManager
-        # Insert a greyed-out placeholder at the current selection/cursor
         editor = self.editor
         cursor = editor.textCursor()
-        had_selection = cursor.hasSelection()
-        # Capture the original selected text so we can restore it on undo
-        try:
-            original_text = cursor.selectedText().replace("\u2029", "\n") if had_selection else ""
-        except Exception:
-            original_text = ""
-        # We'll replace the selection (or insert at cursor) with a placeholder
-        placeholder_text = "Executing one shot prompt..."
-        char_fmt = QTextCharFormat()
-        char_fmt.setForeground(QColor(136, 136, 136))
-        # Disable undo/redo while inserting the placeholder so it doesn't pollute
-        # the user's undo history. We'll restore the previous undo state later
-        # and re-enable it before inserting the final LLM response so the
-        # replacement remains undoable as a single operation.
         doc = editor.document()
-        try:
-            prev_undo = doc.isUndoRedoEnabled()
-        except Exception:
-            prev_undo = True
-        try:
-            doc.setUndoRedoEnabled(False)
-        except Exception:
-            pass
-        # store previous undo state to restore later
-        self._one_shot_undo_prev = prev_undo
-
-        if had_selection:
-            # replace selection with placeholder
-            start_pos = cursor.selectionStart()
-            cursor.beginEditBlock()
-            cursor.removeSelectedText()
-            cursor.insertText(placeholder_text, char_fmt)
-            cursor.endEditBlock()
-        else:
-            # insert at cursor position
-            start_pos = cursor.position()
-            cursor.beginEditBlock()
-            cursor.insertText(placeholder_text, char_fmt)
-            cursor.endEditBlock()
-        placeholder_len = len(placeholder_text)
-        # Move caret to end of placeholder and keep focus
-        sel_cursor = QTextCursor(editor.document())
-        sel_cursor.setPosition(start_pos + placeholder_len)
-        editor.setTextCursor(sel_cursor)
-        editor.setFocus()
-
-        # Start a pulsing timer to give visual feedback on the placeholder
-        self._one_shot_pulse_state = False
-        pulse_timer = QTimer(self)
-        pulse_timer.setInterval(600)
-
-        def _pulse() -> None:
-            try:
-                doc = editor.document()
-                start = getattr(self, "_one_shot_placeholder_start", None)
-                length = getattr(self, "_one_shot_placeholder_len", None)
-                if start is None or length is None:
-                    return
-                sel = QTextCursor(doc)
-                sel.setPosition(start)
-                sel.setPosition(start + length, QTextCursor.KeepAnchor)
-                fmt = QTextCharFormat()
-                if not getattr(self, "_one_shot_pulse_state", False):
-                    fmt.setForeground(QColor(96, 96, 96))
-                else:
-                    fmt.setForeground(QColor(136, 136, 136))
-                sel.mergeCharFormat(fmt)
-                self._one_shot_pulse_state = not getattr(self, "_one_shot_pulse_state", False)
-            except Exception:
-                pass
-
-        pulse_timer.timeout.connect(_pulse)
-        pulse_timer.start()
-        self._one_shot_pulse_timer = pulse_timer
+        start_pos = cursor.selectionStart()
+        end_pos = cursor.selectionEnd()
+        original_text = cursor.selectedText().replace("\u2029", "\n")
 
         # Change mouse cursor to wait state
         QApplication.setOverrideCursor(Qt.WaitCursor)
 
-        # Keep reference so worker doesn't get GC'd
-        self._one_shot_worker = ApiWorker(server_config, messages, model, stream=False)
-        # remember placeholder range for replacement (store on both MainWindow and editor)
-        self._one_shot_placeholder_start = start_pos
-        self._one_shot_placeholder_len = placeholder_len
+        # Replace selection with header + empty body + footer to stream into
+        header = "\n\n"
+        footer = "\n\n"
         try:
-            editor._one_shot_placeholder_start = start_pos
-            editor._one_shot_placeholder_len = placeholder_len
-            editor._one_shot_original_text = original_text
+            replace_cursor = QTextCursor(doc)
+            replace_cursor.setPosition(start_pos)
+            replace_cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
+            replace_cursor.beginEditBlock()
+            replace_cursor.removeSelectedText()
+            replace_cursor.insertText(header + footer)
+            replace_cursor.endEditBlock()
         except Exception:
-            pass
+            self.statusBar().showMessage("Failed to prepare one-shot buffer.", 3000)
+            return
+        body_start = start_pos + len(header)
+        self._one_shot_footer_pos = body_start
+        self._one_shot_footer_len = len(footer)
+        self._one_shot_range = (start_pos, body_start + len(footer), original_text)
+        self._one_shot_stream_used = False
+
+        # Keep reference so worker doesn't get GC'd
+        self._one_shot_worker = ApiWorker(server_config, messages, model, stream=True)
 
         def _cleanup_cursor_and_worker() -> None:
             try:
                 QApplication.restoreOverrideCursor()
             except Exception:
                 pass
-            # stop pulse timer if running
-            try:
-                t = getattr(self, "_one_shot_pulse_timer", None)
-                if t:
-                    t.stop()
-                    try:
-                        t.deleteLater()
-                    except Exception:
-                        pass
-                    self._one_shot_pulse_timer = None
-            except Exception:
-                pass
-            # clear worker ref
-            try:
-                self._one_shot_worker = None
-            except Exception:
-                pass
-            # restore undo/redo enabled state if we changed it earlier
-            try:
-                doc = getattr(self, "editor", None).document() if getattr(self, "editor", None) else None
-                if doc is not None and hasattr(self, "_one_shot_undo_prev"):
-                    try:
-                        doc.setUndoRedoEnabled(self._one_shot_undo_prev)
-                    except Exception:
-                        pass
-                    try:
-                        del self._one_shot_undo_prev
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-        def _on_finished(full: str) -> None:
-            try:
-                # Replace placeholder with the response
-                editor = self.editor
-                doc = editor.document()
-                start = getattr(self, "_one_shot_placeholder_start", None)
-                length = getattr(self, "_one_shot_placeholder_len", None)
-                # Re-enable undo/redo if it was previously enabled so the final
-                # replacement is recorded as a single undoable action.
+            self._one_shot_worker = None
+            for attr in (
+                "_one_shot_range",
+                "_one_shot_footer_pos",
+                "_one_shot_footer_len",
+                "_one_shot_stream_used",
+            ):
                 try:
-                    prev = getattr(self, "_one_shot_undo_prev", True)
-                    doc.setUndoRedoEnabled(bool(prev))
+                    delattr(self, attr)
                 except Exception:
                     pass
-                if start is None or length is None:
-                    # fallback: replace current selection or whole document
-                    cursor = editor.textCursor()
-                    if not cursor.hasSelection():
-                        cursor.select(QTextCursor.Document)
-                    cursor.beginEditBlock()
-                    cursor.removeSelectedText()
-                    cursor.insertText(full)
-                    cursor.endEditBlock()
-                    start_pos = cursor.selectionStart()
-                else:
-                    # select placeholder region and replace
-                    sel_cursor = QTextCursor(doc)
-                    sel_cursor.setPosition(start)
-                    sel_cursor.setPosition(start + length, QTextCursor.KeepAnchor)
-                    editor.setTextCursor(sel_cursor)
-                    sel_cursor.beginEditBlock()
-                    sel_cursor.removeSelectedText()
-                    sel_cursor.insertText(full)
-                    sel_cursor.endEditBlock()
-                    start_pos = start
-                # Select the inserted text
-                new_end = start_pos + len(full)
-                final_cursor = QTextCursor(editor.document())
-                final_cursor.setPosition(start_pos)
-                final_cursor.setPosition(new_end, QTextCursor.KeepAnchor)
-                editor.setTextCursor(final_cursor)
-                editor.setFocus()
-                self.statusBar().showMessage("One-Shot complete.", 2500)
-            except Exception as exc:
-                self.statusBar().showMessage(f"One-Shot failed to apply response: {exc}", 4000)
-            finally:
-                _cleanup_cursor_and_worker()
 
-        def _on_failed(err: str) -> None:
-            # remove placeholder if present
+        self._one_shot_worker.chunk.connect(lambda chunk: self._append_one_shot_chunk(doc, chunk))
+        self._one_shot_worker.finished.connect(lambda full: self._finalize_one_shot(doc, full))
+        self._one_shot_worker.failed.connect(lambda err: self._one_shot_failed(err))
+        self._one_shot_worker.start()
+
+    def _append_one_shot_chunk(self, doc: QTextDocument, chunk: str) -> None:
+        """Append streamed chunk into the one-shot buffer just before the footer."""
+        try:
+            footer_pos = getattr(self, "_one_shot_footer_pos", None)
+            footer_len = getattr(self, "_one_shot_footer_len", None)
+            if footer_pos is None or footer_len is None:
+                return
+            cursor = QTextCursor(doc)
+            cursor.setPosition(footer_pos)
+            cursor.insertText(chunk)
+            self._one_shot_footer_pos = footer_pos + len(chunk)
+            self._one_shot_stream_used = True
+        except Exception:
+            pass
+
+    def _finalize_one_shot(self, doc: QTextDocument, full: str) -> None:
+        """Finish the one-shot response: ensure content inserted, select, scroll."""
+        try:
+            start, _, orig = getattr(self, "_one_shot_range", (None, None, None))
+            footer_pos = getattr(self, "_one_shot_footer_pos", None)
+            footer_len = getattr(self, "_one_shot_footer_len", 0)
+            editor = self.editor
+            if start is None or footer_pos is None:
+                self.statusBar().showMessage("One-Shot missing state; aborting.", 4000)
+                return
+            # If no chunks streamed, insert the full response now
+            if not getattr(self, "_one_shot_stream_used", False) and full:
+                cursor = QTextCursor(doc)
+                cursor.setPosition(footer_pos)
+                cursor.insertText(full)
+                footer_pos += len(full)
+            end_pos = footer_pos + footer_len
+            final_cursor = QTextCursor(doc)
+            final_cursor.setPosition(start)
+            final_cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
+            editor.setTextCursor(final_cursor)
+            editor.setFocus()
             try:
-                editor = self.editor
-                doc = editor.document()
-                start = getattr(self, "_one_shot_placeholder_start", None)
-                length = getattr(self, "_one_shot_placeholder_len", None)
-                if start is not None and length is not None:
-                    sel_cursor = QTextCursor(doc)
-                    sel_cursor.setPosition(start)
-                    sel_cursor.setPosition(start + length, QTextCursor.KeepAnchor)
-                    sel_cursor.beginEditBlock()
-                    sel_cursor.removeSelectedText()
-                    sel_cursor.endEditBlock()
-                self.statusBar().showMessage(f"One-Shot failed: {err}", 6000)
+                self._scroll_cursor_to_top_quarter(final_cursor, animate=True, flash=False)
             except Exception:
                 pass
-            finally:
-                _cleanup_cursor_and_worker()
+            self.statusBar().showMessage("One-Shot complete.", 2500)
+        except Exception as exc:
+            self.statusBar().showMessage(f"One-Shot failed to apply response: {exc}", 4000)
+        finally:
+            try:
+                QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
+            self._one_shot_worker = None
+            for attr in (
+                "_one_shot_range",
+                "_one_shot_footer_pos",
+                "_one_shot_footer_len",
+                "_one_shot_stream_used",
+            ):
+                try:
+                    delattr(self, attr)
+                except Exception:
+                    pass
 
-        self._one_shot_worker.finished.connect(_on_finished)
-        self._one_shot_worker.failed.connect(_on_failed)
-        self._one_shot_worker.start()
+    def _one_shot_failed(self, err: str) -> None:
+        self.statusBar().showMessage(f"One-Shot failed: {err}", 6000)
+        try:
+            QApplication.restoreOverrideCursor()
+        except Exception:
+            pass
+        self._one_shot_worker = None
+        for attr in (
+            "_one_shot_range",
+            "_one_shot_footer_pos",
+            "_one_shot_footer_len",
+            "_one_shot_stream_used",
+        ):
+            try:
+                delattr(self, attr)
+            except Exception:
+                pass
 
     def _send_selection_to_ai_chat(self, text: str) -> None:
         if not text.strip():
@@ -5349,7 +5249,6 @@ class MainWindow(QMainWindow):
             return
         self._ensure_tree_path_loaded(self.current_path)
         self._select_tree_path(self.current_path)
-        self._apply_navigation_focus("navigator")
 
     def _find_item(self, parent: QStandardItem, target: str) -> Optional[QStandardItem]:
         for row in range(parent.rowCount()):
@@ -5561,6 +5460,8 @@ class MainWindow(QMainWindow):
         if self._suspend_cursor_history:
             return
         self._history_cursor_positions[self.current_path] = position
+        if getattr(self, "_main_soft_scroll_enabled", True):
+            self._soft_autoscroll_main()
 
     def _remember_history_cursor(self) -> None:
         """Remember the current cursor position for history restore."""
@@ -5893,6 +5794,44 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(220, clear_flash)
         except Exception:
             pass
+
+    def _soft_autoscroll_main(self) -> None:
+        """Gently keep the caret away from viewport edges while focused."""
+        if not self.editor.hasFocus():
+            return
+        sb = self.editor.verticalScrollBar()
+        viewport = self.editor.viewport()
+        if not sb or not viewport:
+            return
+        rect = self.editor.cursorRect()
+        height = viewport.height()
+        line_height = max(12, rect.height() or self.editor.fontMetrics().height())
+        target_val: Optional[int] = None
+        threshold_px = max(4, int(height * 0.08))
+        top_edge = rect.top()
+        bottom_edge = height - rect.bottom()
+        if bottom_edge < threshold_px:
+            delta = int(self._main_soft_scroll_lines * line_height)
+            target_val = sb.value() + delta
+        elif top_edge < threshold_px:
+            delta = int(self._main_soft_scroll_lines * line_height)
+            target_val = sb.value() - delta
+        if target_val is None:
+            return
+        target_val = max(sb.minimum(), min(sb.maximum(), target_val))
+        if target_val == sb.value():
+            return
+        if self._scroll_anim and self._scroll_anim.state() == QPropertyAnimation.Running:
+            try:
+                self._scroll_anim.stop()
+            except Exception:
+                pass
+        anim = QPropertyAnimation(sb, b"value", self)
+        anim.setDuration(140)
+        anim.setStartValue(sb.value())
+        anim.setEndValue(target_val)
+        anim.start()
+        self._scroll_anim = anim
 
     def _navigate_hierarchy_up(self) -> None:
         """Navigate up in page hierarchy (Alt+Up): Move up one level, stop at root."""
@@ -6244,6 +6183,11 @@ class MainWindow(QMainWindow):
         self._save_current_file(auto=True)
         self._save_geometry()
         self._persist_recent_history()
+        try:
+            if self._mode_window:
+                self._mode_window.close()
+        except Exception:
+            pass
         
         # Close HTTP client and clean up
         self.http.close()

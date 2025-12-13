@@ -4,18 +4,23 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
+    QHBoxLayout,
     QCheckBox,
     QDialogButtonBox,
     QLabel,
     QPushButton,
-    QHBoxLayout,
     QMessageBox,
     QComboBox,
     QLineEdit,
     QSpinBox,
+    QDoubleSpinBox,
+    QListWidget,
+    QListWidgetItem,
+    QStackedWidget,
+    QWidget,
 )
 from pathlib import Path
-from PySide6.QtGui import QFontDatabase
+from PySide6.QtGui import QFontDatabase, QFont
 from PySide6.QtWidgets import QApplication
 
 from zimx.app import config
@@ -29,32 +34,70 @@ class PreferencesDialog(QDialog):
         self.setWindowTitle("Preferences")
         self.setModal(True)
         self.resize(450, 250)
-        
-        self.layout = QVBoxLayout(self)
-        
-        # Vi-mode block cursor setting
-        vi_section = QLabel("<b>Vi Mode</b>")
-        self.layout.addWidget(vi_section)
+        app_instance = QApplication.instance()
+        self._initial_app_font = QFont(app_instance.font()) if app_instance else QFont()
+        self._font_families = sorted(QFontDatabase().families())
 
+        root_layout = QHBoxLayout(self)
+        root_layout.setContentsMargins(10, 10, 10, 10)
+        root_layout.setSpacing(12)
+
+        self.section_list = QListWidget()
+        self.section_list.setFixedWidth(180)
+        self.section_list.setSpacing(2)
+        root_layout.addWidget(self.section_list, 0)
+
+        self.stack = QStackedWidget()
+        right_container = QVBoxLayout()
+        right_container.addWidget(self.stack, 1)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(self.accept)
+        btn_box.rejected.connect(self.reject)
+        right_container.addWidget(btn_box, 0, Qt.AlignRight)
+
+        wrapper = QWidget()
+        wrapper.setLayout(right_container)
+        root_layout.addWidget(wrapper, 1)
+
+        self._build_sections()
+        if self.section_list.count():
+            self.section_list.setCurrentRow(0)
+        self.section_list.currentRowChanged.connect(self.stack.setCurrentIndex)
+
+    def _build_sections(self) -> None:
+        """Create a two-panel layout with section list on the left and pages on the right."""
+        focus_settings = config.load_focus_mode_settings()
+        audience_settings = config.load_audience_mode_settings()
+        template_names = self._template_names()
+
+        def add_section(title: str) -> QVBoxLayout:
+            item = QListWidgetItem(title)
+            self.section_list.addItem(item)
+            page = QWidget()
+            layout = QVBoxLayout(page)
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(8)
+            self.stack.addWidget(page)
+            return layout
+
+        # Vi Mode
+        vi_layout = add_section("Vi Mode")
         self.vi_enable_checkbox = QCheckBox("Enable Vi Mode")
         self.vi_enable_checkbox.setChecked(config.load_vi_mode_enabled())
-        self.vi_enable_checkbox.setToolTip(
-            "Turn on vi-style navigation keys in the Markdown editor."
-        )
-        self.layout.addWidget(self.vi_enable_checkbox)
-        
+        self.vi_enable_checkbox.setToolTip("Turn on vi-style navigation keys in the Markdown editor.")
+        vi_layout.addWidget(self.vi_enable_checkbox)
         self.vi_block_cursor_checkbox = QCheckBox("Use Vi Mode Block Cursor")
         self.vi_block_cursor_checkbox.setChecked(config.load_vi_block_cursor_enabled())
         self.vi_block_cursor_checkbox.setToolTip(
-            "Show a colored block cursor when vi-mode is active.\n"
-            "Disable this if you experience flickering on Linux/Cinnamon."
+            "Show a colored block cursor when vi-mode is active.\nDisable this if you experience flickering on Linux/Cinnamon."
         )
-        self.layout.addWidget(self.vi_block_cursor_checkbox)
+        vi_layout.addWidget(self.vi_block_cursor_checkbox)
+        vi_layout.addStretch(1)
 
-        # Non Actionable Task Tags
-        self.layout.addSpacing(10)
-        non_actionable_label = QLabel("<b>Non Actionable Task Tags</b>")
-        self.layout.addWidget(non_actionable_label)
+        # Tasks & Modes
+        task_layout = add_section("Tasks & Modes")
+        task_layout.addWidget(QLabel("<b>Non Actionable Task Tags</b>"))
         self.non_actionable_tags_edit = QLineEdit()
         self.non_actionable_tags_edit.setPlaceholderText("@wait @wt")
         try:
@@ -62,15 +105,89 @@ class PreferencesDialog(QDialog):
         except Exception:
             val = None
         self.non_actionable_tags_edit.setText(val or "@wait @wt")
-        self.layout.addWidget(self.non_actionable_tags_edit)
-        # Features
-        self.layout.addSpacing(10)
-        features_label = QLabel("<b>Features</b>")
-        self.layout.addWidget(features_label)
-        fonts_label = QLabel("<b>Fonts</b>")
-        self.layout.addWidget(fonts_label)
-        self._font_families = sorted(QFontDatabase().families())
+        task_layout.addWidget(self.non_actionable_tags_edit)
+        task_layout.addWidget(QLabel("<b>Focus Mode</b>"))
+        self.focus_center_column_checkbox = QCheckBox("Centered column")
+        self.focus_center_column_checkbox.setChecked(focus_settings.get("center_column", True))
+        task_layout.addWidget(self.focus_center_column_checkbox)
+        row_focus_width = QHBoxLayout()
+        row_focus_width.addWidget(QLabel("Max column width (chars):"))
+        self.focus_width_spin = QSpinBox()
+        self.focus_width_spin.setRange(40, 999)
+        self.focus_width_spin.setValue(int(focus_settings.get("max_column_width_chars", 80)))
+        row_focus_width.addWidget(self.focus_width_spin, 1)
+        task_layout.addLayout(row_focus_width)
+        self.focus_typewriter_checkbox = QCheckBox("Enable typewriter scrolling")
+        self.focus_typewriter_checkbox.setChecked(focus_settings.get("typewriter_scrolling", False))
+        task_layout.addWidget(self.focus_typewriter_checkbox)
+        self.focus_paragraph_checkbox = QCheckBox("Highlight current paragraph")
+        self.focus_paragraph_checkbox.setChecked(focus_settings.get("paragraph_focus", False))
+        task_layout.addWidget(self.focus_paragraph_checkbox)
+        task_layout.addWidget(QLabel("<b>Audience Mode</b>"))
+        self.audience_hide_panels_checkbox = QCheckBox("Hide side panels")
+        self.audience_hide_panels_checkbox.setChecked(audience_settings.get("hide_side_panels", True))
+        task_layout.addWidget(self.audience_hide_panels_checkbox)
+        self.audience_hide_toolbar_checkbox = QCheckBox("Hide toolbars/header")
+        self.audience_hide_toolbar_checkbox.setChecked(audience_settings.get("hide_toolbars", True))
+        task_layout.addWidget(self.audience_hide_toolbar_checkbox)
+        self.audience_center_column_checkbox = QCheckBox("Centered column")
+        self.audience_center_column_checkbox.setChecked(audience_settings.get("center_column", True))
+        task_layout.addWidget(self.audience_center_column_checkbox)
+        row_a_width = QHBoxLayout()
+        row_a_width.addWidget(QLabel("Max column width (chars):"))
+        self.audience_width_spin = QSpinBox()
+        self.audience_width_spin.setRange(40, 999)
+        self.audience_width_spin.setValue(int(audience_settings.get("max_column_width_chars", 120)))
+        row_a_width.addWidget(self.audience_width_spin, 1)
+        task_layout.addLayout(row_a_width)
+        row_a_font = QHBoxLayout()
+        row_a_font.addWidget(QLabel("Font scale:"))
+        self.audience_font_scale_spin = QDoubleSpinBox()
+        self.audience_font_scale_spin.setRange(1.0, 2.5)
+        self.audience_font_scale_spin.setSingleStep(0.05)
+        self.audience_font_scale_spin.setValue(float(audience_settings.get("font_scale", 1.15)))
+        row_a_font.addWidget(self.audience_font_scale_spin, 1)
+        task_layout.addLayout(row_a_font)
+        row_a_line = QHBoxLayout()
+        row_a_line.addWidget(QLabel("Line height scale:"))
+        self.audience_line_height_spin = QDoubleSpinBox()
+        self.audience_line_height_spin.setRange(1.0, 2.5)
+        self.audience_line_height_spin.setSingleStep(0.05)
+        self.audience_line_height_spin.setValue(float(audience_settings.get("line_height_scale", 1.15)))
+        row_a_line.addWidget(self.audience_line_height_spin, 1)
+        task_layout.addLayout(row_a_line)
+        self.audience_cursor_checkbox = QCheckBox("Show cursor spotlight")
+        self.audience_cursor_checkbox.setChecked(audience_settings.get("cursor_spotlight", True))
+        task_layout.addWidget(self.audience_cursor_checkbox)
+        self.audience_paragraph_checkbox = QCheckBox("Highlight current paragraph")
+        self.audience_paragraph_checkbox.setChecked(audience_settings.get("paragraph_highlight", True))
+        task_layout.addWidget(self.audience_paragraph_checkbox)
+        self.audience_scroll_checkbox = QCheckBox("Enable soft auto-scroll")
+        self.audience_scroll_checkbox.setChecked(audience_settings.get("soft_autoscroll", True))
+        task_layout.addWidget(self.audience_scroll_checkbox)
+        self.audience_tools_checkbox = QCheckBox("Show floating tool strip")
+        self.audience_tools_checkbox.setChecked(audience_settings.get("show_floating_tools", True))
+        task_layout.addWidget(self.audience_tools_checkbox)
+        self.main_soft_scroll_checkbox = QCheckBox("Enable main editor soft auto-scroll")
+        try:
+            self.main_soft_scroll_checkbox.setChecked(config.load_enable_main_soft_scroll())
+        except Exception:
+            self.main_soft_scroll_checkbox.setChecked(True)
+        task_layout.addWidget(self.main_soft_scroll_checkbox)
+        row_soft_lines = QHBoxLayout()
+        row_soft_lines.addWidget(QLabel("Soft auto-scroll lines to scroll:"))
+        self.main_soft_scroll_lines_spin = QSpinBox()
+        self.main_soft_scroll_lines_spin.setRange(1, 50)
+        try:
+            self.main_soft_scroll_lines_spin.setValue(config.load_main_soft_scroll_lines(5))
+        except Exception:
+            self.main_soft_scroll_lines_spin.setValue(5)
+        row_soft_lines.addWidget(self.main_soft_scroll_lines_spin, 1)
+        task_layout.addLayout(row_soft_lines)
+        task_layout.addStretch(1)
 
+        # Fonts
+        font_layout = add_section("Fonts")
         row_fonts_app = QHBoxLayout()
         row_fonts_app.addWidget(QLabel("Application font:"))
         self.application_font_combo = self._build_font_combo("System Default")
@@ -79,9 +196,9 @@ class PreferencesDialog(QDialog):
         except Exception:
             app_font = None
         self._select_font(self.application_font_combo, app_font)
-        self.application_font_combo.currentIndexChanged.connect(self._warn_restart_required)
+        self.application_font_combo.currentIndexChanged.connect(self._apply_application_font_live)
         row_fonts_app.addWidget(self.application_font_combo, 1)
-        self.layout.addLayout(row_fonts_app)
+        font_layout.addLayout(row_fonts_app)
 
         row_fonts_size = QHBoxLayout()
         row_fonts_size.addWidget(QLabel("Application font size:"))
@@ -94,9 +211,9 @@ class PreferencesDialog(QDialog):
         default_size = QApplication.instance().font().pointSize() if QApplication.instance() else 12
         self.application_font_size_spin.setValue(size_val or max(6, default_size))
         self.application_font_size_spin.setToolTip("Set 0 to use system default size.")
-        self.application_font_size_spin.editingFinished.connect(self._warn_restart_required)
+        self.application_font_size_spin.valueChanged.connect(self._apply_application_font_live)
         row_fonts_size.addWidget(self.application_font_size_spin, 1)
-        self.layout.addLayout(row_fonts_size)
+        font_layout.addLayout(row_fonts_size)
 
         row_fonts_md = QHBoxLayout()
         row_fonts_md.addWidget(QLabel("Default Markdown font:"))
@@ -108,9 +225,8 @@ class PreferencesDialog(QDialog):
         self._select_font(self.markdown_font_combo, md_font)
         self.markdown_font_combo.currentIndexChanged.connect(self._warn_restart_required)
         row_fonts_md.addWidget(self.markdown_font_combo, 1)
-        self.layout.addLayout(row_fonts_md)
+        font_layout.addLayout(row_fonts_md)
 
-        self.layout.addSpacing(6)
         self.minimal_font_scan_checkbox = QCheckBox("Use Minimal Font Scan (For Fast Window Startup)")
         try:
             self.minimal_font_scan_checkbox.setChecked(config.load_minimal_font_scan_enabled())
@@ -119,52 +235,45 @@ class PreferencesDialog(QDialog):
         self.minimal_font_scan_checkbox.setToolTip(
             "Limit Qt to a tiny font set to reduce startup time. Requires restart to take effect."
         )
-        self.minimal_font_scan_checkbox.stateChanged.connect(self._warn_restart_required)
-        self.layout.addWidget(self.minimal_font_scan_checkbox)
+        self.minimal_font_scan_checkbox.stateChanged.connect(lambda *_: None)
+        font_layout.addWidget(self.minimal_font_scan_checkbox)
+        font_layout.addStretch(1)
+
+        # AI & Code
+        ai_layout = add_section("AI & Code")
         self.enable_ai_chats_checkbox = QCheckBox("Enable AI Chats")
         self.enable_ai_chats_checkbox.setChecked(config.load_enable_ai_chats())
         self.enable_ai_chats_checkbox.stateChanged.connect(self._warn_restart_required)
-        self.layout.addWidget(self.enable_ai_chats_checkbox)
-
-        # Manage Server button (after Enable AI Chats)
+        ai_layout.addWidget(self.enable_ai_chats_checkbox)
         self.manage_server_btn = QPushButton("Manage Servers")
         self.manage_server_btn.clicked.connect(self._open_manage_server_dialog)
-        self.layout.addWidget(self.manage_server_btn)
-
-        # Default server/model section
-        defaults_label = QLabel("<b>Default Server and Model</b>")
-        self.layout.addWidget(defaults_label)
+        ai_layout.addWidget(self.manage_server_btn)
+        ai_layout.addWidget(QLabel("<b>Default Server and Model</b>"))
         row = QHBoxLayout()
         row.addWidget(QLabel("Server:"))
         self.default_server_combo = QComboBox()
         self.default_server_combo.currentIndexChanged.connect(self._on_default_server_changed)
         row.addWidget(self.default_server_combo, 1)
-        self.layout.addLayout(row)
+        ai_layout.addLayout(row)
 
         row2 = QHBoxLayout()
         row2.addWidget(QLabel("Model:"))
         self.default_model_combo = QComboBox()
         row2.addWidget(self.default_model_combo, 1)
-        self.layout.addLayout(row2)
-
+        ai_layout.addLayout(row2)
         self._load_default_server_model()
 
-        # Code highlighting
-        self.layout.addSpacing(10)
-        code_label = QLabel("<b>Code Highlighting</b>")
-        self.layout.addWidget(code_label)
+        ai_layout.addWidget(QLabel("<b>Code Highlighting</b>"))
         row3 = QHBoxLayout()
         row3.addWidget(QLabel("Pygments style:"))
         self.pygments_style_combo = QComboBox()
         self._load_pygments_styles()
         row3.addWidget(self.pygments_style_combo, 1)
-        self.layout.addLayout(row3)
+        ai_layout.addLayout(row3)
+        ai_layout.addStretch(1)
 
-        # Template defaults
-        self.layout.addSpacing(10)
-        template_label = QLabel("<b>Templates</b>")
-        self.layout.addWidget(template_label)
-        template_names = self._template_names()
+        # Templates
+        tpl_layout = add_section("Templates")
         row_tpl_page = QHBoxLayout()
         row_tpl_page.addWidget(QLabel("Default Template for New Page:"))
         self.page_template_combo = QComboBox()
@@ -176,7 +285,7 @@ class PreferencesDialog(QDialog):
         if current_page_tpl in template_names:
             self.page_template_combo.setCurrentText(current_page_tpl)
         row_tpl_page.addWidget(self.page_template_combo, 1)
-        self.layout.addLayout(row_tpl_page)
+        tpl_layout.addLayout(row_tpl_page)
 
         row_tpl_journal = QHBoxLayout()
         row_tpl_journal.addWidget(QLabel("Default Template for New Journal Entry:"))
@@ -189,11 +298,11 @@ class PreferencesDialog(QDialog):
         if current_journal_tpl in template_names:
             self.journal_template_combo.setCurrentText(current_journal_tpl)
         row_tpl_journal.addWidget(self.journal_template_combo, 1)
-        self.layout.addLayout(row_tpl_journal)
+        tpl_layout.addLayout(row_tpl_journal)
+        tpl_layout.addStretch(1)
 
-        # Vault behavior
-        vault_label = QLabel("<b>Vault</b>")
-        self.layout.addWidget(vault_label)
+        # Vault & Links
+        vault_layout = add_section("Vault & Links")
         self.force_read_only_checkbox = QCheckBox("Force read-only mode for this vault")
         self.force_read_only_checkbox.setToolTip(
             "Open this vault without taking a lock or allowing writes from this window."
@@ -202,35 +311,34 @@ class PreferencesDialog(QDialog):
             self.force_read_only_checkbox.setChecked(config.load_vault_force_read_only())
         except Exception:
             self.force_read_only_checkbox.setChecked(False)
-        self.layout.addWidget(self.force_read_only_checkbox)
+        vault_layout.addWidget(self.force_read_only_checkbox)
 
-        # Link update handling
-        link_label = QLabel("Link Update Handling:")
+        self.rebuild_button = QPushButton("Rebuild Vault Index")
+        self.rebuild_button.clicked.connect(self._on_rebuild_clicked)
+        vault_layout.addWidget(self.rebuild_button)
+
+        vault_layout.addWidget(QLabel("Link Update Handling:"))
         row_link = QHBoxLayout()
-        row_link.addWidget(link_label)
         self.link_update_combo = QComboBox()
-        self.link_update_combo.addItems([
-            "None (do nothing)",
-            "Lazy (rewrite on open/save)",
-            "Reindex (background)",
-        ])
+        self.link_update_combo.addItems(
+            [
+                "None (do nothing)",
+                "Lazy (rewrite on open/save)",
+                "Reindex (background)",
+            ]
+        )
         mode = config.load_link_update_mode()
         mode_to_index = {"none": 0, "lazy": 1, "reindex": 2}
         self.link_update_combo.setCurrentIndex(mode_to_index.get(mode, 2))
         row_link.addWidget(self.link_update_combo, 1)
-        self.layout.addLayout(row_link)
+        vault_layout.addLayout(row_link)
         self.update_links_on_index_checkbox = QCheckBox("Update vault page links on reindex")
         try:
             self.update_links_on_index_checkbox.setChecked(config.load_update_links_on_index())
         except Exception:
             self.update_links_on_index_checkbox.setChecked(True)
-        self.layout.addWidget(self.update_links_on_index_checkbox)
-
-        # Dialog buttons
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btn_box.accepted.connect(self.accept)
-        btn_box.rejected.connect(self.reject)
-        self.layout.addWidget(btn_box)
+        vault_layout.addWidget(self.update_links_on_index_checkbox)
+        vault_layout.addStretch(1)
 
     def _open_manage_server_dialog(self):
         # Prevent duplicate Manage Server buttons by not adding UI elements here
@@ -372,6 +480,33 @@ class PreferencesDialog(QDialog):
         md_font = self._font_value(self.markdown_font_combo)
         config.save_default_markdown_font(md_font)
         config.save_minimal_font_scan_enabled(self.minimal_font_scan_checkbox.isChecked())
+        config.save_focus_mode_settings(
+            {
+                "center_column": self.focus_center_column_checkbox.isChecked(),
+                "max_column_width_chars": self.focus_width_spin.value(),
+                "typewriter_scrolling": self.focus_typewriter_checkbox.isChecked(),
+                "paragraph_focus": self.focus_paragraph_checkbox.isChecked(),
+            }
+        )
+        config.save_audience_mode_settings(
+            {
+                "hide_side_panels": self.audience_hide_panels_checkbox.isChecked(),
+                "hide_toolbars": self.audience_hide_toolbar_checkbox.isChecked(),
+                "center_column": self.audience_center_column_checkbox.isChecked(),
+                "max_column_width_chars": self.audience_width_spin.value(),
+                "font_scale": self.audience_font_scale_spin.value(),
+                "line_height_scale": self.audience_line_height_spin.value(),
+                "cursor_spotlight": self.audience_cursor_checkbox.isChecked(),
+                "paragraph_highlight": self.audience_paragraph_checkbox.isChecked(),
+                "soft_autoscroll": self.audience_scroll_checkbox.isChecked(),
+                "show_floating_tools": self.audience_tools_checkbox.isChecked(),
+            }
+        )
+        try:
+            config.save_enable_main_soft_scroll(self.main_soft_scroll_checkbox.isChecked())
+            config.save_main_soft_scroll_lines(self.main_soft_scroll_lines_spin.value())
+        except Exception:
+            pass
         print(f"[DEBUG] Saving enable_ai_chats: {self.enable_ai_chats_checkbox.isChecked()}")
         config.save_enable_ai_chats(self.enable_ai_chats_checkbox.isChecked())
         config.save_default_ai_server(self.default_server_combo.currentText() or None)
@@ -399,7 +534,29 @@ class PreferencesDialog(QDialog):
         super().accept()
 
     def _warn_restart_required(self) -> None:
-        QMessageBox.information(self, "Restart Required", "This setting requires a restart.")
+        return None
+
+    def _apply_application_font_live(self) -> None:
+        """Apply and save application font immediately when changed."""
+        family = self._font_value(self.application_font_combo)
+        size_val = self.application_font_size_spin.value()
+        size = size_val if size_val > 0 else None
+        try:
+            config.save_application_font(family)
+            config.save_application_font_size(size)
+        except Exception:
+            pass
+        app = QApplication.instance()
+        if app:
+            try:
+                base_font = QFont(self._initial_app_font)
+                if family:
+                    base_font.setFamily(family)
+                if size:
+                    base_font.setPointSize(max(6, size))
+                app.setFont(base_font)
+            except Exception:
+                pass
 
     def _build_font_combo(self, default_label: str) -> QComboBox:
         combo = QComboBox()
@@ -439,9 +596,13 @@ class PreferencesDialog(QDialog):
         combo.setCurrentIndex(max(0, idx))
 
     def _font_value(self, combo: QComboBox) -> str | None:
+        if combo.currentIndex() == 0:
+            return None
         value = combo.currentData()
         if isinstance(value, str) and value.strip():
             return value.strip()
         # Fall back to text if user typed a custom font
         text = combo.currentText().strip()
+        if text.lower() in {"system default", "application default"}:
+            return None
         return text or None

@@ -60,7 +60,12 @@ class TabbedRightPanel(QWidget):
         self.tabs.addTab(self.task_panel, "Tasks")
 
         # Create Calendar tab
-        self.calendar_panel = CalendarPanel(font_size_key="calendar_font_size_tabbed", splitter_key="calendar_splitter_tabbed")
+        self.calendar_panel = CalendarPanel(
+            font_size_key="calendar_font_size_tabbed",
+            splitter_key="calendar_splitter_tabbed",
+            http_client=http_client,
+            api_base=self._http_client.base_url if self._http_client else None,
+        )
         self.tabs.addTab(self.calendar_panel, "Calendar")
         
         # Create Attachments tab

@@ -61,8 +61,12 @@ class CalendarPanel(QWidget):
         font_size_key: str = "calendar_font_size_tabbed",
         splitter_key: str = "calendar_splitter_tabbed",
         header_state_key: str = "calendar_tasks_header_tabbed",
+        http_client=None,
+        api_base: Optional[str] = None,
     ) -> None:
         super().__init__(parent)
+        self.http = http_client
+        self.api_base = api_base or os.getenv("ZIMX_API_BASE", "http://127.0.0.1:8734")
         self._font_size_key = font_size_key
         self._font_size = config.load_panel_font_size(self._font_size_key, max(8, self.font().pointSize() or 12))
         self._splitter_key = splitter_key
@@ -168,6 +172,7 @@ class CalendarPanel(QWidget):
         self.day_insights_layout.addWidget(title_container)
         self.day_insights_layout.addWidget(self.insight_counts)
         self.day_insights_layout.addWidget(self.insight_tags)
+
         self.subpage_list = QListWidget()
         self.subpage_list.itemActivated.connect(self._open_insight_link)
         self.subpage_list.itemClicked.connect(self._open_insight_link)
@@ -235,6 +240,37 @@ class CalendarPanel(QWidget):
         pages_headings_container.setLayout(ph_layout)
 
         self.day_insights_layout.addWidget(pages_headings_container, 1)
+        recent_row = QHBoxLayout()
+        recent_row.setContentsMargins(0, 0, 0, 0)
+        recent_row.setSpacing(6)
+        recent_label = QLabel("Edited Pages:")
+        recent_label.setStyleSheet("font-weight: bold;")
+        self.recent_journal_checkbox = QCheckBox("Journal?")
+        self.recent_journal_checkbox.setChecked(False)
+        self.recent_journal_checkbox.stateChanged.connect(lambda _: self._update_insights_for_selection())
+        recent_row.addWidget(recent_label)
+        recent_row.addStretch(1)
+        recent_row.addWidget(self.recent_journal_checkbox)
+        self.recent_list = QListWidget()
+        self.recent_list.setAlternatingRowColors(True)
+        self.recent_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.recent_list.itemActivated.connect(self._open_recent_link)
+        self.recent_list.itemClicked.connect(self._open_recent_link)
+        try:
+            self.recent_list.setWordWrap(False)
+            self.recent_list.setUniformItemSizes(True)
+        except Exception:
+            pass
+        try:
+            self.recent_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            row_h = self.recent_list.sizeHintForRow(0) or (self.recent_list.fontMetrics().height() + 6)
+            row_h = max(20, row_h)
+            self.recent_list.setMinimumHeight(row_h * 8)
+            self.recent_list.setMaximumHeight(row_h * 8 + 12)
+        except Exception:
+            pass
+        self.day_insights_layout.addLayout(recent_row)
+        self.day_insights_layout.addWidget(self.recent_list)
         # Due tasks header with overdue checkbox filter
         self.tasks_due_list = QTreeWidget()
         self.tasks_due_list.setColumnCount(4)
@@ -1362,6 +1398,7 @@ class CalendarPanel(QWidget):
             self.headings_list.clear()
         except Exception:
             pass
+        self.recent_list.clear()
         for date in dates:
             base_dir = Path(self.vault_root) / "Journal" / f"{date.year():04d}" / f"{date.month():02d}" / f"{date.day():02d}"
             date_label = date.toString("yyyy-MM-dd")
@@ -1400,6 +1437,8 @@ class CalendarPanel(QWidget):
             pass
         self.insight_counts.setText(f"Entries: {entries_count}  •  Subpages: {subpages_count}  •  Tasks: {self._due_task_count}")
         self.insight_tags.setText("Tags: " + (", ".join(unique_tags[:8]) if unique_tags else "—"))
+        # Populate recently edited for selected dates
+        self._populate_recent_modified(dates, current_path=current_path, expand_single=False)
         if current_path:
             for idx in range(self.subpage_list.count()):
                 it = self.subpage_list.item(idx)
@@ -1439,6 +1478,45 @@ class CalendarPanel(QWidget):
         elif day % 10 == 3 and day != 13:
             suffix = "rd"
         return f"{qdate.toString('ddd')} {qdate.toString('MMM')} {day}{suffix} {qdate.year()}"
+
+    def _populate_recent_modified(self, dates: list[QDate], *, current_path: Optional[str], expand_single: bool) -> None:
+        """Populate recent_list using the modified-files API."""
+        self.recent_list.clear()
+        if not self.vault_root or not dates:
+            return
+        if expand_single and len(dates) == 1:
+            d = dates[0]
+            span = [d.addDays(-1), d, d.addDays(1)]
+            dates = span
+        # Derive min/max ISO date strings
+        try:
+            start = min(dates, key=lambda d: d.toJulianDay())
+            end = max(dates, key=lambda d: d.toJulianDay())
+            start_str = start.toString("yyyy-MM-dd")
+            end_str = end.toString("yyyy-MM-dd")
+        except Exception:
+            return
+        try:
+            resp = self.http.post(f"{self.api_base}/api/files/modified", json={"start_date": start_str, "end_date": end_str})
+            resp.raise_for_status()
+            data = resp.json()
+            items = data.get("items", [])
+        except Exception:
+            return
+        for entry in items:
+            rel = entry.get("path", "")
+            if not rel or (current_path and rel == current_path):
+                continue
+            if not self.recent_journal_checkbox.isChecked() and rel.startswith("/Journal/"):
+                continue
+            label = Path(rel).stem
+            item = QListWidgetItem(label)
+            item.setData(PATH_ROLE, rel)
+            try:
+                item.setToolTip(rel)
+            except Exception:
+                pass
+            self.recent_list.addItem(item)
 
     def _priority_brush(self, level: int) -> Optional[dict]:
         """Return background/foreground for priority level."""
@@ -1561,6 +1639,7 @@ class CalendarPanel(QWidget):
             self.insight_title.setText("No date selected")
             self.insight_counts.setText("")
             self.insight_tags.setText("")
+            self.recent_list.clear()
             self.subpage_list.clear()
             try:
                 self.headings_list.clear()
@@ -1573,6 +1652,7 @@ class CalendarPanel(QWidget):
             self.insight_title.setText(self._pretty_date_label(date))
             self.insight_counts.setText("No journal entry.")
             self.insight_tags.setText("")
+            self.recent_list.clear()
             self.subpage_list.clear()
             try:
                 self.headings_list.clear()
@@ -1606,6 +1686,7 @@ class CalendarPanel(QWidget):
         self.insight_tags.setText("Tags: " + (", ".join(unique_tags[:8]) if unique_tags else "—"))
         # Populate pages + headings list
         self.subpage_list.clear()
+        self.recent_list.clear()
         try:
             self.headings_list.clear()
         except Exception:
@@ -1642,6 +1723,8 @@ class CalendarPanel(QWidget):
             item = QListWidgetItem(short)
             item.setData(PATH_ROLE, rel)
             self.subpage_list.addItem(item)
+        # Recently edited pages for the selected day (±1 day window)
+        self._populate_recent_modified([date], current_path=current_path, expand_single=True)
         # Highlight current page if provided
         if current_path:
             # Try headings first
@@ -1658,6 +1741,13 @@ class CalendarPanel(QWidget):
                         break
 
     def _open_insight_link(self, item: QListWidgetItem) -> None:
+        if not item:
+            return
+        path = item.data(PATH_ROLE)
+        if path:
+            self.pageActivated.emit(str(path))
+
+    def _open_recent_link(self, item: QListWidgetItem) -> None:
         if not item:
             return
         path = item.data(PATH_ROLE)

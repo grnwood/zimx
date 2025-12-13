@@ -4,6 +4,7 @@ import datetime as dt
 from pathlib import Path
 import shutil
 from typing import Dict, List
+from datetime import date, datetime
 
 
 PAGE_SUFFIX = ".txt"
@@ -153,6 +154,24 @@ def ensure_journal_today(root: Path, template: str | None = None) -> tuple[Path,
         content = template if template is not None else f"# {today:%A, %B %d, %Y}\n\n"
         page_file.write_text(content, encoding="utf-8")
     return page_file, created
+
+
+def list_files_modified_between(root: Path, start: date, end: date) -> List[Dict]:
+    """Return page files whose mtime falls between the given dates (inclusive)."""
+    results: List[Dict] = []
+    if start > end:
+        start, end = end, start
+    for path in root.rglob(f"*{PAGE_SUFFIX}"):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        mod_dt = datetime.fromtimestamp(mtime)
+        mod_date = mod_dt.date()
+        if start <= mod_date <= end:
+            rel = f"/{path.relative_to(root).as_posix()}"
+            results.append({"path": rel, "modified": mod_dt.isoformat()})
+    return results
 
 
 def create_directory(root: Path, path: str) -> None:
