@@ -26,6 +26,7 @@ from PySide6.QtCore import (
     QUrl,
     QPropertyAnimation,
     QMimeData,
+    QSignalBlocker,
 )
 from PySide6.QtGui import (
     QAction,
@@ -2183,17 +2184,19 @@ class MainWindow(QMainWindow):
             return
         self._tree_refresh_in_progress = True
         fetch_path = self._nav_filter_path or "/"
+        selection_model = self.tree_view.selectionModel()
+        selection_blocker = QSignalBlocker(selection_model) if selection_model else None
+        self.tree_view.setUpdatesEnabled(False)
         try:
-            resp = self.http.get("/api/vault/tree", params={"path": fetch_path, "recursive": "false"})
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            self._alert_api_error(exc, "Failed to load vault tree")
-            self._tree_refresh_in_progress = False
-            return
-        data = resp.json().get("tree", [])
-        self._tree_cache.clear()
+            try:
+                resp = self.http.get("/api/vault/tree", params={"path": fetch_path, "recursive": "false"})
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                self._alert_api_error(exc, "Failed to load vault tree")
+                return
+            data = resp.json().get("tree", [])
+            self._tree_cache.clear()
 
-        try:
             # Clear existing items and rebuild
             self.tree_model.clear()
             self.tree_model.setHorizontalHeaderLabels(["Vault"])
@@ -2220,10 +2223,10 @@ class MainWindow(QMainWindow):
                 banner.setBackground(QBrush(QColor("#c62828")))
                 banner.setData(FILTER_BANNER, PATH_ROLE)
                 self.tree_model.invisibleRootItem().appendRow(banner)
-        
+    
             # Check if Journal should be filtered
             show_journal = self.show_journal_button.isChecked()
-        
+    
             self._full_tree_data = data
             filtered_data = data
             if self._nav_filter_path:
@@ -2248,6 +2251,9 @@ class MainWindow(QMainWindow):
             if self._pending_tree_refresh:
                 self._pending_tree_refresh = False
                 QTimer.singleShot(0, self._populate_vault_tree)
+            self.tree_view.setUpdatesEnabled(True)
+            if selection_blocker:
+                del selection_blocker
         self.tree_view.collapseAll()
         try:
             self.tree_view.expandToDepth(1)
@@ -5212,6 +5218,18 @@ class MainWindow(QMainWindow):
                 return
             if not self._ensure_writable("delete pages or folders"):
                 return
+            # Remember a sensible sibling/parent to focus after deletion
+            delete_index = self.tree_view.currentIndex()
+            next_focus_path: Optional[str] = None
+            if delete_index.isValid():
+                # Prefer the visually previous item (regardless of hierarchy)
+                prev_index = self.tree_view.indexAbove(delete_index)
+                if prev_index.isValid():
+                    next_focus_path = prev_index.data(OPEN_ROLE) or prev_index.data(PATH_ROLE)
+                if not next_focus_path:
+                    parent_index = delete_index.parent()
+                    if parent_index.isValid():
+                        next_focus_path = parent_index.data(OPEN_ROLE) or parent_index.data(PATH_ROLE)
             confirm = QMessageBox(self)
             confirm.setIcon(QMessageBox.Warning)
             confirm.setWindowTitle("Delete")
@@ -5236,6 +5254,15 @@ class MainWindow(QMainWindow):
             result = confirm.exec()
             if result != QMessageBox.Yes:
                 return
+            deleting_current = bool(self.current_path and open_path and self.current_path == open_path)
+            if deleting_current:
+                try:
+                    self.editor.unload_for_delete()
+                except Exception:
+                    pass
+                self.current_path = None
+                self._skip_next_selection_open = True
+                self._pending_selection = next_focus_path or self._parent_path(self.tree_view.currentIndex())
             try:
                 resp = self.http.post("/api/path/delete", json={"path": folder_path})
                 resp.raise_for_status()
@@ -5247,13 +5274,29 @@ class MainWindow(QMainWindow):
                     store.delete_chats_under(target_folder)  # type: ignore[attr-defined]
                 except Exception:
                     pass
+            selection_model = self.tree_view.selectionModel()
+            if selection_model:
+                blocker = QSignalBlocker(selection_model)
+                try:
+                    self.tree_view.clearSelection()
+                    self.tree_view.setCurrentIndex(QModelIndex())
+                finally:
+                    del blocker
             
-            # Clear editor if we just deleted the currently open page
-            if self.current_path and open_path and self.current_path == open_path:
-                self.current_path = None
-                self.editor.set_markdown("")
-            
-            self._populate_vault_tree()
+            # Re-focus parent after refresh to avoid dangling selection on the deleted item
+            try:
+                if not self._pending_selection:
+                    parent_for_selection = Path(target_folder.lstrip("/")).parent.as_posix()
+                    if parent_for_selection in ("", "."):
+                        parent_for_selection = "/"
+                    else:
+                        parent_for_selection = f"/{parent_for_selection}"
+                    self._pending_selection = parent_for_selection
+            except Exception:
+                if not self._pending_selection:
+                    self._pending_selection = "/"
+            self._skip_next_selection_open = True
+            QTimer.singleShot(0, self._populate_vault_tree)
             self.right_panel.refresh_tasks()
             self.right_panel.refresh_calendar()
             self.right_panel.refresh_links(self.current_path)

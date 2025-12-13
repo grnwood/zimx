@@ -1617,6 +1617,29 @@ class MarkdownEditor(QTextEdit):
         # Ensure the editor has focus after loading and rendering
         self.setFocus()
 
+    def unload_for_delete(self) -> None:
+        """Clear the document safely when the current page is being deleted."""
+        blocker = QSignalBlocker(self)
+        doc_blocker = QSignalBlocker(self.document())
+        try:
+            self.setUpdatesEnabled(False)
+            try:
+                self.textChanged.disconnect(self._enforce_display_symbols)
+                self.textChanged.disconnect(self._schedule_heading_outline)
+            except Exception:
+                pass
+            self.document().clear()
+            self.clear()
+        finally:
+            self.setUpdatesEnabled(True)
+            try:
+                self.textChanged.connect(self._enforce_display_symbols)
+                self.textChanged.connect(self._schedule_heading_outline)
+            except Exception:
+                pass
+            del doc_blocker
+            del blocker
+
     def to_markdown(self) -> str:
         markdown = self._doc_to_markdown()
         markdown = self._normalize_markdown_images(markdown)
