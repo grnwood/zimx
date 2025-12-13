@@ -157,6 +157,13 @@ class TabbedRightPanel(QWidget):
             return self.ai_chat_panel.has_chat_for_path(relative_path)
         return False
 
+    def set_page_text_provider(self, provider) -> None:
+        """Provide calendar panel with live editor text for AI summaries."""
+        try:
+            self.calendar_panel.set_page_text_provider(provider)
+        except Exception:
+            pass
+
     def set_font_size(self, size: int) -> None:
         """Propagate font size changes to AI chat."""
         if self.ai_chat_panel:

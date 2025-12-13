@@ -4,10 +4,10 @@ from pathlib import Path
 import re
 import calendar
 from datetime import date as Date
-from typing import Optional
+from typing import Optional, Callable
 
 from PySide6.QtCore import Qt, Signal, QDate, QEvent, QTimer, QByteArray
-from PySide6.QtGui import QFont, QTextCharFormat, QKeyEvent, QColor
+from PySide6.QtGui import QFont, QTextCharFormat, QKeyEvent, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCalendarWidget,
@@ -28,12 +28,18 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QSizePolicy,
     QToolButton,
+    QTextBrowser,
+    QStyle,
 )
+from PySide6.QtCore import QSize
+from PySide6.QtSvg import QSvgRenderer
 from shiboken6 import Shiboken
 
 from zimx.server.adapters.files import PAGE_SUFFIX
 from zimx.app import config
 from .path_utils import path_to_colon
+from markdown import markdown as render_markdown
+from .ai_chat_panel import ApiWorker, ServerManager
 
 
 PATH_ROLE = Qt.UserRole + 1
@@ -70,6 +76,11 @@ class CalendarPanel(QWidget):
         self._header_save_timer.setSingleShot(True)
         self._header_save_timer.timeout.connect(self._save_header_state)
         self._due_task_count: int = 0
+        self._ai_enabled = config.load_enable_ai_chats()
+        self._ai_worker: ApiWorker | None = None
+        self._ai_response_buffer: str = ""
+        self._page_text_provider: Optional[Callable[[Optional[str]], str]] = None
+        self._ai_last_markdown: str = ""
 
         self.calendar = QCalendarWidget()
         self.calendar.setGridVisible(True)
@@ -112,7 +123,9 @@ class CalendarPanel(QWidget):
         self.day_insights_layout.setContentsMargins(8, 8, 8, 8)
         self.day_insights_layout.setSpacing(6)
         self.insight_title = QLabel("No date selected")
-        self.insight_title.setStyleSheet("font-weight: bold;")
+        self.insight_title.setStyleSheet(
+            "font-weight: bold; background:#30475e; color:white; padding:4px 8px; border-radius:4px;"
+        )
         # Title row with an optional Filter button when multiple days are selected
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
@@ -127,7 +140,9 @@ class CalendarPanel(QWidget):
         title_row.addWidget(self.filter_btn)
         self.insight_counts = QLabel("")
         self.insight_tags = QLabel("")
-        for lbl in (self.insight_title, self.insight_counts, self.insight_tags):
+        # Keep the date label on one line; allow counts and tags to wrap if needed.
+        self.insight_title.setWordWrap(False)
+        for lbl in (self.insight_counts, self.insight_tags):
             lbl.setWordWrap(True)
         # Add title row (label + optional filter button)
         title_container = QWidget()
@@ -273,6 +288,7 @@ class CalendarPanel(QWidget):
         self.journal_tree.setFocusPolicy(Qt.StrongFocus)
         self.journal_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.journal_tree.customContextMenuRequested.connect(self._open_context_menu)
+        self.ai_insights_panel: QWidget | None = self._build_ai_summary_panel() if self._ai_enabled else None
 
         # Wrap calendar with a top-aligned zoom row
         cal_container = QWidget()
@@ -298,7 +314,10 @@ class CalendarPanel(QWidget):
         # Vertical splitter for calendar + journal viewer
         self.right_splitter = QSplitter(Qt.Vertical)
         self.right_splitter.addWidget(cal_container)
-        self.right_splitter.addWidget(self.journal_tree)
+        if self.ai_insights_panel:
+            self.right_splitter.addWidget(self.ai_insights_panel)
+        else:
+            self.right_splitter.addWidget(self.journal_tree)
         self.right_splitter.setStretchFactor(0, 0)
         self.right_splitter.setStretchFactor(1, 1)
 
@@ -325,6 +344,10 @@ class CalendarPanel(QWidget):
 
         self.vault_root: Optional[str] = None
         self.setFocusPolicy(Qt.StrongFocus)
+
+    def set_page_text_provider(self, provider: Callable[[Optional[str]], str]) -> None:
+        """Allow caller to supply live editor text for a given page path (relative, with leading slash)."""
+        self._page_text_provider = provider
 
     def showEvent(self, event):  # type: ignore[override]
         """Ensure we hook the calendar view after widget is shown."""
@@ -420,9 +443,20 @@ class CalendarPanel(QWidget):
             self.filter_btn,
             self.zoom_in_btn,
             self.zoom_out_btn,
+            getattr(self, "ai_title_label", None),
+            getattr(self, "ai_delete_btn", None),
+            getattr(self, "ai_generate_btn", None),
+            getattr(self, "ai_copy_btn", None),
         ):
             try:
                 widget.setFont(font)
+            except Exception:
+                pass
+        if getattr(self, "ai_markdown_view", None):
+            try:
+                larger = QFont(font)
+                larger.setPointSizeF(max(6.0, larger.pointSizeF() * 1.15))
+                self.ai_markdown_view.setFont(larger)
             except Exception:
                 pass
 
@@ -439,6 +473,385 @@ class CalendarPanel(QWidget):
         except Exception:
             return
         config.save_header_state(self._header_state_key, state)
+
+    def _build_ai_summary_panel(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(6)
+        self.ai_title_label = QLabel("AI Insights")
+        self.ai_title_label.setStyleSheet("font-weight: bold;")
+        self.ai_delete_btn = QToolButton()
+        self.ai_delete_btn.setIcon(self._load_svg_icon("icons8-trash.svg", QSize(20, 20)))
+        self.ai_delete_btn.setToolTip("Delete AI summary for this day")
+        self.ai_delete_btn.setAutoRaise(True)
+        self.ai_delete_btn.clicked.connect(self._delete_ai_summary)
+        self.ai_copy_btn = QToolButton()
+        self.ai_copy_btn.setIcon(self._load_svg_icon("copy.svg", QSize(20, 20)))
+        self.ai_copy_btn.setToolTip("Copy AI summary markdown")
+        self.ai_copy_btn.setAutoRaise(True)
+        self.ai_copy_btn.clicked.connect(self._copy_ai_markdown)
+        self.ai_generate_btn = QToolButton()
+        self.ai_generate_btn.setIcon(self._load_ai_icon())
+        self.ai_generate_btn.setToolTip("Generate AI summary for this day")
+        self.ai_generate_btn.setAutoRaise(True)
+        self.ai_generate_btn.setIconSize(QSize(28, 28))
+        self.ai_generate_btn.clicked.connect(self._on_generate_ai_summary)
+        header.addWidget(self.ai_title_label)
+        header.addStretch(1)
+        header.addWidget(self.ai_delete_btn)
+        header.addWidget(self.ai_copy_btn)
+        header.addWidget(self.ai_generate_btn)
+        self.ai_markdown_view = QTextBrowser()
+        self.ai_markdown_view.setOpenExternalLinks(True)
+        self.ai_markdown_view.setReadOnly(True)
+        self.ai_markdown_view.setStyleSheet("background:#1f1f1f; color:#f0f0f0; border:1px solid #444; padding:10px;")
+        layout.addLayout(header)
+        layout.addWidget(self.ai_markdown_view, 1)
+        self._set_ai_markdown("Click buton to generate a AI summary")
+        return panel
+
+    def _find_asset(self, name: str) -> Optional[Path]:
+        candidates = [
+            Path(__file__).resolve().parents[2] / "assets" / name,
+            Path(__file__).resolve().parents[2] / "zimx" / "assets" / name,
+        ]
+        for path in candidates:
+            if path.exists():
+                return path
+        return None
+
+    def _load_svg_icon(self, name: str, size: QSize) -> QIcon:
+        path = self._find_asset(name)
+        if not path:
+            return QIcon()
+        try:
+            renderer = QSvgRenderer(str(path))
+            pixmap = QPixmap(size)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            renderer.render(painter)
+            painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+            painter.fillRect(pixmap.rect(), Qt.white)
+            painter.end()
+            return QIcon(pixmap)
+        except Exception:
+            return QIcon()
+
+    def _load_ai_icon(self) -> QIcon:
+        return self._load_svg_icon("ai.svg", QSize(28, 28))
+
+    def _set_ai_markdown(self, text: str) -> None:
+        if not getattr(self, "ai_markdown_view", None):
+            return
+        self._ai_last_markdown = text or ""
+        self._render_ai_markdown(self._ai_last_markdown)
+
+    def _render_ai_markdown(self, markdown_text: str) -> None:
+        if not getattr(self, "ai_markdown_view", None):
+            return
+        try:
+            cleaned = self._replace_emoji_with_fallback(markdown_text or "")
+            html = render_markdown(cleaned, extensions=["extra", "sane_lists", "tables", "fenced_code"])
+            style = """
+            <style>
+            body { background:#1f1f1f; color:#f0f0f0; font-size: 13px;
+                   font-family: 'Noto Sans', 'Segoe UI', 'Helvetica', 'Arial',
+                   'Noto Color Emoji', 'Segoe UI Emoji', 'Apple Color Emoji', sans-serif; }
+            h1,h2,h3,h4,h5,h6 { margin: 0.4em 0 0.2em 0; }
+            ul,ol { margin-top: 0.2em; margin-bottom: 0.2em; }
+            </style>
+            """
+            self.ai_markdown_view.setHtml(style + html)
+        except Exception:
+            try:
+                self.ai_markdown_view.setPlainText(markdown_text)
+            except Exception:
+                pass
+
+    def _replace_emoji_with_fallback(self, text: str) -> str:
+        """Replace emoji with monochrome fallbacks so they render even without emoji fonts."""
+        if not text:
+            return text
+        replacements = {
+            "📝": "✎",
+            "✅": "✔",
+            "✔️": "✔",
+            "📅": "📆",
+            "📎": "⎘",
+            "🧩": "◆",
+            "🔧": "🔧",
+            "🧭": "➤",
+            "🗒️": "✐",
+            "📌": "•",
+            "🎯": "◎",
+            "📍": "•",
+            "🗓️": "📆",
+            "🏷️": "⬦",
+            "👉": "→",
+            "⚡": "⚡",
+        }
+        for emoji, fallback in replacements.items():
+            text = text.replace(emoji, fallback)
+        return text
+
+    def _ai_summary_path_for_date(self, qdate: QDate) -> Optional[Path]:
+        if not self.vault_root or not qdate or not qdate.isValid():
+            return None
+        base_dir = Path(self.vault_root) / "Journal" / f"{qdate.year():04d}" / f"{qdate.month():02d}" / f"{qdate.day():02d}"
+        return base_dir / "AISummary" / f"AISummary{PAGE_SUFFIX}"
+
+    def _update_ai_summary_for_selection(self, dates: list[QDate]) -> None:
+        if not self._ai_enabled:
+            return
+        if not getattr(self, "ai_markdown_view", None):
+            return
+        if not self.vault_root or not config.has_active_vault():
+            self._set_ai_markdown("Open a vault to view AI summaries.")
+            return
+        if len(dates) != 1:
+            self._set_ai_markdown("Select a single day to view or generate a AI summary.")
+            return
+        date = dates[0]
+        if not date or not date.isValid():
+            self._set_ai_markdown("Select a single day to view or generate a AI summary.")
+            return
+        self._load_ai_summary_for_date(date)
+
+    def _load_ai_summary_for_date(self, qdate: QDate) -> None:
+        path = self._ai_summary_path_for_date(qdate)
+        if not path:
+            self._set_ai_markdown("Click buton to generate a AI summary")
+            return
+        if not path.exists():
+            self._set_ai_markdown("Click buton to generate a AI summary")
+            return
+        try:
+            text = path.read_text(encoding="utf-8")
+        except Exception:
+            try:
+                text = path.read_text(errors="ignore")
+            except Exception:
+                self._set_ai_markdown("Click buton to generate a AI summary")
+                return
+        self._set_ai_markdown(text.strip() or "Click buton to generate a AI summary")
+
+    def _read_day_text(self, qdate: QDate) -> str:
+        if not self.vault_root or not qdate or not qdate.isValid():
+            return ""
+        base_dir = Path(self.vault_root) / "Journal" / f"{qdate.year():04d}" / f"{qdate.month():02d}" / f"{qdate.day():02d}"
+        if not base_dir.exists():
+            return ""
+        parts: list[str] = []
+        day_page = base_dir / f"{base_dir.name}{PAGE_SUFFIX}"
+        main_rel: Optional[str] = None
+        try:
+            main_rel = "/" + day_page.relative_to(self.vault_root).as_posix()
+        except Exception:
+            main_rel = None
+        editor_text = ""
+        if self._page_text_provider and main_rel:
+            try:
+                editor_text = self._page_text_provider(main_rel) or ""
+            except Exception:
+                editor_text = ""
+        if editor_text.strip():
+            parts.append(editor_text)
+        elif day_page.exists():
+            try:
+                parts.append(day_page.read_text(encoding="utf-8"))
+            except Exception:
+                try:
+                    parts.append(day_page.read_text(errors="ignore"))
+                except Exception:
+                    pass
+        for _, rel in self._list_day_subpages(base_dir):
+            target = Path(self.vault_root) / rel.lstrip("/")
+            if not target.exists():
+                continue
+            try:
+                text = target.read_text(encoding="utf-8")
+            except Exception:
+                try:
+                    text = target.read_text(errors="ignore")
+                except Exception:
+                    continue
+            parts.append(f"## {Path(rel).stem}\n{text}")
+        return "\n\n".join(parts).strip()
+
+    def _resolve_ai_server_and_model(self) -> Optional[tuple[dict, str]]:
+        try:
+            server_mgr = ServerManager()
+        except Exception:
+            return None
+        server_config: dict = {}
+        try:
+            default_server_name = config.load_default_ai_server()
+        except Exception:
+            default_server_name = None
+        if default_server_name:
+            try:
+                server_config = server_mgr.get_server(default_server_name) or {}
+            except Exception:
+                server_config = {}
+        if not server_config:
+            try:
+                active = server_mgr.get_active_server_name()
+                if active:
+                    server_config = server_mgr.get_server(active) or {}
+            except Exception:
+                server_config = {}
+        if not server_config:
+            try:
+                servers = server_mgr.load_servers()
+                if servers:
+                    server_config = servers[0]
+            except Exception:
+                server_config = {}
+        if not server_config:
+            return None
+        try:
+            model = config.load_default_ai_model()
+        except Exception:
+            model = None
+        if not model:
+            model = server_config.get("default_model") or "gpt-3.5-turbo"
+        return server_config, model
+
+    def _on_generate_ai_summary(self) -> None:
+        if not self._ai_enabled:
+            return
+        if self._ai_worker and self._ai_worker.isRunning():
+            try:
+                self._ai_worker.request_cancel()
+            except Exception:
+                pass
+        if not self.vault_root or not config.has_active_vault():
+            self._set_ai_markdown("Open a vault to generate a AI summary.")
+            return
+        dates = sorted(self.multi_selected_dates or {self.calendar.selectedDate()}, key=lambda d: d.toJulianDay())
+        if len(dates) != 1:
+            self._set_ai_markdown("Select a single day to generate a AI summary.")
+            return
+        date = dates[0]
+        if not date or not date.isValid():
+            self._set_ai_markdown("Select a single day to generate a AI summary.")
+            return
+        day_text = self._read_day_text(date)
+        if not day_text.strip():
+            self._set_ai_markdown("No journal entry found for this date to summarize.")
+            return
+        prompt_path = Path(__file__).resolve().parents[1] / "calendar-day-insight-prompt.txt"
+        try:
+            prompt_text = prompt_path.read_text(encoding="utf-8")
+        except Exception:
+            self._set_ai_markdown("Failed to load AI summary prompt.")
+            return
+        prompt_text = prompt_text.replace("{{date}}", self._pretty_date_label(date))
+        server_model = self._resolve_ai_server_and_model()
+        if not server_model:
+            self._set_ai_markdown("Configure an AI server to generate a summary.")
+            return
+        server_config, model = server_model
+        messages = [
+            {"role": "system", "content": prompt_text},
+            {"role": "user", "content": f"Daily journal for {self._pretty_date_label(date)}:\n\n{day_text}"},
+        ]
+        self._ai_response_buffer = ""
+        self._set_ai_markdown("Generating AI summary…")
+        try:
+            self.ai_generate_btn.setEnabled(False)
+        except Exception:
+            pass
+        worker = ApiWorker(server_config, messages, model, stream=True)
+        self._ai_worker = worker
+        worker.chunk.connect(self._on_ai_chunk)
+        worker.finished.connect(lambda full, d=date: self._on_ai_finished(d, full))
+        worker.failed.connect(self._on_ai_failed)
+        worker.start()
+
+    def _on_ai_chunk(self, chunk: str) -> None:
+        self._ai_response_buffer += chunk or ""
+        if self._ai_response_buffer.strip():
+            self._ai_last_markdown = self._ai_response_buffer
+            self._render_ai_markdown(self._ai_last_markdown)
+
+    def _on_ai_finished(self, date: QDate, content: str) -> None:
+        try:
+            self.ai_generate_btn.setEnabled(True)
+        except Exception:
+            pass
+        final = content or self._ai_response_buffer
+        self._ai_response_buffer = final
+        if not final.strip():
+            self._set_ai_markdown("AI returned no content.")
+        else:
+            self._set_ai_markdown(final)
+            self._write_ai_summary(date, final)
+            # Refresh insights so the new summary shows as a subpage if applicable
+            self._update_insights_for_selection()
+        if self._ai_worker:
+            try:
+                self._ai_worker.deleteLater()
+            except Exception:
+                pass
+            self._ai_worker = None
+
+    def _on_ai_failed(self, message: str) -> None:
+        try:
+            self.ai_generate_btn.setEnabled(True)
+        except Exception:
+            pass
+        if not message:
+            message = "Failed to generate AI summary."
+        self._set_ai_markdown(message)
+        if self._ai_worker:
+            try:
+                self._ai_worker.deleteLater()
+            except Exception:
+                pass
+            self._ai_worker = None
+
+    def _copy_ai_markdown(self) -> None:
+        if not self._ai_enabled:
+            return
+        try:
+            clipboard = QApplication.clipboard()
+        except Exception:
+            return
+        payload = self._ai_last_markdown or ""
+        clipboard.setText(payload)
+
+    def _delete_ai_summary(self) -> None:
+        if not self._ai_enabled:
+            return
+        dates = sorted(self.multi_selected_dates or {self.calendar.selectedDate()}, key=lambda d: d.toJulianDay())
+        if len(dates) != 1:
+            self._set_ai_markdown("Select a single day to delete AI summary.")
+            return
+        date = dates[0]
+        path = self._ai_summary_path_for_date(date)
+        if not path:
+            self._set_ai_markdown("cick to generate")
+            return
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        self._set_ai_markdown("cick to generate")
+
+    def _write_ai_summary(self, date: QDate, content: str) -> None:
+        path = self._ai_summary_path_for_date(date)
+        if not path:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        except Exception:
+            pass
 
     def _on_month_changed(self, year: int, month: int) -> None:
         self._update_calendar_dates(year, month)
@@ -913,6 +1326,8 @@ class CalendarPanel(QWidget):
             dates_for_tasks = [date]
         # Update the due-tasks list first so insight counts reflect the visible rows
         self._update_due_tasks(dates_for_tasks)
+        if self._ai_enabled:
+            self._update_ai_summary_for_selection(dates_for_tasks)
         if self.multi_selected_dates:
             dates = sorted(self.multi_selected_dates, key=lambda d: d.toJulianDay())
             if len(dates) == 1:
@@ -1009,6 +1424,21 @@ class CalendarPanel(QWidget):
             row = QTreeWidgetItem(["", message, "", ""])
             row.setFlags(Qt.NoItemFlags)
             self.tasks_due_list.addTopLevelItem(row)
+
+    @staticmethod
+    def _pretty_date_label(qdate: QDate) -> str:
+        """Return a friendly date string like 'Wed Jan 7th 2025'."""
+        if not qdate.isValid():
+            return ""
+        day = qdate.day()
+        suffix = "th"
+        if day % 10 == 1 and day != 11:
+            suffix = "st"
+        elif day % 10 == 2 and day != 12:
+            suffix = "nd"
+        elif day % 10 == 3 and day != 13:
+            suffix = "rd"
+        return f"{qdate.toString('ddd')} {qdate.toString('MMM')} {day}{suffix} {qdate.year()}"
 
     def _priority_brush(self, level: int) -> Optional[dict]:
         """Return background/foreground for priority level."""
@@ -1140,7 +1570,7 @@ class CalendarPanel(QWidget):
             return
         base_dir = Path(self.vault_root) / "Journal" / f"{date.year():04d}" / f"{date.month():02d}" / f"{date.day():02d}"
         if not base_dir.exists():
-            self.insight_title.setText(date.toString("yyyy-MM-dd"))
+            self.insight_title.setText(self._pretty_date_label(date))
             self.insight_counts.setText("No journal entry.")
             self.insight_tags.setText("")
             self.subpage_list.clear()
@@ -1166,7 +1596,7 @@ class CalendarPanel(QWidget):
             tags.extend(re.findall(r"@(\w+)", text))
         unique_tags = sorted(set(tags))
         subpages_count = max(0, len(files) - 1)
-        self.insight_title.setText(f"{date.toString('yyyy-MM-dd')}")
+        self.insight_title.setText(self._pretty_date_label(date))
         # Hide filter when viewing a single day
         try:
             self.filter_btn.setVisible(False)

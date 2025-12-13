@@ -796,6 +796,7 @@ class MainWindow(QMainWindow):
         self.right_panel.openLinkWindowRequested.connect(self._open_link_panel_window)
         self.right_panel.openAiWindowRequested.connect(self._open_ai_chat_window)
         self.right_panel.filterClearRequested.connect(self._clear_nav_filter)
+        self.right_panel.set_page_text_provider(self._get_editor_text_for_path)
         try:
             self.right_panel.task_panel.focusGained.connect(self._suspend_vi_for_tasks)
         except Exception:
@@ -2255,10 +2256,6 @@ class MainWindow(QMainWindow):
             if selection_blocker:
                 del selection_blocker
         self.tree_view.collapseAll()
-        try:
-            self.tree_view.expandToDepth(1)
-        except Exception:
-            pass
         if self._pending_selection:
             self._select_tree_path(self._pending_selection)
             self._pending_selection = None
@@ -3813,6 +3810,25 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Editing {display_path}")
             else:
                 self.statusBar().showMessage("")
+
+    def _get_editor_text_for_path(self, rel_path: Optional[str]) -> str:
+        """Return live editor text when it matches the requested relative path."""
+        if not rel_path:
+            return ""
+        try:
+            target_norm = self._normalize_editor_path(rel_path)
+        except Exception:
+            target_norm = rel_path
+        try:
+            current_norm = self._normalize_editor_path(self.current_path) if self.current_path else None
+        except Exception:
+            current_norm = self.current_path
+        if target_norm and current_norm and target_norm == current_norm:
+            try:
+                return self.editor.toPlainText()
+            except Exception:
+                return ""
+        return ""
     
     def _normalize_editor_path(self, path: str) -> str:
         """Normalize incoming page refs (folder, colon, bare) to file path with leading slash."""
