@@ -198,6 +198,13 @@ class TabbedRightPanel(QWidget):
 
     def refresh_links(self, page_path=None) -> None:
         """Refresh the link navigator for the given page (or current)."""
+        try:
+            win = self.window()
+            if getattr(win, "_mode_window_pending", False) or getattr(win, "_mode_window", None):
+                QTimer.singleShot(100, lambda p=page_path: self.refresh_links(p))
+                return
+        except Exception:
+            pass
         self.link_panel.refresh(page_path)
 
     def focus_link_tab(self, page_path=None) -> None:

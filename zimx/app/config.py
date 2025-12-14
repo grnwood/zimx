@@ -210,13 +210,15 @@ def save_application_font(font: Optional[str]) -> None:
 def load_application_font_size() -> Optional[int]:
     """Return preferred application font size (None for system default)."""
     payload = _read_global_config()
+    if "application_font_size" not in payload:
+        return 11
     size = payload.get("application_font_size")
     if size is None:
         return None
     try:
         return max(6, int(size))
     except (TypeError, ValueError):
-        return None
+        return 11
 
 
 def save_application_font_size(size: Optional[int]) -> None:
@@ -238,6 +240,25 @@ def load_default_markdown_font() -> Optional[str]:
     if isinstance(font, str) and font.strip():
         return font.strip()
     return None
+
+
+def load_default_markdown_font_size(default: int = 12) -> int:
+    """Return preferred Markdown editor font size."""
+    payload = _read_global_config()
+    size = payload.get("default_markdown_font_size")
+    try:
+        return max(6, int(size))
+    except Exception:
+        return max(6, int(default))
+
+
+def save_default_markdown_font_size(size: int) -> None:
+    """Persist preferred Markdown editor font size."""
+    try:
+        value = max(6, int(size))
+    except Exception:
+        value = 12
+    _update_global_config({"default_markdown_font_size": value})
 
 
 def save_default_markdown_font(font: Optional[str]) -> None:
@@ -317,6 +338,8 @@ def load_focus_mode_settings() -> dict:
         "max_column_width_chars": 80,
         "typewriter_scrolling": False,
         "paragraph_focus": False,
+        "font_size": load_default_markdown_font_size(),
+        "font_scale": 1.0,
     }
     payload = _read_global_config()
     merged = _merge_mode_settings(payload.get("focus_mode", {}), defaults)
@@ -324,6 +347,14 @@ def load_focus_mode_settings() -> dict:
         merged["max_column_width_chars"] = max(40, min(999, int(merged.get("max_column_width_chars", defaults["max_column_width_chars"]))))
     except Exception:
         merged["max_column_width_chars"] = defaults["max_column_width_chars"]
+    try:
+        merged["font_size"] = max(6, int(merged.get("font_size", defaults["font_size"])))
+    except Exception:
+        merged["font_size"] = defaults["font_size"]
+    try:
+        merged["font_scale"] = max(0.5, min(2.5, float(merged.get("font_scale", defaults["font_scale"]))))
+    except Exception:
+        merged["font_scale"] = defaults["font_scale"]
     return merged
 
 
@@ -337,8 +368,7 @@ def save_focus_mode_settings(settings: dict) -> None:
 def load_audience_mode_settings() -> dict:
     """Return audience mode preferences merged with defaults."""
     defaults = {
-        "hide_side_panels": True,
-        "hide_toolbars": True,
+        "font_size": load_default_markdown_font_size(),
         "font_scale": 1.15,
         "line_height_scale": 1.15,
         "cursor_spotlight": True,
@@ -352,6 +382,10 @@ def load_audience_mode_settings() -> dict:
     settings = payload.get("audience_mode", {})
     merged = _merge_mode_settings(settings if isinstance(settings, dict) else {}, defaults)
     # Clamp reasonable ranges for numeric settings
+    try:
+        merged["font_size"] = max(6, int(merged.get("font_size", defaults["font_size"])))
+    except Exception:
+        merged["font_size"] = defaults["font_size"]
     try:
         merged["font_scale"] = max(1.0, min(2.5, float(merged.get("font_scale", defaults["font_scale"]))))
     except Exception:
@@ -939,7 +973,7 @@ def save_panel_font_size(key: str, size: int) -> None:
     _update_global_config({key: clamped})
 
 
-def load_global_editor_font_size(default: int = 14) -> int:
+def load_global_editor_font_size(default: int = 12) -> int:
     """Load the main editor font size from the global config JSON."""
     return load_panel_font_size("editor_font_size", default)
 

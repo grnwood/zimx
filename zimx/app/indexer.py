@@ -10,9 +10,10 @@ from zimx.app.ui.path_utils import colon_to_path, normalize_link_target
 from zimx.server.adapters.files import PAGE_SUFFIX
 
 # Bump this when task parsing logic changes to force re-index even if file hash is unchanged.
-INDEX_SCHEMA_VERSION = "task-parse-v3"
+INDEX_SCHEMA_VERSION = "task-parse-v4"
 
-TAG_PATTERN = re.compile(r"@(\w+)")
+# Match @tags that are not part of email addresses or similar identifiers.
+TAG_PATTERN = re.compile(r"(?<![\w.+-])@([A-Za-z0-9_]+)")
 # Markdown-style links: [label](target)
 MARKDOWN_LINK_PATTERN = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 # Wiki-style links used by the editor's storage format: [target|label]
@@ -117,8 +118,8 @@ def _extract_link_targets(content: str, current_path: Optional[str] = None) -> S
         if normalized:
             targets.add(normalized)
 
-    # Extract CamelCase/plus-prefixed links: +PageName
-    camel_pattern = re.compile(r"\+(?P<link>[A-Za-z][\w]*)")
+    # Extract CamelCase/plus-prefixed links: +PageName, only when separated by whitespace
+    camel_pattern = re.compile(r"(?<!\S)\+(?P<link>[A-Za-z][\w]*)(?=\s|$)")
     for match in camel_pattern.finditer(content):
         link = match.group("link")
         if link:

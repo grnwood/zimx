@@ -29,11 +29,14 @@ from zimx.app import config
 from zimx.server.adapters.files import PAGE_SUFFIX
 from .path_utils import path_to_colon
 
+TAG_PATTERN = re.compile(r"(?<![\w.+-])@([A-Za-z0-9_]+)")
+TAG_PREFIX_PATTERN = re.compile(r"(?<![\w.+-])@[\w_]*$")
+
 
 def _active_tag_token(text: str, cursor: int) -> Optional[str]:
     """Return the @tag token currently under the cursor, if any."""
     prefix = text[: max(cursor, 0)]
-    match = re.search(r"@[\w_]*$", prefix)
+    match = TAG_PREFIX_PATTERN.search(prefix)
     return match.group(0) if match else None
 
 
@@ -520,13 +523,13 @@ class TaskPanel(QWidget):
 
     def _parse_search_tags(self, text: str) -> tuple[str, Optional[list[str]], list[str]]:
         """Extract @tags from search text; return (query_without_tags, found_tags_or_None, missing_tags)."""
-        tags = re.findall(r"@([A-Za-z0-9_]+)", text)
+        tags = TAG_PATTERN.findall(text)
         if not tags:
             return text, None, []
         found = [t for t in tags if t in self._available_tags]
         missing = [t for t in tags if t not in self._available_tags]
         # Remove tags from query
-        query = re.sub(r"@([A-Za-z0-9_]+)", "", text).strip()
+        query = TAG_PATTERN.sub("", text).strip()
         return query, found, missing
 
     def _apply_search_tag_feedback(self, found: Optional[list[str]], missing: list[str]) -> None:

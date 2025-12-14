@@ -47,6 +47,7 @@ from PySide6.QtGui import (
     QIcon,
     QPainter,
     QPixmap,
+    QTextOption,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -557,6 +558,12 @@ class MainWindow(QMainWindow):
         self.tree_view.setHeaderHidden(True)
 
         self.editor = MarkdownEditor()
+        try:
+            temp_widget = QWidget()
+            self._default_editor_max_width = temp_widget.maximumWidth()
+            temp_widget.deleteLater()
+        except Exception:
+            self._default_editor_max_width = 16777215
         self.autosave_timer = QTimer(self)
         self.autosave_timer.setInterval(30_000)
         self.autosave_timer.setSingleShot(True)
@@ -601,11 +608,17 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            md_font_size = config.load_default_markdown_font_size()
+        except Exception:
+            md_font_size = 12
+        try:
             app_family = config.load_application_font()
-            app_font_size = config.load_application_font_size() or QApplication.instance().font().pointSize()
+            app_font_size = config.load_application_font_size()
+            if app_font_size is None and QApplication.instance():
+                app_font_size = QApplication.instance().font().pointSize()
         except Exception:
             app_family = None
-            app_font_size = 14
+            app_font_size = 11
         # Apply application font immediately (respect user preference)
         app = QApplication.instance()
         if app and app_font_size:
@@ -615,15 +628,16 @@ class MainWindow(QMainWindow):
                     font.setFamily(app_family)
                 font.setPointSize(max(6, app_font_size))
                 app.setFont(font)
-                config.save_application_font_size(app_font_size)
+                if app_font_size is not None:
+                    config.save_application_font_size(app_font_size)
             except Exception:
                 pass
-        # Normalize and clamp the stored application font size to a safe point size
+        # Normalize and clamp the stored editor font size to a safe point size
         try:
-            self.font_size = max(6, int(app_font_size))
+            base_md_size = max(6, int(md_font_size))
         except Exception:
-            self.font_size = 14
-        self.font_size = config.load_global_editor_font_size(self.font_size)
+            base_md_size = 12
+        self.font_size = config.load_global_editor_font_size(base_md_size)
         self.editor.set_font_point_size(self.font_size)
         self.editor.viInsertModeChanged.connect(self._on_vi_insert_state_changed)
         self._apply_vi_preferences()
@@ -2359,6 +2373,10 @@ class MainWindow(QMainWindow):
     def _open_file(self, path: str, retry: bool = False, add_to_history: bool = True, force: bool = False, cursor_at_end: bool = False, restore_history_cursor: bool = False) -> None:
         if not path or (path == self.current_path and not force):
             return
+        if getattr(self, "_mode_window_pending", False) or getattr(self, "_mode_window", None):
+            # Defer while a mode overlay is opening/closing to avoid scene clears during teardown.
+            QTimer.singleShot(100, lambda p=path, r=retry, a=add_to_history, f=force, c=cursor_at_end, rh=restore_history_cursor: self._open_file(p, r, a, f, c, rh))
+            return
         # Remember current cursor before switching pages
         self._remember_history_cursor()
         tracer = PageLoadLogger(path) if PAGE_LOGGING_ENABLED else None
@@ -3422,27 +3440,41 @@ class MainWindow(QMainWindow):
         normalized = (mode or "").lower()
         if normalized not in {"focus", "audience"}:
             return
-        if self._mode_window and getattr(self._mode_window, "mode", "") == normalized:
+        if not hasattr(self, "_pending_mode_target"):
+            self._pending_mode_target: str | None = None
+        if getattr(self, "_mode_window_pending", False):
+            return
+        if self._mode_window:
+            current_mode = getattr(self._mode_window, "mode", "")
+            if current_mode != normalized:
+                self._pending_mode_target = normalized
+                self._mode_window_pending = True
+                try:
+                    self._mode_window.close()
+                except Exception:
+                    self._mode_window_pending = False
+                return
+            self._mode_window_pending = True
             try:
                 self._mode_window.close()
             except Exception:
-                pass
+                self._mode_window_pending = False
             self._mode_window = None
             return
+        # If a reload is pending from a prior close, process it before opening another overlay.
+        if getattr(self, "_pending_reload_path", None) and not self._mode_window_pending:
+            self._process_mode_pending()
+            if self._mode_window_pending:
+                return
         if not (self.current_path or self.editor.toPlainText().strip()):
             self.statusBar().showMessage("Open a page before entering Focus/Audience mode", 3000)
             return
+        self._mode_window_pending = True
         # Remember cursor to seed overlay and restore later
         try:
             self._last_cursor_for_mode = int(self.editor.textCursor().position())
         except Exception:
             self._last_cursor_for_mode = 0
-        if self._mode_window:
-            try:
-                self._mode_window.close()
-            except Exception:
-                pass
-            self._mode_window = None
         settings = config.load_focus_mode_settings() if normalized == "focus" else config.load_audience_mode_settings()
         try:
             window = ModeWindow(
@@ -3457,21 +3489,85 @@ class MainWindow(QMainWindow):
                 parent=self,
             )
             window.closed.connect(self._on_mode_overlay_closed)
+            try:
+                window.ready.connect(self._on_mode_overlay_ready)
+            except Exception:
+                self._mode_window_pending = False
+                self._process_mode_pending()
             self._mode_window = window
             window.show()
         except Exception as exc:
             self._alert(f"Unable to open {normalized.title()} mode: {exc}")
+            self._mode_window_pending = False
+            self._process_mode_pending()
+
+    def _on_mode_overlay_ready(self) -> None:
+        self._mode_window_pending = False
+        self._process_mode_pending()
 
     def _on_mode_overlay_closed(self, mode: str, cursor_pos: int) -> None:
         """Reset state after an overlay window closes."""
+        self._mode_window_pending = False
         self._mode_window = None
+        pending_target = getattr(self, "_pending_mode_target", None)
+        self._pending_mode_target = None
+        if self.current_path:
+            self._pending_reload_path = self.current_path
+        self._restore_editor_width_constraints()
         try:
             cursor = self.editor.textCursor()
             cursor.setPosition(max(0, int(cursor_pos)))
             self.editor.setTextCursor(cursor)
         except Exception:
             pass
-        QTimer.singleShot(0, lambda: (self.editor.setFocus(Qt.ShortcutFocusReason), self._scroll_cursor_top_quarter()))
+        # Force a reload to drop any lingering overlay styling (e.g., width wrap) while keeping cursor.
+        if self.current_path:
+            try:
+                self._history_cursor_positions[self.current_path] = int(cursor_pos)
+            except Exception:
+                pass
+            # Save current buffer if it is dirty before reloading.
+            try:
+                if self.editor.document().isModified() and not self._read_only:
+                    self._save_current_file(auto=True)
+            except Exception:
+                pass
+        QTimer.singleShot(0, lambda: self.editor.setFocus(Qt.ShortcutFocusReason))
+        self._process_mode_pending(pending_target)
+
+    def _process_mode_pending(self, pending_target: str | None = None) -> None:
+        """Handle deferred reloads or mode switches once overlays are settled."""
+        if self._mode_window_pending:
+            return
+        reload_path = getattr(self, "_pending_reload_path", None)
+        self._pending_reload_path = None
+        if reload_path:
+            QTimer.singleShot(0, lambda p=reload_path: self._reload_page_preserve_cursor(p))
+        if pending_target:
+            QTimer.singleShot(0, lambda m=pending_target: self._toggle_mode_overlay(m))
+
+    def _restore_editor_width_constraints(self) -> None:
+        """Ensure the main editor isn't left with focus-mode width limits."""
+        try:
+            self.editor.setMaximumWidth(getattr(self, "_default_editor_max_width", 16777215))
+            self.editor.setMinimumWidth(max(self.editor.minimumWidth(), 200))
+            self.editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            # Reset wrap to widget width in case overlay altered document options.
+            try:
+                self.editor.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+                opt = self.editor.document().defaultTextOption()
+                opt.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+                self.editor.document().setDefaultTextOption(opt)
+            except Exception:
+                pass
+            for widget in (self.editor, self.editor.parentWidget(), getattr(self, "editor_split", None), getattr(self, "main_splitter", None)):
+                try:
+                    if widget:
+                        widget.updateGeometry()
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
     def _scroll_cursor_top_quarter(self) -> None:
         """Keep cursor near the top quarter of the viewport when regaining focus."""
@@ -6078,6 +6174,8 @@ class MainWindow(QMainWindow):
 
     def _update_dirty_indicator(self) -> None:
         """Refresh the dirty badge next to the VI indicator."""
+        if getattr(self, "_mode_window_pending", False) or getattr(self, "_mode_window", None):
+            return
         if not hasattr(self, "_dirty_status_label"):
             return
         if self._read_only:

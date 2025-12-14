@@ -89,6 +89,7 @@ class ModeWindow(QMainWindow):
     """Full-screen overlay window for Focus and Audience modes."""
 
     closed = Signal(str, int)  # Emits the mode label and cursor position when dismissed
+    ready = Signal()  # Emits when the overlay has fully initialized
 
     _HIGHLIGHT_KEY = 7021
 
@@ -113,17 +114,26 @@ class ModeWindow(QMainWindow):
             self._base_text_wrap = base_editor.document().defaultTextOption().wrapMode()
         except Exception:
             self._base_text_wrap = QTextOption.WrapAtWordBoundaryOrAnywhere
+        self._settings = settings or {}
         base_font = base_editor.font()
         self._base_font_family = base_font.family()
-        self._base_font_size = base_font.pointSizeF() or float(base_font.pointSize() or 14)
+        self._base_font_size = float(self._settings.get("font_size", config.load_default_markdown_font_size()))
         try:
             self._doc_default_font = QFont(base_editor.document().defaultFont())
         except Exception:
             self._doc_default_font = QFont(base_font)
+        self._base_min_width = base_editor.minimumWidth()
+        self._base_max_width = base_editor.maximumWidth()
+        try:
+            # Qt's default max is QWIDGETSIZE_MAX (typically 16777215); use it as a sane reset value.
+            temp_widget = QWidget()
+            self._default_max_width = temp_widget.maximumWidth()
+            temp_widget.deleteLater()
+        except Exception:
+            self._default_max_width = 16777215
         self._vault_root = vault_root
         self._page_path = page_path
         self._heading_provider = heading_provider
-        self._settings = settings or {}
         self._tools_timer = QTimer(self)
         self._tools_timer.setInterval(1600)
         self._tools_timer.setSingleShot(True)
@@ -133,6 +143,28 @@ class ModeWindow(QMainWindow):
         self._halo_rect_mode = True
         self._initial_cursor = initial_cursor
         self._scroll_anim: Optional[QPropertyAnimation] = None
+        self._ready = False
+        self._pending_close = False
+        self._shortcuts: list[QShortcut] = []
+        try:
+            # Suppress link scanning in both overlay and base editors during startup.
+            self.editor._suppress_link_scan = True
+            self._base_editor._suppress_link_scan = True
+            self.editor._suppress_vi_cursor = True
+            self._base_editor._suppress_vi_cursor = True
+            self.editor._cursor_events_blocked = True
+            self._base_editor._cursor_events_blocked = True
+            try:
+                type(self.editor)._LOAD_GUARD_DEPTH += 1
+            except Exception:
+                pass
+            self.editor._overlay_transition = True
+            self._base_editor._overlay_transition = True
+            self.editor._overlay_active = True
+            self._base_editor._overlay_active = True
+        except Exception:
+            pass
+        QTimer.singleShot(0, lambda: self._flash_cursor_line(self.editor))
 
         self.setWindowFlag(Qt.FramelessWindowHint, True)
         self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
@@ -144,6 +176,7 @@ class ModeWindow(QMainWindow):
         self._apply_mode_styling()
         self._position_overlays()
         QTimer.singleShot(0, self.showFullScreen)
+        QTimer.singleShot(0, self._mark_ready)
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self, read_only: bool) -> None:
@@ -177,7 +210,8 @@ class ModeWindow(QMainWindow):
             "QToolButton { background: #1c1f24; color: #f0f3f8; border: 1px solid #3b4251; padding: 6px 10px; border-radius: 10px; }"
             "QToolButton:hover { background: #2a303c; }"
         )
-        self._close_button.clicked.connect(self.close)
+        self._close_button.setEnabled(False)
+        self._close_button.clicked.connect(self._request_close)
         header.addWidget(self._close_button, 0, Qt.AlignRight)
         root.addLayout(header)
 
@@ -236,7 +270,7 @@ class ModeWindow(QMainWindow):
             "padding: 6px 10px; background: rgba(15, 19, 26, 0.9); color: #eaf1ff; "
             "border: 1px solid rgba(120, 140, 170, 0.7); border-radius: 10px; font-weight: bold;"
         )
-        self._mode_indicator.clicked.connect(self.close)
+        self._mode_indicator.clicked.connect(self._request_close)
         footer.addWidget(self._mode_indicator, 0, Qt.AlignRight)
         root.addLayout(footer)
 
@@ -291,40 +325,31 @@ class ModeWindow(QMainWindow):
         return layout
 
     def _wire_shortcuts(self) -> None:
+        def _add_shortcut(seq: QKeySequence | Qt.Key, handler) -> QShortcut:
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.ApplicationShortcut)
+            sc.setEnabled(False)  # Enabled once overlay reports ready
+            sc.activated.connect(handler)
+            self._shortcuts.append(sc)
+            return sc
+
         # Close by repeating the toggle key
         if self.mode == "focus":
             seq = "Ctrl+Alt+F"
         else:
             seq = "Ctrl+Alt+A"
-        close_shortcut = QShortcut(QKeySequence(seq), self)
-        close_shortcut.setContext(Qt.ApplicationShortcut)
-        close_shortcut.activated.connect(self.close)
+        _add_shortcut(seq, self._request_close)
 
         if self.mode == "audience":
-            inc = QShortcut(QKeySequence("Ctrl+Alt+="), self)
-            dec = QShortcut(QKeySequence("Ctrl+Alt+-"), self)
-            toggle_highlight = QShortcut(QKeySequence("Ctrl+Alt+H"), self)
-            toggle_scroll = QShortcut(QKeySequence("Ctrl+Alt+S"), self)
-            toggle_cursor = QShortcut(QKeySequence("Ctrl+Alt+C"), self)
-            for sc in (inc, dec, toggle_highlight, toggle_scroll, toggle_cursor):
-                sc.setContext(Qt.ApplicationShortcut)
-            inc.activated.connect(lambda: self._adjust_font_scale(0.05))
-            dec.activated.connect(lambda: self._adjust_font_scale(-0.05))
-            toggle_highlight.activated.connect(self._toggle_paragraph_highlight)
-            toggle_scroll.activated.connect(self._toggle_soft_scroll)
-            toggle_cursor.activated.connect(self._toggle_halo_mode)
-            ctrl_toggle = QShortcut(QKeySequence(Qt.Key_Control), self)
-            ctrl_toggle.setContext(Qt.ApplicationShortcut)
-            ctrl_toggle.activated.connect(self._toggle_halo_mode)
-        date_shortcut = QShortcut(QKeySequence("Ctrl+D"), self)
-        date_shortcut.setContext(Qt.ApplicationShortcut)
-        date_shortcut.activated.connect(self._insert_date)
-        find_shortcut = QShortcut(QKeySequence("Ctrl+F"), self)
-        find_shortcut.setContext(Qt.ApplicationShortcut)
-        find_shortcut.activated.connect(lambda: self._show_find_bar(replace=False, backwards=False))
-        replace_shortcut = QShortcut(QKeySequence("Ctrl+H"), self)
-        replace_shortcut.setContext(Qt.ApplicationShortcut)
-        replace_shortcut.activated.connect(lambda: self._show_find_bar(replace=True, backwards=False))
+            _add_shortcut("Ctrl+Alt+=", lambda: self._adjust_font_scale(0.05))
+            _add_shortcut("Ctrl+Alt+-", lambda: self._adjust_font_scale(-0.05))
+            _add_shortcut("Ctrl+Alt+H", self._toggle_paragraph_highlight)
+            _add_shortcut("Ctrl+Alt+S", self._toggle_soft_scroll)
+            _add_shortcut("Ctrl+Alt+C", self._toggle_halo_mode)
+            _add_shortcut(Qt.Key_Control, self._toggle_halo_mode)
+        _add_shortcut("Ctrl+D", self._insert_date)
+        _add_shortcut("Ctrl+F", lambda: self._show_find_bar(replace=False, backwards=False))
+        _add_shortcut("Ctrl+H", lambda: self._show_find_bar(replace=True, backwards=False))
 
     # ------------------------------------------------------------------ Behavior
     def _apply_mode_styling(self) -> None:
@@ -345,11 +370,8 @@ class ModeWindow(QMainWindow):
                 cursor = self.editor.textCursor()
                 cursor.setPosition(max(0, int(self._initial_cursor)))
                 self.editor.setTextCursor(cursor)
-                QTimer.singleShot(0, self._scroll_cursor_top_quarter)
             except Exception:
                 pass
-        else:
-            QTimer.singleShot(0, self._scroll_cursor_top_quarter)
 
         if self.mode == "focus" and self._settings.get("center_column", True):
             self._apply_center_column(int(self._settings.get("max_column_width_chars", 80)))
@@ -376,6 +398,8 @@ class ModeWindow(QMainWindow):
             pass
 
     def _update_paragraph_highlight(self) -> None:
+        if not getattr(self, "_ready", False) or self._should_block_highlight():
+            return
         enable = (
             (self.mode == "focus" and self._settings.get("paragraph_focus", False))
             or (self.mode == "audience" and self._settings.get("paragraph_highlight", True))
@@ -419,6 +443,16 @@ class ModeWindow(QMainWindow):
         self._cursor_halo.show()
         self._cursor_halo.raise_()
 
+    def _should_block_highlight(self) -> bool:
+        try:
+            if getattr(self.editor, "_cursor_events_blocked", False):
+                return True
+            if getattr(type(self.editor), "_LOAD_GUARD_DEPTH", 0) > 0:
+                return True
+        except Exception:
+            return True
+        return False
+
     def _show_find_bar(self, *, replace: bool, backwards: bool, seed: Optional[str] = None) -> None:
         query = (seed or "").strip()
         if not query:
@@ -449,7 +483,7 @@ class ModeWindow(QMainWindow):
         self.editor.search_replace_all(search_query, replacement, case_sensitive=case_sensitive)
 
     def _soft_autoscroll(self) -> None:
-        if self.mode != "audience" or not self._settings.get("soft_autoscroll", True):
+        if not self._ready or self.mode != "audience" or not self._settings.get("soft_autoscroll", True):
             return
         sb = self.editor.verticalScrollBar()
         viewport = self.editor.viewport()
@@ -476,7 +510,7 @@ class ModeWindow(QMainWindow):
             return
         if self._scroll_anim is None:
             self._scroll_anim = QPropertyAnimation(sb, b"value", self)
-            self._scroll_anim.setDuration(140)
+            self._scroll_anim.setDuration(220)
         elif self._scroll_anim.state() == QPropertyAnimation.Running:
             self._scroll_anim.stop()
         self._scroll_anim.setStartValue(sb.value())
@@ -484,7 +518,7 @@ class ModeWindow(QMainWindow):
         self._scroll_anim.start()
 
     def _typewriter_scroll(self) -> None:
-        if self.mode != "focus" or not self._settings.get("typewriter_scrolling", False):
+        if not self._ready or self.mode != "focus" or not self._settings.get("typewriter_scrolling", False):
             return
         sb = self.editor.verticalScrollBar()
         viewport = self.editor.viewport()
@@ -555,17 +589,19 @@ class ModeWindow(QMainWindow):
             self._update_cursor_halo()
 
     def _on_cursor_moved(self) -> None:
-        self._update_paragraph_highlight()
-        self._update_cursor_halo()
-        self._soft_autoscroll()
-        self._typewriter_scroll()
+        if getattr(self, "_ready", False) and not self._should_block_highlight():
+            self._update_paragraph_highlight()
+            self._update_cursor_halo()
+            self._soft_autoscroll()
+            self._typewriter_scroll()
 
     def _on_editor_text_changed(self) -> None:
         if self.mode == "audience" and getattr(self, "_audience_tools_frame", None):
             self._audience_tools_frame.hide()
             self._tools_timer.start()
         if self.mode == "audience" and self._settings.get("paragraph_highlight", True):
-            self._update_paragraph_highlight()
+            if getattr(self, "_ready", False) and not self._should_block_highlight():
+                self._update_paragraph_highlight()
 
     def _show_tools(self) -> None:
         frame = getattr(self, "_audience_tools_frame", None)
@@ -591,6 +627,21 @@ class ModeWindow(QMainWindow):
         return Path(self._page_path).name or self._page_path
 
     def closeEvent(self, event):  # type: ignore[override]
+        if not getattr(self, "_ready", True):
+            self._pending_close = True
+            event.ignore()
+            return
+        # Detach overlay editor from the shared document before teardown to avoid
+        # stale pointers while the base editor reloads.
+        try:
+            self.editor.setDocument(self._base_editor.document())
+        except Exception:
+            try:
+                from PySide6.QtGui import QTextDocument
+                self.editor.setDocument(QTextDocument())
+            except Exception:
+                pass
+        self._pending_close = False
         try:
             pos = 0
             try:
@@ -598,6 +649,20 @@ class ModeWindow(QMainWindow):
             except Exception:
                 pos = 0
             self.closed.emit(self.mode, pos)
+        except Exception:
+            pass
+        try:
+            self.editor._suppress_link_scan = False
+            self._base_editor._suppress_link_scan = False
+            self.editor._suppress_vi_cursor = False
+            self._base_editor._suppress_vi_cursor = False
+            QTimer.singleShot(0, lambda: setattr(self.editor, "_cursor_events_blocked", False))
+            QTimer.singleShot(0, lambda: setattr(self._base_editor, "_cursor_events_blocked", False))
+            QTimer.singleShot(0, lambda: setattr(type(self.editor), "_LOAD_GUARD_DEPTH", max(0, getattr(type(self.editor), "_LOAD_GUARD_DEPTH", 0) - 1)))
+            self.editor._overlay_transition = False
+            self._base_editor._overlay_transition = False
+            self.editor._overlay_active = False
+            self._base_editor._overlay_active = False
         except Exception:
             pass
         # Restore wrap state on the base editor to avoid leaking overlay changes.
@@ -621,14 +686,64 @@ class ModeWindow(QMainWindow):
         except Exception:
             pass
         try:
+            self.editor._suppress_link_scan = False
+            self._base_editor._suppress_link_scan = False
+            self.editor._suppress_vi_cursor = False
+            self._base_editor._suppress_vi_cursor = False
+        except Exception:
+            pass
+        try:
             self._base_editor.set_font_point_size(self._base_font_size)
             base_font = self._base_editor.font()
             base_font.setFamily(self._base_font_family)
             self._base_editor.setFont(base_font)
+            self._base_editor.setMinimumWidth(self._base_min_width)
+            # Always restore to an unconstrained width so the main editor isn't left narrow.
+            self._base_editor.setMaximumWidth(getattr(self, "_default_max_width", 16777215))
+            self._base_editor.updateGeometry()
         except Exception:
             pass
         super().closeEvent(event)
-        QTimer.singleShot(0, self._scroll_cursor_top_quarter)
+        # Flash the main editor cursor line after returning without scrolling.
+        QTimer.singleShot(20, lambda: self._flash_cursor_line(self._base_editor))
+
+    def _request_close(self) -> None:
+        """Delay closing until the overlay is fully initialized."""
+        if not self._ready:
+            self._pending_close = True
+            return
+        self.close()
+
+    def _mark_ready(self) -> None:
+        """Mark the window as ready; allow close actions queued during init."""
+        self._ready = True
+        if hasattr(self, "_close_button") and self._close_button:
+            self._close_button.setEnabled(True)
+        if self._shortcuts:
+            for sc in self._shortcuts:
+                try:
+                    sc.setEnabled(True)
+                except Exception:
+                    continue
+        try:
+            self.ready.emit()
+        except Exception:
+            pass
+        try:
+            self.editor._suppress_link_scan = False
+            self._base_editor._suppress_link_scan = False
+            self.editor._suppress_vi_cursor = False
+            self._base_editor._suppress_vi_cursor = False
+            QTimer.singleShot(0, lambda: setattr(self.editor, "_cursor_events_blocked", False))
+            QTimer.singleShot(0, lambda: setattr(self._base_editor, "_cursor_events_blocked", False))
+            QTimer.singleShot(0, lambda: setattr(type(self.editor), "_LOAD_GUARD_DEPTH", max(0, getattr(type(self.editor), "_LOAD_GUARD_DEPTH", 0) - 1)))
+            self.editor._overlay_transition = False
+            self._base_editor._overlay_transition = False
+        except Exception:
+            pass
+        if self._pending_close:
+            self._pending_close = False
+            QTimer.singleShot(0, self.close)
 
     def _update_vi_badge(self, insert_active: bool) -> None:
         if not hasattr(self, "_vi_badge"):
@@ -657,17 +772,64 @@ class ModeWindow(QMainWindow):
             pass
         self._update_cursor_halo()
 
-    def _scroll_cursor_top_quarter(self) -> None:
-        """Keep the cursor near the top quarter of the viewport for continuity."""
+    def _scroll_cursor_center(self, tolerance_px: int = 12, animated: bool = True) -> None:
+        """Scroll so the existing cursor stays selected but is centered in the viewport."""
         sb = self.editor.verticalScrollBar()
         viewport = self.editor.viewport()
         if not sb or not viewport:
             return
         rect = self.editor.cursorRect()
-        target = int(viewport.height() * 0.25)
-        delta = rect.top() - target
-        if delta:
-            sb.setValue(max(sb.minimum(), min(sb.maximum(), sb.value() + delta)))
+        target_center = viewport.height() // 2
+        delta = rect.center().y() - target_center
+        if abs(delta) <= tolerance_px:
+            return
+        target_value = max(sb.minimum(), min(sb.maximum(), sb.value() + delta))
+        if not animated:
+            sb.setValue(target_value)
+            return
+        duration = 260 if self.mode == "audience" else 200
+        if self._scroll_anim is None:
+            self._scroll_anim = QPropertyAnimation(sb, b"value", self)
+        else:
+            try:
+                self._scroll_anim.stop()
+                self._scroll_anim.setTargetObject(sb)
+            except Exception:
+                pass
+        try:
+            self._scroll_anim.setDuration(duration)
+            self._scroll_anim.setStartValue(sb.value())
+            self._scroll_anim.setEndValue(target_value)
+            self._scroll_anim.start()
+        except Exception:
+            sb.setValue(target_value)
+        # Cursor/selection already maintained by QTextEdit when scrolling via scrollbar.
+
+    def _flash_cursor_line(self, editor: Optional[MarkdownEditor]) -> None:
+        """Briefly flash the line under the cursor to guide the eye."""
+        if not editor:
+            return
+        try:
+            cursor = editor.textCursor()
+            sel = QTextEdit.ExtraSelection()
+            sel.cursor = cursor
+            sel.cursor.clearSelection()
+            sel.format.setBackground(QColor("#ffd54f"))
+            sel.format.setProperty(QTextFormat.FullWidthSelection, True)
+            sel.format.setProperty(QTextFormat.UserProperty, 9991)
+            current = editor.extraSelections()
+            editor.setExtraSelections(current + [sel])
+
+            def clear_flash() -> None:
+                try:
+                    keep = [s for s in editor.extraSelections() if s.format.property(QTextFormat.UserProperty) != 9991]
+                    editor.setExtraSelections(keep)
+                except Exception:
+                    pass
+
+            QTimer.singleShot(220, clear_flash)
+        except Exception:
+            pass
 
     def _insert_date(self) -> None:
         """Show calendar/date dialog and insert selected date in the overlay editor."""

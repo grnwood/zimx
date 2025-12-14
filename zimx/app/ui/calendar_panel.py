@@ -44,6 +44,7 @@ from .ai_chat_panel import ApiWorker, ServerManager
 
 PATH_ROLE = Qt.UserRole + 1
 LINE_ROLE = Qt.UserRole + 2
+TAG_PATTERN = re.compile(r"(?<![\w.+-])@([A-Za-z0-9_]+)")
 
 
 class CalendarPanel(QWidget):
@@ -1425,7 +1426,7 @@ class CalendarPanel(QWidget):
                 text = file.read_text(encoding="utf-8")
             except Exception:
                 continue
-            tags.extend(re.findall(r"@(\w+)", text))
+            tags.extend(TAG_PATTERN.findall(text))
         unique_tags = sorted(set(tags))
         entries_count = len(total_files)
         subpages_count = max(0, entries_count - day_entries)
@@ -1673,7 +1674,7 @@ class CalendarPanel(QWidget):
                 text = file.read_text(encoding="utf-8")
             except Exception:
                 continue
-            tags.extend(re.findall(r"@(\w+)", text))
+            tags.extend(TAG_PATTERN.findall(text))
         unique_tags = sorted(set(tags))
         subpages_count = max(0, len(files) - 1)
         self.insight_title.setText(self._pretty_date_label(date))

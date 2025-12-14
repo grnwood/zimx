@@ -117,6 +117,21 @@ class PreferencesDialog(QDialog):
         self.focus_width_spin.setValue(int(focus_settings.get("max_column_width_chars", 80)))
         row_focus_width.addWidget(self.focus_width_spin, 1)
         task_layout.addLayout(row_focus_width)
+        row_focus_font = QHBoxLayout()
+        row_focus_font.addWidget(QLabel("Focus mode font size:"))
+        self.focus_font_size_spin = QSpinBox()
+        self.focus_font_size_spin.setRange(6, 72)
+        self.focus_font_size_spin.setValue(int(focus_settings.get("font_size", 12)))
+        row_focus_font.addWidget(self.focus_font_size_spin, 1)
+        task_layout.addLayout(row_focus_font)
+        row_focus_scale = QHBoxLayout()
+        row_focus_scale.addWidget(QLabel("Focus mode font scale:"))
+        self.focus_font_scale_spin = QDoubleSpinBox()
+        self.focus_font_scale_spin.setRange(0.5, 2.5)
+        self.focus_font_scale_spin.setSingleStep(0.05)
+        self.focus_font_scale_spin.setValue(float(focus_settings.get("font_scale", 1.0)))
+        row_focus_scale.addWidget(self.focus_font_scale_spin, 1)
+        task_layout.addLayout(row_focus_scale)
         self.focus_typewriter_checkbox = QCheckBox("Enable typewriter scrolling")
         self.focus_typewriter_checkbox.setChecked(focus_settings.get("typewriter_scrolling", False))
         task_layout.addWidget(self.focus_typewriter_checkbox)
@@ -124,12 +139,6 @@ class PreferencesDialog(QDialog):
         self.focus_paragraph_checkbox.setChecked(focus_settings.get("paragraph_focus", False))
         task_layout.addWidget(self.focus_paragraph_checkbox)
         task_layout.addWidget(QLabel("<b>Audience Mode</b>"))
-        self.audience_hide_panels_checkbox = QCheckBox("Hide side panels")
-        self.audience_hide_panels_checkbox.setChecked(audience_settings.get("hide_side_panels", True))
-        task_layout.addWidget(self.audience_hide_panels_checkbox)
-        self.audience_hide_toolbar_checkbox = QCheckBox("Hide toolbars/header")
-        self.audience_hide_toolbar_checkbox.setChecked(audience_settings.get("hide_toolbars", True))
-        task_layout.addWidget(self.audience_hide_toolbar_checkbox)
         self.audience_center_column_checkbox = QCheckBox("Centered column")
         self.audience_center_column_checkbox.setChecked(audience_settings.get("center_column", True))
         task_layout.addWidget(self.audience_center_column_checkbox)
@@ -140,6 +149,13 @@ class PreferencesDialog(QDialog):
         self.audience_width_spin.setValue(int(audience_settings.get("max_column_width_chars", 120)))
         row_a_width.addWidget(self.audience_width_spin, 1)
         task_layout.addLayout(row_a_width)
+        row_a_base = QHBoxLayout()
+        row_a_base.addWidget(QLabel("Audience base font size:"))
+        self.audience_font_size_spin = QSpinBox()
+        self.audience_font_size_spin.setRange(6, 72)
+        self.audience_font_size_spin.setValue(int(audience_settings.get("font_size", 12)))
+        row_a_base.addWidget(self.audience_font_size_spin, 1)
+        task_layout.addLayout(row_a_base)
         row_a_font = QHBoxLayout()
         row_a_font.addWidget(QLabel("Font scale:"))
         self.audience_font_scale_spin = QDoubleSpinBox()
@@ -208,8 +224,8 @@ class PreferencesDialog(QDialog):
             size_val = config.load_application_font_size()
         except Exception:
             size_val = None
-        default_size = QApplication.instance().font().pointSize() if QApplication.instance() else 12
-        self.application_font_size_spin.setValue(size_val or max(6, default_size))
+        default_size = 11
+        self.application_font_size_spin.setValue(size_val if size_val is not None else default_size)
         self.application_font_size_spin.setToolTip("Set 0 to use system default size.")
         self.application_font_size_spin.valueChanged.connect(self._apply_application_font_live)
         row_fonts_size.addWidget(self.application_font_size_spin, 1)
@@ -226,6 +242,17 @@ class PreferencesDialog(QDialog):
         self.markdown_font_combo.currentIndexChanged.connect(self._warn_restart_required)
         row_fonts_md.addWidget(self.markdown_font_combo, 1)
         font_layout.addLayout(row_fonts_md)
+        row_fonts_md_size = QHBoxLayout()
+        row_fonts_md_size.addWidget(QLabel("Default Markdown font size:"))
+        self.markdown_font_size_spin = QSpinBox()
+        self.markdown_font_size_spin.setRange(6, 72)
+        try:
+            md_font_size = config.load_default_markdown_font_size()
+        except Exception:
+            md_font_size = 12
+        self.markdown_font_size_spin.setValue(md_font_size)
+        row_fonts_md_size.addWidget(self.markdown_font_size_spin, 1)
+        font_layout.addLayout(row_fonts_md_size)
 
         self.minimal_font_scan_checkbox = QCheckBox("Use Minimal Font Scan (For Fast Window Startup)")
         try:
@@ -479,6 +506,7 @@ class PreferencesDialog(QDialog):
         config.save_application_font_size(size_val if size_val > 0 else None)
         md_font = self._font_value(self.markdown_font_combo)
         config.save_default_markdown_font(md_font)
+        config.save_default_markdown_font_size(self.markdown_font_size_spin.value())
         config.save_minimal_font_scan_enabled(self.minimal_font_scan_checkbox.isChecked())
         config.save_focus_mode_settings(
             {
@@ -486,14 +514,15 @@ class PreferencesDialog(QDialog):
                 "max_column_width_chars": self.focus_width_spin.value(),
                 "typewriter_scrolling": self.focus_typewriter_checkbox.isChecked(),
                 "paragraph_focus": self.focus_paragraph_checkbox.isChecked(),
+                "font_size": self.focus_font_size_spin.value(),
+                "font_scale": self.focus_font_scale_spin.value(),
             }
         )
         config.save_audience_mode_settings(
             {
-                "hide_side_panels": self.audience_hide_panels_checkbox.isChecked(),
-                "hide_toolbars": self.audience_hide_toolbar_checkbox.isChecked(),
                 "center_column": self.audience_center_column_checkbox.isChecked(),
                 "max_column_width_chars": self.audience_width_spin.value(),
+                "font_size": self.audience_font_size_spin.value(),
                 "font_scale": self.audience_font_scale_spin.value(),
                 "line_height_scale": self.audience_line_height_spin.value(),
                 "cursor_spotlight": self.audience_cursor_checkbox.isChecked(),

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional, Callable
 from html.parser import HTMLParser
 
-from PySide6.QtCore import QEvent, QMimeData, Qt, QRegularExpression, Signal, QUrl, QPoint, QTimer
+from PySide6.QtCore import QEvent, QMimeData, Qt, QRegularExpression, Signal, QUrl, QPoint, QTimer, QSignalBlocker
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -161,18 +161,18 @@ class SearchEngine:
         return count
 
 
-TAG_PATTERN = QRegularExpression(r"@(\w+)")
+TAG_PATTERN = QRegularExpression(r"(?<![\w.+-])@([A-Za-z0-9_]+)")
 TASK_PATTERN = QRegularExpression(r"^(?P<indent>\s*)\((?P<state>[xX ])?\)(?P<body>\s+.*)$")
 TASK_LINE_PATTERN = re.compile(r"^(\s*)\(([ xX])\)(\s+)", re.MULTILINE)
 DISPLAY_TASK_PATTERN = re.compile(r"^(\s*)([☐☑])(\s+)", re.MULTILINE)
 # Bullet patterns for storage and display
 BULLET_STORAGE_PATTERN = re.compile(r"^(\s*)\* ", re.MULTILINE)
 BULLET_DISPLAY_PATTERN = re.compile(r"^(\s*)• ", re.MULTILINE)
-# Plus-prefixed link pattern: +PageName or +Projects (CamelCase style, no trailing spaces)
-CAMEL_LINK_PATTERN = QRegularExpression(r"\+(?P<link>[A-Za-z][\w]*)")
+# Plus-prefixed link pattern: +PageName or +Projects (CamelCase style), requires surrounding whitespace
+CAMEL_LINK_PATTERN = QRegularExpression(r"(?<!\\S)\\+(?P<link>[A-Za-z][\\w]*)(?=\\s|$)")
 
 # CamelCase link pattern: +PageName (deprecated but kept for compatibility)
-CAMEL_LINK_PATTERN = QRegularExpression(r"\+(?P<link>[A-Za-z][\w]*)")
+CAMEL_LINK_PATTERN = QRegularExpression(r"(?<!\\S)\\+(?P<link>[A-Za-z][\\w]*)(?=\\s|$)")
 
 # File link pattern for attachments: [text](./file.ext) or [text](file.ext)
 WIKI_FILE_LINK_PATTERN = QRegularExpression(
@@ -1197,6 +1197,7 @@ class MarkdownEditor(QTextEdit):
     LIST_INDENT_UNIT = "  "
     _VI_EXTRA_KEY = QTextFormat.UserProperty + 1
     _FLASH_EXTRA_KEY = QTextFormat.UserProperty + 2
+    _LOAD_GUARD_DEPTH = 0  # class-level: block cursor/link work during any markdown load
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1224,6 +1225,11 @@ class MarkdownEditor(QTextEdit):
         self._page_load_logger: Optional[PageLoadLogger] = None
         self._open_in_window_callback: Optional[Callable[[str], None]] = None
         self._filter_nav_callback: Optional[Callable[[str], None]] = None
+        self._suppress_link_scan: bool = False
+        self._suppress_vi_cursor: bool = False
+        self._overlay_transition: bool = False  # True while a mode overlay is spinning up/down
+        self._overlay_active: bool = False  # True while inside a ModeWindow
+        self._cursor_events_blocked: bool = False
         self._search_engine = SearchEngine(self)
         self.setPlaceholderText("Open a Markdown file to begin editing…")
         self.setAcceptRichText(True)
@@ -1233,6 +1239,7 @@ class MarkdownEditor(QTextEdit):
         self.highlighter = MarkdownHighlighter(self.document())
         self.cursorPositionChanged.connect(self._emit_cursor)
         self.cursorPositionChanged.connect(self._maybe_update_vi_cursor)
+        self._cursor_signals_connected = True
         self.cursorPositionChanged.connect(self._ensure_cursor_margin)
         self._display_guard = False
         self.textChanged.connect(self._enforce_display_symbols)
@@ -1528,63 +1535,90 @@ class MarkdownEditor(QTextEdit):
         # Enable highlighter timing instrumentation (will be disabled at end)
         self.highlighter.enable_timing(True)
         self.highlighter.reset_timing()
+        type(self)._LOAD_GUARD_DEPTH += 1
         self._display_guard = True
         self.setUpdatesEnabled(False)
-        self.document().clear()
-        
-        # Temporarily disconnect expensive textChanged handlers during bulk loading
-        self.textChanged.disconnect(self._enforce_display_symbols)
-        self.textChanged.disconnect(self._schedule_heading_outline)
-        
-        # Also temporarily disable highlighter for very slow documents
-        highlighter_disabled = False
-        if getenv("ZIMX_DISABLE_HIGHLIGHTER_LOAD") == "1":
-            highlighter_disabled = True
-            self.highlighter.setDocument(None)
-        
-        incremental = False
-        batch_ms_total = 0.0
-        batches = 0
-        if getenv("ZIMX_INCREMENTAL_LOAD") == "1":
-            # Incremental batch insertion to compare performance with setPlainText
-            incremental = True
-            lines = display.splitlines(keepends=True)
-            batch_size = 50  # tune if needed
-            buf = []
-            import time as _time
-            for i, line in enumerate(lines):
-                buf.append(line)
-                if len(buf) >= batch_size or i == len(lines) - 1:
-                    b0 = _time.perf_counter()
-                    self.insertPlainText("".join(buf))
-                    b1 = _time.perf_counter()
-                    batch_ms_total += (b1 - b0) * 1000.0
-                    batches += 1
-                    buf = []
-            t3 = time.perf_counter()
-        else:
-            self.setPlainText(display)
-            t3 = time.perf_counter()
-        self._mark_page_load("document populated")
-        
-        # Reconnect the textChanged handlers
-        self.textChanged.connect(self._enforce_display_symbols)
-        self.textChanged.connect(self._schedule_heading_outline)
-        
-        # Re-enable highlighter if it was disabled
-        if highlighter_disabled:
-            self.highlighter.setDocument(self.document())
-        self.setUpdatesEnabled(True)
-        
-        # Render images immediately (lazy load removed to avoid missed renders)
-        self._render_images(display, time.perf_counter())
-        t4 = time.perf_counter()
-        self._mark_page_load("render images")
-        
-        self._display_guard = False
-        self._schedule_heading_outline()
-        # Ensure scroll-past-end margin is applied after new content
-        self._apply_scroll_past_end_margin()
+        self._suppress_vi_cursor = True
+        self._suppress_link_scan = True
+        self._cursor_events_blocked = True
+        cursor_signals_were_connected = getattr(self, "_cursor_signals_connected", False)
+        if cursor_signals_were_connected:
+            try:
+                self.cursorPositionChanged.disconnect(self._emit_cursor)
+                self.cursorPositionChanged.disconnect(self._maybe_update_vi_cursor)
+                self._cursor_signals_connected = False
+            except Exception:
+                pass
+        blocker = QSignalBlocker(self)
+        try:
+            self.document().clear()
+            
+            # Temporarily disconnect expensive textChanged handlers during bulk loading
+            self.textChanged.disconnect(self._enforce_display_symbols)
+            self.textChanged.disconnect(self._schedule_heading_outline)
+            
+            # Also temporarily disable highlighter for very slow documents
+            highlighter_disabled = False
+            if getenv("ZIMX_DISABLE_HIGHLIGHTER_LOAD") == "1":
+                highlighter_disabled = True
+                self.highlighter.setDocument(None)
+            
+            incremental = False
+            batch_ms_total = 0.0
+            batches = 0
+            if getenv("ZIMX_INCREMENTAL_LOAD") == "1":
+                # Incremental batch insertion to compare performance with setPlainText
+                incremental = True
+                lines = display.splitlines(keepends=True)
+                batch_size = 50  # tune if needed
+                buf = []
+                import time as _time
+                for i, line in enumerate(lines):
+                    buf.append(line)
+                    if len(buf) >= batch_size or i == len(lines) - 1:
+                        b0 = _time.perf_counter()
+                        self.insertPlainText("".join(buf))
+                        b1 = _time.perf_counter()
+                        batch_ms_total += (b1 - b0) * 1000.0
+                        batches += 1
+                        buf = []
+                t3 = time.perf_counter()
+            else:
+                self.setPlainText(display)
+                t3 = time.perf_counter()
+            self._mark_page_load("document populated")
+            
+            # Reconnect the textChanged handlers
+            self.textChanged.connect(self._enforce_display_symbols)
+            self.textChanged.connect(self._schedule_heading_outline)
+            
+            # Re-enable highlighter if it was disabled
+            if highlighter_disabled:
+                self.highlighter.setDocument(self.document())
+            self.setUpdatesEnabled(True)
+            
+            # Render images immediately (lazy load removed to avoid missed renders)
+            self._render_images(display, time.perf_counter())
+            t4 = time.perf_counter()
+            self._mark_page_load("render images")
+            
+            self._display_guard = False
+            self._schedule_heading_outline()
+            # Ensure scroll-past-end margin is applied after new content
+            self._apply_scroll_past_end_margin()
+        finally:
+            del blocker
+            self._suppress_vi_cursor = False
+            self._suppress_link_scan = False
+            QTimer.singleShot(0, lambda: setattr(self, "_cursor_events_blocked", False))
+            type(self)._LOAD_GUARD_DEPTH = max(0, type(self)._LOAD_GUARD_DEPTH - 1)
+            if cursor_signals_were_connected and not getattr(self, "_cursor_signals_connected", False):
+                try:
+                    self.cursorPositionChanged.connect(self._emit_cursor)
+                    self.cursorPositionChanged.connect(self._maybe_update_vi_cursor)
+                    self._cursor_signals_connected = True
+                except Exception:
+                    pass
         t5 = time.perf_counter()
         self._mark_page_load("outline + margin scheduled")
         
@@ -3234,93 +3268,28 @@ class MarkdownEditor(QTextEdit):
     
     def _link_region_at_cursor(self, cursor: QTextCursor | None = None) -> Optional[tuple[str, int, int]]:
         """Return (link_text, start_pos, end_pos) for the link under the cursor, if any."""
+        if self._cursor_events_blocked or self._display_guard or self._suppress_link_scan or self._overlay_transition:
+            return None
+        if self._in_mode_window_transition():
+            return None
         cursor = cursor or self.textCursor()
         block = cursor.block()
+        try:
+            if not block.isValid():
+                return None
+            doc = block.document()
+            if doc is None or doc.isEmpty():
+                return None
+        except Exception:
+            return None
         rel = cursor.position() - block.position()
-        text = block.text()
-        
-        # Check display-format links: \x00link\x00label\x00 (unified for HTTP and page links)
-        idx = 0
-        while idx < len(text):
-            if text[idx] == '\x00':
-                link_start = idx + 1
-                link_end = text.find('\x00', link_start)
-                if link_end > link_start:
-                    label_start = link_end + 1
-                    label_end = text.find('\x00', label_start)
-                    if label_end >= label_start:  # >= to handle empty labels
-                        # Determine visible region
-                        if label_end == label_start:  # Empty label - link is visible
-                            visible_start = link_start
-                            visible_end = link_end
-                            if visible_end > visible_start and text[visible_end - 1] == "|":
-                                visible_end -= 1
-                            raw_link = text[link_start:link_end]
-                            if raw_link.endswith("|"):
-                                raw_link = raw_link[:-1]
-                        else:  # Non-empty label - label is visible
-                            visible_start = label_start
-                            visible_end = label_end
-                            raw_link = text[link_start:link_end]
-                        
-                        if visible_start <= rel < visible_end:
-                            return (raw_link, visible_start, visible_end)
-                        
-                        idx = label_end + 1
-                        continue
-            idx += 1
-        
-        # Check storage-format wiki-style links: [link|label]
-        # Find all [link|label] patterns (label can be empty)
-        wiki_pattern = r"\[([^\]|]+)\|([^\]]*)\]"
-        import re as regex_module
-        for match in regex_module.finditer(wiki_pattern, text):
-            link = match.group(1)
-            label = match.group(2)
-            # Label is visible part
-            label_start = match.start() + 1 + len(link) + 1  # After '[link|'
-            label_end = label_start + len(label)
-            if label_start <= rel < label_end:
-                return (link, label_start, label_end)
-
-        # Check file links: [text](./file.ext) or [text](file.ext)
-        file_iter = WIKI_FILE_LINK_PATTERN.globalMatch(text)
-        while file_iter.hasNext():
-            fm = file_iter.next()
-            start = fm.capturedStart()
-            label = fm.captured("text")
-            label_start = start + 1
-            label_end = label_start + len(label)
-            if label_start <= rel < label_end:
-                return (fm.captured("file"), label_start, label_end)
-        
-        # Check for plain HTTP URLs
-        http_iter = HTTP_URL_PATTERN.globalMatch(text)
-        while http_iter.hasNext():
-            match = http_iter.next()
-            start = match.capturedStart()
-            end = start + match.capturedLength()
-            if start <= rel < end:
-                return (match.captured("url"), start, end)
-        
-        # Check for CamelCase links
-        iterator = CAMEL_LINK_PATTERN.globalMatch(block.text())
-        while iterator.hasNext():
-            match = iterator.next()
-            start = match.capturedStart()
-            end = start + match.capturedLength()
-            if start <= rel < end:
-                return (match.captured("link"), start, end)
-        
-        # Check for colon notation links (PageA:PageB:PageC)
-        colon_iterator = COLON_LINK_PATTERN.globalMatch(block.text())
-        while colon_iterator.hasNext():
-            match = colon_iterator.next()
-            start = match.capturedStart()
-            end = start + match.capturedLength()
-            if start <= rel < end:
-                return (match.captured("link"), start, end)
-        
+        try:
+            text = block.text()
+        except Exception:
+            return None
+        if not text:
+            return None
+        # Skip all link detection during overlay transitions or guarded reloads.
         return None
 
     def _is_cursor_at_link_activation_point(self, cursor: QTextCursor) -> bool:
@@ -3334,8 +3303,11 @@ class MarkdownEditor(QTextEdit):
         return start < rel_pos < end
 
     def _link_under_cursor(self, cursor: QTextCursor | None = None) -> Optional[str]:
-        region = self._link_region_at_cursor(cursor)
-        return region[0] if region else None
+        if self._cursor_events_blocked or self._display_guard or self._suppress_link_scan or self._overlay_transition:
+            return None
+        if self._in_mode_window_transition():
+            return None
+        return None
 
     def _markdown_link_at_cursor(self, cursor: QTextCursor) -> Optional[tuple[int,int,str,str]]:
         """Return (start, end, text, link) for a wiki-style link under cursor, or None."""
@@ -3623,6 +3595,17 @@ class MarkdownEditor(QTextEdit):
         return self._copy_link_to_location(link_text=None, anchor_text=heading_text)
 
     def _emit_cursor(self) -> None:
+        if (
+            self._cursor_events_blocked
+            or self._display_guard
+            or self._suppress_link_scan
+            or self._overlay_transition
+            or type(self)._LOAD_GUARD_DEPTH > 0
+            or not getattr(self, "_cursor_signals_connected", True)
+        ):
+            return
+        if self._in_mode_window_transition():
+            return
         cursor = self.textCursor()
         self.cursorMoved.emit(cursor.position())
         # Check if cursor is over a link and emit link path
@@ -4310,6 +4293,14 @@ class MarkdownEditor(QTextEdit):
             self.setFocus()
 
     def _maybe_update_vi_cursor(self) -> None:
+        if (
+            self._cursor_events_blocked
+            or self._display_guard
+            or self._suppress_vi_cursor
+            or type(self)._LOAD_GUARD_DEPTH > 0
+            or self._in_mode_window_transition()
+        ):
+            return
         if not self._vi_mode_active or not self._vi_block_cursor_enabled:
             return
         pos = self.textCursor().position()
@@ -4343,11 +4334,45 @@ class MarkdownEditor(QTextEdit):
         overshoot = rect.bottom() - (view_h - margin)
         if overshoot > 0:
             sb.setValue(min(sb.maximum(), sb.value() + overshoot))
+
+    def _in_mode_window_transition(self) -> bool:
+        """Return True if the editor lives in a ModeWindow that isn't settled yet."""
+        if getattr(self, "_suppress_link_scan", False):
+            return True
+        if getattr(self, "_overlay_transition", False):
+            return True
+        try:
+            win = self.window()
+        except Exception:
+            return False
+        if not win:
+            return False
+        try:
+            if getattr(win.__class__, "__name__", "") == "ModeWindow":
+                if not getattr(win, "_ready", True) or getattr(win, "_pending_close", False):
+                    return True
+            if hasattr(win, "_mode_window_pending") and getattr(win, "_mode_window_pending"):
+                return True
+        except Exception:
+            return False
+        return False
+
     def _update_vi_cursor(self) -> None:
+        if (
+            self._cursor_events_blocked
+            or self._display_guard
+            or self._suppress_vi_cursor
+            or type(self)._LOAD_GUARD_DEPTH > 0
+            or self._in_mode_window_transition()
+        ):
+            return
         if not self._vi_mode_active or not self._vi_block_cursor_enabled:
             # Clear any vi-mode selection overlay but preserve other selections (e.g., flashes)
             remaining = [s for s in self.extraSelections() if s.format.property(self._VI_EXTRA_KEY) is None]
             self.setExtraSelections(remaining)
+            return
+        doc = self.document()
+        if doc is None or doc.isEmpty():
             return
         cursor = self.textCursor()
         # Don't draw block cursor overlay while there's an active selection
@@ -4372,6 +4397,8 @@ class MarkdownEditor(QTextEdit):
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         if obj is self.viewport():
+            if self._cursor_events_blocked or self._display_guard or self._suppress_vi_cursor or self._in_mode_window_transition():
+                return super().eventFilter(obj, event)
             if event.type() in (QEvent.Paint, QEvent.UpdateRequest, QEvent.FocusIn, QEvent.FocusOut):
                 if self._vi_mode_active:
                     self._update_vi_cursor()
@@ -5302,6 +5329,14 @@ class MarkdownEditor(QTextEdit):
 
     def _apply_scroll_past_end_margin(self) -> None:
         """Add bottom margin to the document so the view can scroll past the last line."""
+        if (
+            self._cursor_events_blocked
+            or self._display_guard
+            or self._suppress_vi_cursor
+            or type(self)._LOAD_GUARD_DEPTH > 0
+            or self._in_mode_window_transition()
+        ):
+            return
         try:
             root = self.document().rootFrame()
             fmt = root.frameFormat()

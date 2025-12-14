@@ -221,6 +221,12 @@ class LinkGraphView(QGraphicsView):
         incoming: Sequence[_LinkNode],
         outgoing: Sequence[_LinkNode],
     ) -> None:
+        # Skip updates during mode overlay transitions to avoid scene mutations mid-teardown.
+        try:
+            if getattr(self.window(), "_mode_window_pending", False) or getattr(self.window(), "_mode_window", None):
+                return
+        except Exception:
+            pass
         self._scene.clear()
         self._edges.clear()
         self._nodes.clear()
