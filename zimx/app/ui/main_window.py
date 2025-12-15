@@ -695,6 +695,11 @@ class MainWindow(QMainWindow):
         self.right_panel.openLinkWindowRequested.connect(self._open_link_panel_window)
         self.right_panel.openAiWindowRequested.connect(self._open_ai_chat_window)
         self.right_panel.filterClearRequested.connect(self._clear_nav_filter)
+        try:
+            self.right_panel.attachments_panel.plantumlEditorRequested.connect(self._open_plantuml_editor)
+            print("[MainWindow] Connected PlantUML editor request signal")
+        except Exception as exc:
+            print(f"[MainWindow] Failed to connect PlantUML editor signal: {exc}")
         self.right_panel.set_page_text_provider(self._get_editor_text_for_path)
         try:
             self.right_panel.task_panel.focusGained.connect(self._suspend_vi_for_tasks)
@@ -3376,6 +3381,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+
     # --- Detached panel windows -------------------------------------------------
 
     def _register_detached_panel(self, window: QMainWindow) -> None:
@@ -3556,6 +3562,35 @@ class MainWindow(QMainWindow):
             window.destroyed.connect(lambda: self._page_windows.remove(window) if window in self._page_windows else None)
         except Exception as exc:
             self._alert(f"Failed to open editor window: {exc}")
+
+    def _open_plantuml_editor(self, file_path: str) -> None:
+        """Open a PlantUML editor window for the given .puml file."""
+        if not file_path:
+            return
+        
+        try:
+            from .plantuml_editor_window import PlantUMLEditorWindow
+            print(f"[MainWindow] Opening PlantUML editor for: {file_path}")
+            
+            window = PlantUMLEditorWindow(file_path, parent=None)
+            try:
+                window.setWindowFlag(Qt.Window, True)
+                window.setWindowFlag(Qt.Tool, False)
+                window.setAttribute(Qt.WA_NativeWindow, True)
+                window.setWindowModality(Qt.NonModal)
+            except Exception:
+                pass
+            # Keep a strong reference so the window isn't GC'd immediately
+            if not hasattr(self, "_plantuml_windows"):
+                self._plantuml_windows: list[QMainWindow] = []
+            self._plantuml_windows.append(window)
+            try:
+                window.destroyed.connect(lambda: self._plantuml_windows.remove(window) if window in self._plantuml_windows else None)
+            except Exception:
+                pass
+            window.show()
+        except Exception as exc:
+            self._alert(f"Failed to open PlantUML editor: {exc}")
 
     def _toggle_mode_overlay(self, mode: str) -> None:
         """Toggle Focus/Audience mode full-screen overlay."""

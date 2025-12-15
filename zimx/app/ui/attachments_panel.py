@@ -10,7 +10,7 @@ from typing import Optional
 
 import httpx
 
-from PySide6.QtCore import Qt, QUrl, QSize, QMimeData
+from PySide6.QtCore import Qt, QUrl, QSize, QMimeData, Signal
 from PySide6.QtGui import QIcon, QPixmap, QDesktopServices, QDrag
 from PySide6.QtWidgets import (
     QApplication,
@@ -23,6 +23,9 @@ from PySide6.QtWidgets import (
     QToolButton,
     QFileDialog,
     QFileIconProvider,
+    QMenu,
+    QInputDialog,
+    QDialog,
 )
 
 _DETAILED_LOGGING = os.getenv("ZIMX_DETAILED_LOGGING", "0") not in ("0", "false", "False", "", None)
@@ -51,6 +54,9 @@ class AttachmentsListWidget(QListWidget):
 
 class AttachmentsPanel(QWidget):
     """Panel showing attachments (files) in the current page's folder."""
+    
+    # Signal emitted when user wants to open a .puml file in the PlantUML editor
+    plantumlEditorRequested = Signal(str)  # file_path
 
     def __init__(self, parent=None, api_client: Optional[httpx.Client] = None) -> None:
         super().__init__(parent)
@@ -123,6 +129,8 @@ class AttachmentsPanel(QWidget):
         self.attachments_list.setDragEnabled(True)
         self.attachments_list.setDragDropMode(QListWidget.DragOnly)
         self.attachments_list.itemSelectionChanged.connect(self._update_remove_button_state)
+        self.attachments_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.attachments_list.customContextMenuRequested.connect(self._on_attachments_context_menu)
         
         # Layout
         layout = QVBoxLayout()
@@ -427,13 +435,88 @@ class AttachmentsPanel(QWidget):
             self._refresh_attachments()
     
     def _open_attachment(self, item: QListWidgetItem) -> None:
-        """Open the selected attachment with the default system handler."""
+        """Open the selected attachment. .puml files open in PlantUML editor, others use default handler."""
         file_path_str = item.data(Qt.UserRole)
         if file_path_str:
             file_path = Path(file_path_str)
             if file_path.exists():
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(file_path)))
+                # Check if it's a PlantUML file
+                if file_path.suffix.lower() == ".puml":
+                    print(f"[Attachments] Double-click .puml -> open editor: {file_path_str}")
+                    self.plantumlEditorRequested.emit(file_path_str)
+                else:
+                    # Open with default system handler
+                    print(f"[Attachments] Double-click non-puml -> open default: {file_path_str}")
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(file_path)))
     
     def refresh(self) -> None:
         """Refresh the attachments list."""
         self._refresh_attachments()
+
+    def _on_attachments_context_menu(self, pos) -> None:
+        """Handle right-click context menu on attachments list."""
+        menu = QMenu(self)
+        
+        # Add "Add new PlantUML..." action
+        add_plantuml_action = menu.addAction("Add new PlantUML...")
+        add_plantuml_action.triggered.connect(self._create_new_plantuml)
+        
+        # Show context menu at cursor position
+        menu.exec(self.attachments_list.mapToGlobal(pos))
+
+    def _create_new_plantuml(self) -> None:
+        """Create a new .puml file in the attachments folder."""
+        if not self.current_page_path:
+            return
+        
+        page_folder = self.current_page_path.parent
+        if not page_folder.exists() or not page_folder.is_dir():
+            return
+        
+        # Prompt user for file name
+        name, ok = QInputDialog.getText(
+            self,
+            "New PlantUML Diagram",
+            "Enter diagram name (without .puml extension):",
+            text="diagram"
+        )
+        
+        if not ok or not name.strip():
+            return
+        
+        # Sanitize the name
+        name = name.strip()
+        if not name:
+            return
+        
+        # Add .puml extension if not present
+        if not name.lower().endswith(".puml"):
+            name = name + ".puml"
+        
+        # Create the file path
+        file_path = page_folder / name
+        
+        # Check if file already exists
+        if file_path.exists():
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "File Exists", f"File {name} already exists.")
+            return
+        
+        # Create empty PlantUML file with basic template
+        template = """@startuml
+' PlantUML diagram
+' https://plantuml.com/
+
+' Add your diagram here
+
+@enduml
+"""
+        try:
+            file_path.write_text(template, encoding="utf-8")
+            self._refresh_attachments()
+            # Emit signal to open the file in the PlantUML editor
+            self.plantumlEditorRequested.emit(str(file_path))
+        except Exception as exc:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Error", f"Failed to create file: {exc}")
+

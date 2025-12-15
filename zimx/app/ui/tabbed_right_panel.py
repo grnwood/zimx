@@ -134,7 +134,8 @@ class TabbedRightPanel(QWidget):
             self.ai_chat_panel.set_vault_root(vault_root)
         if self._is_calendar_tab_active():
             self._sync_calendar_tab_state()
-    
+
+
     def refresh_calendar(self) -> None:
         """Refresh the calendar to update bold dates."""
         if self._is_calendar_tab_active():
