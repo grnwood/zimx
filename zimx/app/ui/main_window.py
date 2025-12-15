@@ -2554,6 +2554,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Editing {display_path}")
         self._update_window_title()
         
+        # Automatically sync the nav tree to highlight the active page
+        self._sync_nav_tree_to_active_page()
+        
         # Save the last opened file
         if config.has_active_vault():
             config.save_last_file(path)
@@ -5389,6 +5392,24 @@ class MainWindow(QMainWindow):
             return
         self._ensure_tree_path_loaded(self.current_path)
         self._select_tree_path(self.current_path)
+
+    def _sync_nav_tree_to_active_page(self) -> None:
+        """Automatically sync the nav tree to highlight the currently active page in the editor.
+        
+        This is called when a file is opened via _open_file() to keep the tree selection
+        in sync with the active editor page. It respects active filters and lazy-loads
+        necessary parent nodes to make the page visible in the tree.
+        """
+        if not self.current_path:
+            return
+        try:
+            # Ensure all parent nodes are loaded so we can select the target
+            self._ensure_tree_path_loaded(self.current_path)
+            # Select and scroll to the page in the tree
+            self._select_tree_path(self.current_path)
+            logNav(f"_sync_nav_tree_to_active_page: selected {self.current_path}")
+        except Exception as e:
+            logNav(f"_sync_nav_tree_to_active_page: error syncing {self.current_path} ({e})")
 
     def _find_item(self, parent: QStandardItem, target: str) -> Optional[QStandardItem]:
         for row in range(parent.rowCount()):
