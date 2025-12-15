@@ -172,7 +172,9 @@ def vault_tree(path: str = "/", recursive: bool = True) -> dict:
     tree = files.list_dir(root, subpath=path, recursive=recursive)
     order_map = config.fetch_display_order_map()
     _sort_tree_nodes(tree, order_map)
-    return {"root": str(root), "tree": tree}
+    version = config.get_tree_version()
+    print(f"{_ANSI_BLUE}[API] GET /api/vault/tree path={path} recursive={recursive} version={version}{_ANSI_RESET}")
+    return {"root": str(root), "tree": tree, "version": version}
 
 
 @app.post("/api/file/read")

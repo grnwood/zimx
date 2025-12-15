@@ -397,6 +397,14 @@ class VaultTreeView(QTreeView):
             pass
         drag = QDrag(self)
         drag.setMimeData(mime)
+
+
+def logNav(message: str) -> None:
+    """Log navigation operations if LOG_NAV_OPERATIONS is enabled (default: '1')."""
+    if os.getenv("LOG_NAV_OPERATIONS", "1") not in ("0", "false", "False", ""):
+        print(f"[Nav] {message}")
+
+
 class MainWindow(QMainWindow):
 
     def __init__(self, api_base: str) -> None:
@@ -936,6 +944,11 @@ class MainWindow(QMainWindow):
 
         # Startup vault selection is orchestrated by main.py via .startup()
         self.editor.set_ai_actions_enabled(config.load_enable_ai_chats())
+
+        # Tree caching and versioning (per-path cache keyed by server tree version)
+        self._tree_version: int = 0
+        self._tree_path_version: dict[str, int] = {}
+        logNav("Initialized tree version tracking")
 
     def _setup_eventloop_watchdog(self) -> None:
         """Log when the Qt event loop appears stalled (high timer drift)."""
@@ -1887,6 +1900,7 @@ class MainWindow(QMainWindow):
             return
         normalized = self._file_path_to_folder(path if path.startswith("/") else f"/{path}")
         self._nav_filter_path = normalized or "/"
+        logNav(f"_set_nav_filter: filtered to {self._nav_filter_path}")
         try:
             self.right_panel.task_panel.set_navigation_filter(self._nav_filter_path, refresh=False)
         except Exception:
@@ -1904,6 +1918,7 @@ class MainWindow(QMainWindow):
             # Still collapse on escape even if no filter is active
             self.tree_view.collapseAll()
             return
+        logNav(f"_clear_nav_filter: restoring full tree view")
         self._nav_filter_path = None
         try:
             self.right_panel.task_panel.set_navigation_filter(None, refresh=False)
@@ -2097,8 +2112,20 @@ class MainWindow(QMainWindow):
             except httpx.HTTPError as exc:
                 self._alert_api_error(exc, "Failed to load vault tree")
                 return
-            data = resp.json().get("tree", [])
+            payload = resp.json()
+            data = payload.get("tree", [])
+            try:
+                old_version = self._tree_version
+                self._tree_version = int(payload.get("version", self._tree_version) or 0)
+                logNav(f"_populate_vault_tree: version {old_version} -> {self._tree_version} (path={fetch_path})")
+            except Exception:
+                pass
             self._tree_cache.clear()
+            try:
+                self._tree_path_version[fetch_path] = self._tree_version
+                logNav(f"_populate_vault_tree: cached path {fetch_path} at version {self._tree_version}")
+            except Exception:
+                pass
 
             # Clear existing items and rebuild
             self.tree_model.clear()
@@ -2257,17 +2284,34 @@ class MainWindow(QMainWindow):
         """Fetch children for a path (cached, then API) and populate the node."""
         norm_path = self._normalize_tree_path(path)
         children = self._tree_cache.get(norm_path)
+        cached_ver = self._tree_path_version.get(norm_path)
         has_children_flag = bool(item.data(TYPE_ROLE))
-        if children is None or (not children and has_children_flag):
+        if children is None or cached_ver != self._tree_version or (not children and has_children_flag):
+            reason = "not cached" if children is None else "version mismatch" if cached_ver != self._tree_version else "empty but has children"
+            logNav(f"_load_children_for_path: fetching {norm_path} ({reason})")
             try:
                 resp = self.http.get("/api/vault/tree", params={"path": norm_path, "recursive": "false"})
                 resp.raise_for_status()
-                tree = resp.json().get("tree") or []
+                payload = resp.json()
+                try:
+                    old_version = self._tree_version
+                    self._tree_version = int(payload.get("version", self._tree_version) or 0)
+                    if old_version != self._tree_version:
+                        logNav(f"_load_children_for_path: version bump {old_version} -> {self._tree_version}")
+                except Exception:
+                    pass
+                tree = payload.get("tree") or []
                 if tree:
                     children = tree[0].get("children") or []
                     if children:
                         self._tree_cache[norm_path] = list(children)
-            except httpx.HTTPError:
+                        try:
+                            self._tree_path_version[norm_path] = self._tree_version
+                            logNav(f"_load_children_for_path: cached {norm_path} with {len(children)} children at version {self._tree_version}")
+                        except Exception:
+                            pass
+            except httpx.HTTPError as e:
+                logNav(f"_load_children_for_path: API error for {norm_path}: {e}")
                 return
         if children is None:
             return

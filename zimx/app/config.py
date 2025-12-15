@@ -1395,6 +1395,39 @@ def ensure_page_entry(page_path: str, title: Optional[str] = None) -> None:
         conn.close()
 
 
+def get_tree_version() -> int:
+    """Get the current monotonic tree version from the vault kv store."""
+    conn = _get_conn()
+    if not conn:
+        return 0
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key = 'tree_version'").fetchone()
+        if row:
+            return int(row[0])
+    except Exception:
+        pass
+    return 0
+
+
+def bump_tree_version() -> int:
+    """Increment and return the new tree version."""
+    conn = _get_conn()
+    if not conn:
+        return 0
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key = 'tree_version'").fetchone()
+        current = int(row[0]) if row else 0
+    except Exception:
+        current = 0
+    new_val = current + 1
+    try:
+        conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("tree_version", str(new_val)))
+        conn.commit()
+    except Exception:
+        pass
+    return new_val
+
+
 def fetch_display_order_map() -> dict[str, int]:
     """Return mapping of page path -> display_order for tree sorting."""
     try:
