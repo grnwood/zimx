@@ -1,0 +1,58 @@
+[
+  {
+    "name": "Sample Sequence Diagram",
+    "sample puml": "@startuml\nAlice -> Bob: Request\nBob --> Alice: Response\n@enduml"
+  },
+  {
+    "name": "Sample Activity Diagram",
+    "sample puml": "@startuml\nstart\n:User submits form;\nif (Valid?) then (yes)\n  :Process request;\nelse (no)\n  :Show error;\nendif\nstop\n@enduml"
+  },
+  {
+    "name": "Sample Class Diagram",
+    "sample puml": "@startuml\nclass User {\n  +id: int\n  +name: string\n}\nclass Order {\n  +orderId: int\n  +total: float\n}\nUser \"1\" -- \"*\" Order\n@enduml"
+  },
+  {
+    "name": "Sample Use Case Diagram",
+    "sample puml": "@startuml\nactor User\nrectangle System {\n  User -- (Login)\n  User -- (Place Order)\n}\n@enduml"
+  },
+  {
+    "name": "Sample Component Diagram",
+    "sample puml": "@startuml\n[Web App] --> [API]\n[API] --> [Database]\n@enduml"
+  },
+  {
+    "name": "Sample Deployment Diagram",
+    "sample puml": "@startuml\nnode \"Web Server\" {\n  component \"Web App\"\n}\nnode \"DB Server\" {\n  database \"PostgreSQL\"\n}\n\"Web App\" --> \"PostgreSQL\"\n@enduml"
+  },
+  {
+    "name": "Sample State Diagram",
+    "sample puml": "@startuml\n[*] --> Idle\nIdle --> Processing : start\nProcessing --> Idle : finish\nProcessing --> Error : fail\nError --> Idle : reset\n@enduml"
+  },
+  {
+    "name": "Sample Object Diagram",
+    "sample puml": "@startuml\nobject user1 {\n  name = \"Alice\"\n}\nobject order1 {\n  total = 99.99\n}\nuser1 -- order1\n@enduml"
+  },
+  {
+    "name": "Sample Timing Diagram",
+    "sample puml": "@startuml\ntimingDiagram\nclock clk\nclk : 0 1 0 1 0\n@enduml"
+  },
+  {
+    "name": "Sample Network Diagram",
+    "sample puml": "@startuml\ncloud Internet\nnode Router\nnode Server\nInternet -- Router\nRouter -- Server\n@enduml"
+  },
+  {
+    "name": "Sample Mind Map",
+    "sample puml": "@startmindmap\n* ZimX\n** Notes\n*** Markdown\n*** Diagrams\n** Search\n** AI\n@endmindmap"
+  },
+  {
+    "name": "Sample Gantt Diagram",
+    "sample puml": "@startuml\ngantt\nProject starts the 2025-01-01\n[Design] lasts 5 days\n[Build] lasts 10 days\n[Build] starts at [Design]'s end\n@enduml"
+  },
+  {
+    "name": "Sample C4 Context Diagram",
+    "sample puml": "@startuml\n!include C4_Context.puml\nPerson(user, \"User\")\nSystem(zimx, \"ZimX\")\nRel(user, zimx, \"uses\")\n@enduml"
+  },
+  {
+    "name": "Sample WBS Diagram",
+    "sample puml": "@startwbs\n* Project\n** Design\n** Development\n*** Backend\n*** Frontend\n** Testing\n@endwbs"
+  }
+]

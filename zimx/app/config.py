@@ -314,6 +314,71 @@ def load_pygments_style(default: str = "monokai") -> str:
     return default
 
 
+# PlantUML Configuration
+
+
+def load_plantuml_enabled() -> bool:
+    """Load PlantUML rendering enabled flag (default: True)."""
+    payload = _read_global_config()
+    return payload.get("plantuml_enabled", True)
+
+
+def save_plantuml_enabled(enabled: bool) -> None:
+    """Save PlantUML rendering enabled flag."""
+    _update_global_config({"plantuml_enabled": bool(enabled)})
+
+
+def load_plantuml_jar_path() -> Optional[str]:
+    """Load configured PlantUML JAR path (if any)."""
+    payload = _read_global_config()
+    path = payload.get("plantuml_jar_path")
+    return path if isinstance(path, str) and path.strip() else None
+
+
+def save_plantuml_jar_path(jar_path: str) -> None:
+    """Save configured PlantUML JAR path."""
+    _update_global_config({"plantuml_jar_path": jar_path.strip() if jar_path else ""})
+
+
+def load_plantuml_java_path() -> Optional[str]:
+    """Load configured Java executable path (if any)."""
+    payload = _read_global_config()
+    path = payload.get("plantuml_java_path")
+    return path if isinstance(path, str) and path.strip() else None
+
+
+def save_plantuml_java_path(java_path: str) -> None:
+    """Save configured Java executable path."""
+    _update_global_config({"plantuml_java_path": java_path.strip() if java_path else ""})
+
+
+def load_plantuml_render_format() -> str:
+    """Load PlantUML render format (currently only 'svg' supported)."""
+    payload = _read_global_config()
+    fmt = payload.get("plantuml_render_format", "svg")
+    return fmt if isinstance(fmt, str) else "svg"
+
+
+def load_plantuml_render_debounce_ms() -> int:
+    """Load PlantUML render debounce delay in milliseconds (default: 500)."""
+    payload = _read_global_config()
+    try:
+        ms = int(payload.get("plantuml_render_debounce_ms", 500))
+        return max(100, min(5000, ms))  # Clamp to reasonable range
+    except (TypeError, ValueError):
+        return 500
+
+
+def save_plantuml_render_debounce_ms(ms: int) -> None:
+    """Save PlantUML render debounce delay."""
+    try:
+        val = int(ms)
+        val = max(100, min(5000, val))
+    except (TypeError, ValueError):
+        val = 500
+    _update_global_config({"plantuml_render_debounce_ms": val})
+
+
 def _merge_mode_settings(payload: dict, defaults: dict) -> dict:
     """Merge persisted mode settings with defaults, dropping unexpected keys."""
     merged = defaults.copy()

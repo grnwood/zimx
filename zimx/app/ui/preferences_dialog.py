@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QStackedWidget,
     QWidget,
+    QFileDialog,
 )
 from pathlib import Path
 from PySide6.QtGui import QFontDatabase, QFont
@@ -299,6 +300,61 @@ class PreferencesDialog(QDialog):
         ai_layout.addLayout(row3)
         ai_layout.addStretch(1)
 
+        # PlantUML
+        puml_layout = add_section("PlantUML")
+        self.plantuml_enable_checkbox = QCheckBox("Enable PlantUML rendering")
+        self.plantuml_enable_checkbox.setChecked(config.load_plantuml_enabled())
+        puml_layout.addWidget(self.plantuml_enable_checkbox)
+
+        jar_row = QHBoxLayout()
+        jar_row.addWidget(QLabel("PlantUML JAR path:"))
+        self.plantuml_jar_edit = QLineEdit()
+        try:
+            jar_val = config.load_plantuml_jar_path() or ""
+        except Exception:
+            jar_val = ""
+        self.plantuml_jar_edit.setText(jar_val)
+        jar_row.addWidget(self.plantuml_jar_edit, 1)
+        jar_browse = QPushButton("Browse…")
+        jar_browse.clicked.connect(self._browse_plantuml_jar)
+        jar_row.addWidget(jar_browse)
+        puml_layout.addLayout(jar_row)
+
+        java_row = QHBoxLayout()
+        java_row.addWidget(QLabel("Java path (optional):"))
+        self.plantuml_java_edit = QLineEdit()
+        try:
+            java_val = config.load_plantuml_java_path() or ""
+        except Exception:
+            java_val = ""
+        self.plantuml_java_edit.setText(java_val)
+        java_row.addWidget(self.plantuml_java_edit, 1)
+        java_browse = QPushButton("Browse…")
+        java_browse.clicked.connect(self._browse_java_path)
+        java_row.addWidget(java_browse)
+        puml_layout.addLayout(java_row)
+
+        debounce_row = QHBoxLayout()
+        debounce_row.addWidget(QLabel("Render debounce (ms):"))
+        self.plantuml_debounce_spin = QSpinBox()
+        self.plantuml_debounce_spin.setRange(100, 5000)
+        try:
+            self.plantuml_debounce_spin.setValue(config.load_plantuml_render_debounce_ms())
+        except Exception:
+            self.plantuml_debounce_spin.setValue(500)
+        debounce_row.addWidget(self.plantuml_debounce_spin, 1)
+        puml_layout.addLayout(debounce_row)
+
+        test_row = QHBoxLayout()
+        self.plantuml_test_btn = QPushButton("Test PlantUML Setup")
+        self.plantuml_test_btn.clicked.connect(self._run_plantuml_test)
+        self.plantuml_test_status = QLabel("Not tested")
+        self.plantuml_test_status.setStyleSheet("color: #888;")
+        test_row.addWidget(self.plantuml_test_btn)
+        test_row.addWidget(self.plantuml_test_status, 1)
+        puml_layout.addLayout(test_row)
+        puml_layout.addStretch(1)
+
         # Templates
         tpl_layout = add_section("Templates")
         row_tpl_page = QHBoxLayout()
@@ -476,6 +532,37 @@ class PreferencesDialog(QDialog):
     def _on_default_server_changed(self):
         self._refresh_default_models()
 
+    def _browse_plantuml_jar(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select plantuml.jar", "", "JAR Files (*.jar);;All Files (*)")
+        if path:
+            self.plantuml_jar_edit.setText(path)
+
+    def _browse_java_path(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select java executable", "", "Executable Files (*)")
+        if path:
+            self.plantuml_java_edit.setText(path)
+
+    def _run_plantuml_test(self):
+        from zimx.app.plantuml_renderer import PlantUMLRenderer
+
+        self.plantuml_test_status.setText("Testing…")
+        self.plantuml_test_status.setStyleSheet("color: #888;")
+        renderer = PlantUMLRenderer()
+        if self.plantuml_jar_edit.text().strip():
+            renderer.set_jar_path(self.plantuml_jar_edit.text().strip())
+        if self.plantuml_java_edit.text().strip():
+            renderer.set_java_path(self.plantuml_java_edit.text().strip())
+        result = renderer.test_setup()
+        if result.success:
+            self.plantuml_test_status.setText(f"OK ({result.duration_ms:.0f} ms)")
+            self.plantuml_test_status.setStyleSheet("color: #2a8f2a;")
+        else:
+            details = result.stderr or ""
+            self.plantuml_test_status.setText(f"Failed: {result.error_message or 'Unknown error'}")
+            self.plantuml_test_status.setStyleSheet("color: #c00;")
+            if details:
+                QMessageBox.warning(self, "PlantUML Test", details)
+
     def _load_pygments_styles(self) -> None:
         styles = ["monokai"]
         try:
@@ -549,6 +636,13 @@ class PreferencesDialog(QDialog):
             pass
         try:
             config.save_pygments_style(self.pygments_style_combo.currentText() or "monokai")
+        except Exception:
+            pass
+        try:
+            config.save_plantuml_enabled(self.plantuml_enable_checkbox.isChecked())
+            config.save_plantuml_jar_path(self.plantuml_jar_edit.text())
+            config.save_plantuml_java_path(self.plantuml_java_edit.text())
+            config.save_plantuml_render_debounce_ms(self.plantuml_debounce_spin.value())
         except Exception:
             pass
         try:
