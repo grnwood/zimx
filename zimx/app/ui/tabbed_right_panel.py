@@ -54,6 +54,10 @@ class TabbedRightPanel(QWidget):
         self.ai_chat_index = None
         self._ai_chat_font_size = self._clamp_ai_font(ai_chat_font_size)
         self._http_client = http_client
+        self._pending_calendar_path: Optional[str] = None
+        self._pending_calendar_date: Optional[tuple[int, int, int]] = None
+        self._pending_calendar_vault_root: Optional[str] = None
+        self._pending_calendar_refresh: bool = False
         
         # Create Tasks tab (now includes calendar)
         self.task_panel = TaskPanel(font_size_key="task_font_size_tabbed", splitter_key="task_splitter_tabbed")
@@ -116,7 +120,10 @@ class TabbedRightPanel(QWidget):
         """Set vault root for calendar in task panel."""
         if vault_root:
             self.task_panel.set_vault_root(vault_root)
-            self.calendar_panel.set_vault_root(vault_root)
+            if self._is_calendar_tab_active():
+                self.calendar_panel.set_vault_root(vault_root)
+            else:
+                self._pending_calendar_vault_root = vault_root
         self.attachments_panel.set_vault_root(vault_root)
         try:
             self.link_panel.reload_mode_from_config()
@@ -125,14 +132,22 @@ class TabbedRightPanel(QWidget):
             pass
         if self.ai_chat_panel:
             self.ai_chat_panel.set_vault_root(vault_root)
+        if self._is_calendar_tab_active():
+            self._sync_calendar_tab_state()
     
     def refresh_calendar(self) -> None:
         """Refresh the calendar to update bold dates."""
-        self.calendar_panel.refresh()
+        if self._is_calendar_tab_active():
+            self.calendar_panel.refresh()
+        else:
+            self._pending_calendar_refresh = True
     
     def set_calendar_date(self, year: int, month: int, day: int) -> None:
         """Set the calendar to show a specific date."""
-        self.calendar_panel.set_calendar_date(year, month, day)
+        if self._is_calendar_tab_active():
+            self.calendar_panel.set_calendar_date(year, month, day)
+        else:
+            self._pending_calendar_date = (year, month, day)
     
     def set_current_page(self, page_path, relative_path=None) -> bool:
         """Update panels with the current page."""
@@ -143,7 +158,10 @@ class TabbedRightPanel(QWidget):
         t2 = time.perf_counter()
         try:
             if self.calendar_panel and relative_path:
-                self.calendar_panel.set_current_page(relative_path)
+                if self._is_calendar_tab_active():
+                    self.calendar_panel.set_current_page(relative_path)
+                else:
+                    self._pending_calendar_path = relative_path
         except Exception:
             pass
         if _PAGE_LOGGING:
@@ -247,6 +265,8 @@ class TabbedRightPanel(QWidget):
         """Ensure the active tab gains focus when selected."""
         widget = self.tabs.currentWidget()
         if widget:
+            if widget == self.calendar_panel:
+                self._sync_calendar_tab_state()
             # If Tasks tab, focus its search bar for quick typing
             if widget == self.task_panel and hasattr(self.task_panel, "focus_search"):
                 self.task_panel.focus_search()
@@ -290,6 +310,30 @@ class TabbedRightPanel(QWidget):
         active_path = self.get_active_chat_path() or ""
         folder_path = "/" + Path(rel_path.lstrip("/")).parent.as_posix()
         return folder_path == active_path
+
+    def _is_calendar_tab_active(self) -> bool:
+        """Return True if the calendar tab is currently selected."""
+        return self.tabs.currentWidget() == self.calendar_panel
+
+    def _sync_calendar_tab_state(self) -> None:
+        """Apply deferred calendar updates once the user explicitly opens the tab."""
+        if not self._is_calendar_tab_active() or not self.calendar_panel:
+            return
+        if self._pending_calendar_vault_root:
+            self.calendar_panel.set_vault_root(self._pending_calendar_vault_root)
+            self._pending_calendar_vault_root = None
+        if self._pending_calendar_refresh:
+            self.calendar_panel.refresh()
+            self._pending_calendar_refresh = False
+        pending_path = self._pending_calendar_path
+        pending_date = self._pending_calendar_date
+        self._pending_calendar_path = None
+        self._pending_calendar_date = None
+        if pending_path:
+            self.calendar_panel.set_current_page(pending_path)
+        elif pending_date:
+            y, m, d = pending_date
+            self.calendar_panel.set_calendar_date(y, m, d)
 
     def focus_ai_chat_input(self) -> None:
         if not self.ai_chat_panel or self.ai_chat_index is None:

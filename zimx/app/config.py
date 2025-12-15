@@ -1095,7 +1095,6 @@ def update_page_index(
             ((path, tag) for tag in unique_tags),
         )
         conn.execute("DELETE FROM links WHERE from_path = ?", (path,))
-        print(f"unique links: {unique_links}")
         conn.executemany(
             "INSERT INTO links(from_path, to_path) VALUES(?, ?)",
             ((path, link) for link in unique_links),

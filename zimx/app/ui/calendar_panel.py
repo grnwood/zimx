@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import os
 import calendar
 from datetime import date as Date
 from typing import Optional, Callable
@@ -44,6 +45,7 @@ from .ai_chat_panel import ApiWorker, ServerManager
 
 PATH_ROLE = Qt.UserRole + 1
 LINE_ROLE = Qt.UserRole + 2
+RECENT_ACTION_ROLE = Qt.UserRole + 50
 TAG_PATTERN = re.compile(r"(?<![\w.+-])@([A-Za-z0-9_]+)")
 
 
@@ -86,6 +88,10 @@ class CalendarPanel(QWidget):
         self._ai_response_buffer: str = ""
         self._page_text_provider: Optional[Callable[[Optional[str]], str]] = None
         self._ai_last_markdown: str = ""
+        self._recent_fetch_guard: int = 0
+        self._recent_pending_params: Optional[tuple[str, str, Optional[str]]] = None
+        self._recent_fetching: bool = False
+        self._recent_data_loaded: bool = False
 
         self.calendar = QCalendarWidget()
         self.calendar.setGridVisible(True)
@@ -255,8 +261,8 @@ class CalendarPanel(QWidget):
         self.recent_list = QListWidget()
         self.recent_list.setAlternatingRowColors(True)
         self.recent_list.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.recent_list.itemActivated.connect(self._open_recent_link)
-        self.recent_list.itemClicked.connect(self._open_recent_link)
+        self.recent_list.itemActivated.connect(self._on_recent_item_activated)
+        self.recent_list.itemClicked.connect(self._on_recent_item_activated)
         try:
             self.recent_list.setWordWrap(False)
             self.recent_list.setUniformItemSizes(True)
@@ -1354,6 +1360,9 @@ class CalendarPanel(QWidget):
 
     def _update_insights_for_selection(self, current_path: Optional[str] = None) -> None:
         """Update insights based on the current multi-selection."""
+        # Reset recent data loaded flag so user has to click to load each time
+        self._recent_data_loaded = False
+        
         dates_for_tasks: list[QDate] = []
         if self.multi_selected_dates:
             dates = sorted(self.multi_selected_dates, key=lambda d: d.toJulianDay())
@@ -1485,6 +1494,28 @@ class CalendarPanel(QWidget):
         self.recent_list.clear()
         if not self.vault_root or not dates:
             return
+        
+        # Show "Click to load..." link instead of auto-loading
+        if not self._recent_data_loaded:
+            load_item = QListWidgetItem("Click to load...")
+            load_item.setData(RECENT_ACTION_ROLE, "load")
+            load_item.setForeground(QColor("#0066CC"))
+            try:
+                load_item.setToolTip("Click to load recently edited pages")
+            except Exception:
+                pass
+            self.recent_list.addItem(load_item)
+            # Store parameters for later loading
+            self._recent_pending_params = (dates, current_path, expand_single)
+            return
+        
+        # Show "Fetching data..." while loading
+        if self._recent_fetching:
+            fetch_item = QListWidgetItem("Fetching data...")
+            fetch_item.setForeground(QColor("#666666"))
+            self.recent_list.addItem(fetch_item)
+            return
+        
         if expand_single and len(dates) == 1:
             d = dates[0]
             span = [d.addDays(-1), d, d.addDays(1)]
@@ -1748,6 +1779,90 @@ class CalendarPanel(QWidget):
         if path:
             self.pageActivated.emit(str(path))
 
+    def _on_recent_item_activated(self, item: QListWidgetItem) -> None:
+        """Handle clicks on recent list items, including the load action."""
+        if not item:
+            return
+        
+        # Check if this is the "Click to load..." action item
+        action = item.data(RECENT_ACTION_ROLE)
+        if action == "load":
+            self._load_recent_data()
+            return
+        
+        # Regular item - open the page
+        path = item.data(PATH_ROLE)
+        if path:
+            self.pageActivated.emit(str(path))
+    
+    def _load_recent_data(self) -> None:
+        """Load the recent edited pages data."""
+        if self._recent_fetching or not self._recent_pending_params:
+            return
+        
+        # Mark as loading and show "Fetching data..."
+        self._recent_fetching = True
+        self._recent_data_loaded = True
+        dates, current_path, expand_single = self._recent_pending_params
+        
+        # Clear and show fetching message
+        self.recent_list.clear()
+        fetch_item = QListWidgetItem("Fetching data...")
+        fetch_item.setForeground(QColor("#666666"))
+        self.recent_list.addItem(fetch_item)
+        
+        # Use QTimer to allow UI to update before blocking call
+        QTimer.singleShot(0, lambda: self._do_fetch_recent(dates, current_path, expand_single))
+    
+    def _do_fetch_recent(self, dates: list[QDate], current_path: Optional[str], expand_single: bool) -> None:
+        """Actually fetch the recent data (called via timer to avoid blocking UI)."""
+        self.recent_list.clear()
+        
+        if not self.vault_root or not dates:
+            self._recent_fetching = False
+            return
+        
+        if expand_single and len(dates) == 1:
+            d = dates[0]
+            span = [d.addDays(-1), d, d.addDays(1)]
+            dates = span
+        
+        # Derive min/max ISO date strings
+        try:
+            start = min(dates, key=lambda d: d.toJulianDay())
+            end = max(dates, key=lambda d: d.toJulianDay())
+            start_str = start.toString("yyyy-MM-dd")
+            end_str = end.toString("yyyy-MM-dd")
+        except Exception:
+            self._recent_fetching = False
+            return
+        
+        try:
+            resp = self.http.post(f"{self.api_base}/api/files/modified", json={"start_date": start_str, "end_date": end_str})
+            resp.raise_for_status()
+            data = resp.json()
+            items = data.get("items", [])
+        except Exception:
+            self._recent_fetching = False
+            return
+        
+        for entry in items:
+            rel = entry.get("path", "")
+            if not rel or (current_path and rel == current_path):
+                continue
+            if not self.recent_journal_checkbox.isChecked() and rel.startswith("/Journal/"):
+                continue
+            label = Path(rel).stem
+            item = QListWidgetItem(label)
+            item.setData(PATH_ROLE, rel)
+            try:
+                item.setToolTip(rel)
+            except Exception:
+                pass
+            self.recent_list.addItem(item)
+        
+        self._recent_fetching = False
+    
     def _open_recent_link(self, item: QListWidgetItem) -> None:
         if not item:
             return

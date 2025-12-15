@@ -239,6 +239,11 @@ class ModeWindow(QMainWindow):
             self.editor.textChanged.disconnect(self.editor._schedule_heading_outline)
         except Exception:
             pass
+        # Keep lightweight symbol enforcement (bullet/checkbox/heading line transforms) active in the overlay
+        try:
+            self.editor.textChanged.connect(self.editor._enforce_display_symbols)
+        except Exception:
+            pass
         self.editor.set_read_only_mode(read_only)
         self.editor.set_vi_mode_enabled(config.load_vi_mode_enabled())
         self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
@@ -400,6 +405,10 @@ class ModeWindow(QMainWindow):
     def _update_paragraph_highlight(self) -> None:
         if not getattr(self, "_ready", False) or self._should_block_highlight():
             return
+        # Prevent recursion
+        if getattr(self, '_highlight_guard', False):
+            return
+        self._highlight_guard = True
         enable = (
             (self.mode == "focus" and self._settings.get("paragraph_focus", False))
             or (self.mode == "audience" and self._settings.get("paragraph_highlight", True))
@@ -425,7 +434,10 @@ class ModeWindow(QMainWindow):
         except Exception:
             pass
         selections.append(extra)
-        self.editor.setExtraSelections(selections)
+        try:
+            self.editor.setExtraSelections(selections)
+        finally:
+            self._highlight_guard = False
 
     def _update_cursor_halo(self) -> None:
         if self.mode != "audience" or not self._settings.get("cursor_spotlight", True):

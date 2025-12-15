@@ -1271,6 +1271,13 @@ class MarkdownEditor(QTextEdit):
         self._ai_send_shortcut.activated.connect(self._show_ai_action_overlay)
         self._ai_focus_shortcut = QShortcut(QKeySequence("Ctrl+Shift+["), self)
         self._ai_focus_shortcut.activated.connect(self._emit_ai_chat_focus)
+        
+        self._copy_link_shortcut = QShortcut(QKeySequence("Ctrl+Shift+L"), self)
+        try:
+            self._copy_link_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        except Exception:
+            pass
+        self._copy_link_shortcut.activated.connect(self._handle_copy_link_shortcut)
 
         self._ai_action_overlay = AIActionOverlay(self)
         self._ai_action_overlay.actionTriggered.connect(self._handle_ai_action_overlay)
@@ -1790,19 +1797,31 @@ class MarkdownEditor(QTextEdit):
         if abs_origin is None:
             return
 
-        # Pick the nearest link at/after the origin, otherwise the last before it
+        # Pick the appropriate link based on trigger type
         chosen = None
-        fallback_before = None
-        for m in WIKI_LINK_DISPLAY_PATTERN.finditer(display_text):
-            if m.start() <= abs_origin <= m.end():
-                chosen = m
-                break
-            if m.start() > abs_origin and chosen is None:
-                chosen = m
-                break
-            fallback_before = m
-        if chosen is None and fallback_before is not None:
-            chosen = fallback_before
+        if trigger == "enter":
+            # For Enter key: cursor is on new line, find the link ending just before the newline
+            # (the link on the previous line that was just typed)
+            best_before = None
+            for m in WIKI_LINK_DISPLAY_PATTERN.finditer(display_text):
+                if m.end() < abs_origin:
+                    best_before = m
+                elif m.start() >= abs_origin:
+                    break
+            chosen = best_before
+        else:
+            # For Space key: find the link at/after the origin
+            fallback_before = None
+            for m in WIKI_LINK_DISPLAY_PATTERN.finditer(display_text):
+                if m.start() <= abs_origin <= m.end():
+                    chosen = m
+                    break
+                if m.start() > abs_origin and chosen is None:
+                    chosen = m
+                    break
+                fallback_before = m
+            if chosen is None and fallback_before is not None:
+                chosen = fallback_before
         if not chosen:
             return
 
@@ -1827,6 +1846,7 @@ class MarkdownEditor(QTextEdit):
                 target_pos += 1
 
         cursor.setPosition(min(target_pos, len(display_text)))
+        self.setTextCursor(cursor)
         # Ensure we are not left inside hidden link sentinels for vi/arrow navigation
         try:
             self._handle_link_boundary_navigation(Qt.Key_Right)
@@ -2673,6 +2693,12 @@ class MarkdownEditor(QTextEdit):
                 event.accept()
                 return
         
+        # Protect link sentinels from deletion
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace) and not meaningful_modifiers:
+            if self._protect_sentinel_deletion(event.key()):
+                event.accept()
+                return
+        
         if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not meaningful_modifiers:
             # Check if cursor is within a link - if so, just insert newline, don't activate
             cursor = self.textCursor()
@@ -3240,6 +3266,134 @@ class MarkdownEditor(QTextEdit):
         
         return False
 
+    def _protect_sentinel_deletion(self, key: int) -> bool:
+        """Prevent deletion of link sentinels that would corrupt link display. Returns True if deletion should be blocked."""
+        cursor = self.textCursor()
+        
+        # If there's a selection, check if it contains any sentinels
+        if cursor.hasSelection():
+            selected_text = cursor.selectedText()
+            if '\x00' in selected_text:
+                # Delete the entire link(s) instead of partial sentinels
+                self._delete_selection_with_links(cursor)
+                return True
+        else:
+            # Single character deletion
+            block = cursor.block()
+            rel_pos = cursor.position() - block.position()
+            text = block.text()
+            
+            if key == Qt.Key_Delete:
+                # Check if we're about to delete a sentinel
+                if rel_pos < len(text) and text[rel_pos] == '\x00':
+                    # Find the complete link structure and delete it
+                    self._delete_link_at_position(cursor, rel_pos)
+                    return True
+                # Check if we're right after a link's closing sentinel
+                if rel_pos > 0 and text[rel_pos - 1] == '\x00':
+                    self._delete_link_at_position(cursor, rel_pos - 1)
+                    return True
+            elif key == Qt.Key_Backspace:
+                # Check if we're about to delete a sentinel
+                if rel_pos > 0 and text[rel_pos - 1] == '\x00':
+                    # Find the complete link structure and delete it
+                    self._delete_link_at_position(cursor, rel_pos - 1)
+                    return True
+                # Also check if we're at the start of a visible part of a link
+                # by checking if there's a sentinel anywhere behind us
+                if rel_pos > 0:
+                    idx = 0
+                    while idx < len(text):
+                        if text[idx] == '\x00':
+                            link_start_pos = idx
+                            link_content_start = idx + 1
+                            link_content_end = text.find('\x00', link_content_start)
+                            if link_content_end > link_content_start:
+                                label_start = link_content_end + 1
+                                label_end = text.find('\x00', label_start)
+                                if label_end >= label_start:
+                                    link_end_pos = label_end + 1
+                                    # Check if cursor is inside this link's visible region
+                                    if label_end == label_start:  # Empty label - link is visible
+                                        visible_start = link_content_start
+                                        visible_end = link_content_end
+                                    else:  # Non-empty label - label is visible
+                                        visible_start = label_start
+                                        visible_end = label_end
+                                    
+                                    # If cursor is at start of visible part, backspace would hit sentinel
+                                    if rel_pos == visible_start:
+                                        self._delete_link_at_position(cursor, link_start_pos)
+                                        return True
+                                    
+                                    idx = link_end_pos
+                                    continue
+                        idx += 1
+        
+        return False
+
+    def _delete_selection_with_links(self, cursor: QTextCursor) -> None:
+        """Delete selection, removing complete links if any sentinels are selected."""
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+        
+        # Get the full text to analyze
+        full_text = self.toPlainText()
+        
+        # Find all link boundaries
+        link_ranges = []
+        for match in WIKI_LINK_DISPLAY_PATTERN.finditer(full_text):
+            link_ranges.append((match.start(), match.end()))
+        
+        # Determine which links overlap with the selection
+        adjusted_start = start
+        adjusted_end = end
+        
+        for link_start, link_end in link_ranges:
+            # If selection overlaps with link, expand to include the entire link
+            if not (end <= link_start or start >= link_end):
+                adjusted_start = min(adjusted_start, link_start)
+                adjusted_end = max(adjusted_end, link_end)
+        
+        # Delete the adjusted range
+        new_cursor = QTextCursor(self.document())
+        new_cursor.setPosition(adjusted_start)
+        new_cursor.setPosition(adjusted_end, QTextCursor.KeepAnchor)
+        new_cursor.removeSelectedText()
+        self.setTextCursor(new_cursor)
+
+    def _delete_link_at_position(self, cursor: QTextCursor, sentinel_pos: int) -> None:
+        """Delete the complete link structure at the given sentinel position."""
+        block = cursor.block()
+        text = block.text()
+        
+        # Find the complete link structure containing this sentinel
+        idx = 0
+        while idx < len(text):
+            if text[idx] == '\x00':
+                link_start_pos = idx
+                link_content_start = idx + 1
+                link_content_end = text.find('\x00', link_content_start)
+                if link_content_end > link_content_start:
+                    label_start = link_content_end + 1
+                    label_end = text.find('\x00', label_start)
+                    if label_end >= label_start:
+                        link_end_pos = label_end + 1
+                        
+                        # Check if the sentinel_pos is within this link structure
+                        if link_start_pos <= sentinel_pos < link_end_pos:
+                            # Delete the entire link
+                            new_cursor = QTextCursor(block)
+                            new_cursor.setPosition(block.position() + link_start_pos)
+                            new_cursor.setPosition(block.position() + link_end_pos, QTextCursor.KeepAnchor)
+                            new_cursor.removeSelectedText()
+                            self.setTextCursor(new_cursor)
+                            return
+                        
+                        idx = link_end_pos
+                        continue
+            idx += 1
+
     def _trigger_history_navigation(self, qt_key: int) -> None:
         """Simulate Alt+Left/Right to leverage MainWindow history shortcuts."""
         window = self.window()
@@ -3289,7 +3443,39 @@ class MarkdownEditor(QTextEdit):
             return None
         if not text:
             return None
-        # Skip all link detection during overlay transitions or guarded reloads.
+        # Prefer markdown-style links first (handles display + storage formats)
+        md_link = self._markdown_link_at_cursor(cursor)
+        if md_link:
+            start, end, _label, link_target = md_link
+            return link_target, start, end
+
+        # Plain HTTP URLs
+        http_iter = HTTP_URL_PATTERN.globalMatch(text)
+        while http_iter.hasNext():
+            match = http_iter.next()
+            start = match.capturedStart()
+            end = start + match.capturedLength()
+            if start <= rel <= end:
+                return match.captured("url"), start, end
+
+        # Colon links (e.g., :Page:Child or :Page#anchor)
+        colon_iter = COLON_LINK_PATTERN.globalMatch(text)
+        while colon_iter.hasNext():
+            match = colon_iter.next()
+            start = match.capturedStart()
+            end = start + match.capturedLength()
+            if start <= rel <= end:
+                link = ensure_root_colon_link(match.captured("link"))
+                return link, start, end
+
+        # CamelCase links with + prefix
+        camel_iter = CAMEL_LINK_PATTERN.globalMatch(text)
+        while camel_iter.hasNext():
+            match = camel_iter.next()
+            start = match.capturedStart()
+            end = start + match.capturedLength()
+            if start <= rel < end:
+                return match.captured("link"), start, end
         return None
 
     def _is_cursor_at_link_activation_point(self, cursor: QTextCursor) -> bool:
@@ -3307,7 +3493,18 @@ class MarkdownEditor(QTextEdit):
             return None
         if self._in_mode_window_transition():
             return None
-        return None
+        region = self._link_region_at_cursor(cursor)
+        if not region:
+            return None
+        link, _, _ = region
+        if not link:
+            return None
+        link = link.strip()
+        if link.startswith(("http://", "https://")):
+            return self._normalize_external_link(link)
+        if ":" in link or link.startswith(":"):
+            return ensure_root_colon_link(link)
+        return link
 
     def _markdown_link_at_cursor(self, cursor: QTextCursor) -> Optional[tuple[int,int,str,str]]:
         """Return (start, end, text, link) for a wiki-style link under cursor, or None."""
@@ -3571,6 +3768,17 @@ class MarkdownEditor(QTextEdit):
             self._vi_clipboard = colon_path
             return colon_path
         return None
+
+    def _handle_copy_link_shortcut(self) -> None:
+        """Handle Ctrl+Shift+L shortcut to copy link under cursor."""
+        copied = self._copy_link_or_heading()
+        if copied:
+            window = self.window()
+            try:
+                if window and hasattr(window, "statusBar"):
+                    window.statusBar().showMessage(f"Copied link: {copied}", 2000)
+            except Exception:
+                pass
 
     def _copy_link_or_heading(self) -> Optional[str]:
         """Copy link under cursor, otherwise current heading slugged link."""
@@ -4146,6 +4354,29 @@ class MarkdownEditor(QTextEdit):
 
     def _vi_cut_selection_or_char(self) -> None:
         cursor = self.textCursor()
+        
+        # Check for sentinel deletion before proceeding
+        if cursor.hasSelection():
+            selected_text = cursor.selectedText()
+            if '\x00' in selected_text:
+                # Use the safe deletion method
+                self._delete_selection_with_links(cursor)
+                return
+        else:
+            # Check if next character is a sentinel, or if cursor is right after a link's closing sentinel
+            block = cursor.block()
+            rel_pos = cursor.position() - block.position()
+            text = block.text()
+            if rel_pos < len(text) and text[rel_pos] == '\x00':
+                # Delete the entire link
+                self._delete_link_at_position(cursor, rel_pos)
+                return
+            # Check if we're right after a link's closing sentinel
+            if rel_pos > 0 and text[rel_pos - 1] == '\x00':
+                # Find if this is a closing sentinel of a link
+                self._delete_link_at_position(cursor, rel_pos - 1)
+                return
+        
         cursor.beginEditBlock()
         text = ""
         if cursor.hasSelection():
@@ -4669,21 +4900,22 @@ class MarkdownEditor(QTextEdit):
             c = self.textCursor()
             c.setPosition(new_abs)
             self.setTextCursor(c)
+            
+            # Apply hanging indent for wrapped lines (inside guard to prevent recursion)
+            is_bullet, bullet_indent, _ = self._is_bullet_line(line)
+            is_dash, dash_indent, _ = self._is_dash_line(line)
+            is_task, task_indent, _, _ = self._is_task_line(line)
+            if is_bullet:
+                self._apply_hanging_indent(block, bullet_indent, "• ")
+            elif is_dash:
+                self._apply_hanging_indent(block, dash_indent, "- ")
+            elif is_task:
+                marker = "☑ " if line.strip().startswith("☑") else "☐ "
+                self._apply_hanging_indent(block, task_indent, marker)
+            else:
+                self._clear_hanging_indent(block)
         finally:
             self._display_guard = False
-        # Apply hanging indent for wrapped lines
-        is_bullet, bullet_indent, _ = self._is_bullet_line(line)
-        is_dash, dash_indent, _ = self._is_dash_line(line)
-        is_task, task_indent, _, _ = self._is_task_line(line)
-        if is_bullet:
-            self._apply_hanging_indent(block, bullet_indent, "• ")
-        elif is_dash:
-            self._apply_hanging_indent(block, dash_indent, "- ")
-        elif is_task:
-            marker = "☑ " if line.strip().startswith("☑") else "☐ "
-            self._apply_hanging_indent(block, task_indent, marker)
-        else:
-            self._clear_hanging_indent(block)
         self._schedule_heading_outline()
 
     def _restore_cursor_position(self, position: int) -> None:
