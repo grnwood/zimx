@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QLabel,
 )
 from shiboken6 import Shiboken
+from markdown import markdown as render_markdown
 from .path_utils import path_to_colon, colon_to_path, ensure_root_colon_link
 from .heading_utils import heading_slug
 from .page_load_logger import PageLoadLogger
@@ -1271,13 +1272,6 @@ class MarkdownEditor(QTextEdit):
         self._ai_send_shortcut.activated.connect(self._show_ai_action_overlay)
         self._ai_focus_shortcut = QShortcut(QKeySequence("Ctrl+Shift+["), self)
         self._ai_focus_shortcut.activated.connect(self._emit_ai_chat_focus)
-        
-        self._copy_link_shortcut = QShortcut(QKeySequence("Ctrl+Shift+L"), self)
-        try:
-            self._copy_link_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
-        except Exception:
-            pass
-        self._copy_link_shortcut.activated.connect(self._handle_copy_link_shortcut)
 
         self._ai_action_overlay = AIActionOverlay(self)
         self._ai_action_overlay.actionTriggered.connect(self._handle_ai_action_overlay)
@@ -2834,6 +2828,13 @@ class MarkdownEditor(QTextEdit):
             for act in base_menu.actions():
                 edit_sub.addAction(act)
             copy_sub = menu.addMenu("Copy / Share")
+            
+            # Add "Copy as HTML" option if text is selected
+            cursor = self.textCursor()
+            if cursor.hasSelection():
+                copy_html_action = copy_sub.addAction("Copy as HTML")
+                copy_html_action.triggered.connect(self._copy_selection_as_html)
+                copy_sub.addSeparator()
             # Get heading text if right-click is on a heading line
             click_cursor = self.cursorForPosition(event.pos())
             line_no = click_cursor.blockNumber() + 1
@@ -2908,6 +2909,39 @@ class MarkdownEditor(QTextEdit):
         except Exception:
             pass
         return text.strip()
+
+    def _copy_selection_as_html(self) -> None:
+        """Convert selected markdown text to HTML and copy to clipboard."""
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            return
+        
+        # Get selected text and normalize it
+        selected_text = cursor.selectedText()
+        # Convert Qt's paragraph separator to newlines
+        markdown_text = selected_text.replace("\u2029", "\n")
+        # Convert storage format links [target|label] to markdown [label](target)
+        markdown_text = self._from_display(markdown_text)
+        
+        try:
+            # Convert markdown to HTML with common extensions
+            html = render_markdown(
+                markdown_text,
+                extensions=["extra", "sane_lists", "tables", "fenced_code", "nl2br"]
+            )
+            
+            # Copy to clipboard
+            clipboard = QGuiApplication.clipboard()
+            mime_data = QMimeData()
+            mime_data.setHtml(html)
+            mime_data.setText(markdown_text)  # Also provide plain text fallback
+            clipboard.setMimeData(mime_data)
+            
+        except Exception as e:
+            logger.error(f"Failed to convert selection to HTML: {e}")
+            # Fallback to plain text
+            clipboard = QGuiApplication.clipboard()
+            clipboard.setText(markdown_text)
 
     def _install_copy_actions(self, menu: QMenu) -> None:
         """Replace the default Copy action with sanitized versions and add 'Copy As Markdown'."""
@@ -3768,17 +3802,6 @@ class MarkdownEditor(QTextEdit):
             self._vi_clipboard = colon_path
             return colon_path
         return None
-
-    def _handle_copy_link_shortcut(self) -> None:
-        """Handle Ctrl+Shift+L shortcut to copy link under cursor."""
-        copied = self._copy_link_or_heading()
-        if copied:
-            window = self.window()
-            try:
-                if window and hasattr(window, "statusBar"):
-                    window.statusBar().showMessage(f"Copied link: {copied}", 2000)
-            except Exception:
-                pass
 
     def _copy_link_or_heading(self) -> Optional[str]:
         """Copy link under cursor, otherwise current heading slugged link."""

@@ -2445,6 +2445,7 @@ class MainWindow(QMainWindow):
             if not self.page_history or self.page_history[-1] != path:
                 self.page_history.append(path)
                 self.history_index = len(self.page_history) - 1
+                print(f"[HISTORY] Added to history: {path}, history_index={self.history_index}, total={len(self.page_history)}")
                 # Refresh history buttons
                 self._refresh_history_buttons()
         
@@ -3075,18 +3076,24 @@ class MainWindow(QMainWindow):
         
 
     def _copy_current_page_link(self) -> None:
-        """Copy the current page's link to clipboard (Ctrl+Shift+L)."""
+        """Copy link under cursor or current page's link to clipboard (Ctrl+Shift+L)."""
         if not self.current_path:
             self.statusBar().showMessage("No page open to copy", 3000)
             return
-        copied = self.editor.copy_current_page_link()
+        # First try to copy the link under the cursor (includes slug links)
+        copied = self.editor._copy_link_or_heading()
         if copied:
             self.statusBar().showMessage(f"Copied link: {copied}", 3000)
         else:
-            colon_path = path_to_colon(self.current_path)
-            if colon_path:
-                rooted = ensure_root_colon_link(colon_path)
-                self.statusBar().showMessage(f"Copied link: {rooted}", 3000)
+            # Fallback to copying current page
+            copied = self.editor.copy_current_page_link()
+            if copied:
+                self.statusBar().showMessage(f"Copied link: {copied}", 3000)
+            else:
+                colon_path = path_to_colon(self.current_path)
+                if colon_path:
+                    rooted = ensure_root_colon_link(colon_path)
+                    self.statusBar().showMessage(f"Copied link: {rooted}", 3000)
 
     def _on_link_copied(self, link_text: str) -> None:
         """Show status when links are copied via editor context menu."""
@@ -5577,7 +5584,12 @@ class MainWindow(QMainWindow):
         self._remember_history_cursor()
         self.history_index -= 1
         target_path = self.page_history[self.history_index]
-        self._open_file(target_path, add_to_history=False, restore_history_cursor=True)
+        print(f"[HISTORY] Navigate back: index {self.history_index+1} -> {self.history_index}, opening: {target_path}")
+        self._suspend_selection_open = True
+        try:
+            self._open_file(target_path, add_to_history=False, restore_history_cursor=True)
+        finally:
+            self._suspend_selection_open = False
         QTimer.singleShot(0, self.editor.setFocus)
 
     def _navigate_history_forward(self) -> None:
@@ -5587,7 +5599,12 @@ class MainWindow(QMainWindow):
         self._remember_history_cursor()
         self.history_index += 1
         target_path = self.page_history[self.history_index]
-        self._open_file(target_path, add_to_history=False, restore_history_cursor=True)
+        print(f"[HISTORY] Navigate forward: index {self.history_index-1} -> {self.history_index}, opening: {target_path}")
+        self._suspend_selection_open = True
+        try:
+            self._open_file(target_path, add_to_history=False, restore_history_cursor=True)
+        finally:
+            self._suspend_selection_open = False
         QTimer.singleShot(0, self.editor.setFocus)
     
     def _reload_page_preserve_cursor(self, path: str) -> None:
@@ -6011,8 +6028,12 @@ class MainWindow(QMainWindow):
         parent_path = colon_to_path(parent_colon, self.vault_root_name)
         if parent_path:
             self._remember_history_cursor()
-            self._select_tree_path(parent_path)
-            self._open_file(parent_path, restore_history_cursor=True)
+            self._suspend_selection_open = True
+            try:
+                self._select_tree_path(parent_path)
+                self._open_file(parent_path, add_to_history=False, restore_history_cursor=True)
+            finally:
+                self._suspend_selection_open = False
             if len(parts) == 2:
                 # Just moved to root vault
                 self.statusBar().showMessage(f"At root: {parent_colon}")
@@ -6041,8 +6062,12 @@ class MainWindow(QMainWindow):
         if child_file.exists():
             child_path = f"/{child_file.relative_to(Path(self.vault_root)).as_posix()}"
             self._remember_history_cursor()
-            self._select_tree_path(child_path)
-            self._open_file(child_path, restore_history_cursor=True)
+            self._suspend_selection_open = True
+            try:
+                self._select_tree_path(child_path)
+                self._open_file(child_path, add_to_history=False, restore_history_cursor=True)
+            finally:
+                self._suspend_selection_open = False
 
     def _navigate_tree(self, delta: int, leaves_only: bool) -> None:
         indexes = self._gather_indexes(leaves_only)

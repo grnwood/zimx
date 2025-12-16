@@ -78,9 +78,8 @@ Logbook of all the development efforts on zim. yes!
 (x)  when i use vim 'p' with a image in the buffer it does not paste. default all image pastes to the width of the markdown editor? @edit
 (x)  when editing a header item its janky , firm this out so it doesn't lose formatting until done. @edit
 ( )  add a right click copy as ... html ... convert the selected buffer to basic html @edit
-( )  BUG: insert link is sometimes writing it at top of file!  super annoying ! @edit
-( )  BUG: i think autosave is putting the cursor back to top, should leave it alone @edit
-( )   lets test that  
+(x)  BUG: insert link is sometimes writing it at top of file!  super annoying ! @edit
+
 ### Git
 ---
 ( )  git support: simple 'version this vault' @edit
