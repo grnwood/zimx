@@ -49,6 +49,55 @@ def _should_suspend_nav_for_tag(text: str, cursor: int, available_tags: set[str]
     return tag not in available_tags
 
 
+class DebugTaskTree(QTreeWidget):
+    """QTreeWidget that logs mouse events for debugging."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        from PySide6.QtCore import QTimer
+        self._timer = QTimer()
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._emit_deferred_double_click)
+        self._pending_task_data = None
+    
+    def mouseDoubleClickEvent(self, event):  # type: ignore[override]
+        print(f"[DEBUG_TREE] mouseDoubleClickEvent: button={event.button()}, pos={event.pos()}")
+        item = self.itemAt(event.pos())
+        column = self.columnAt(event.pos().x())
+        print(f"[DEBUG_TREE] Column at click: {column}")
+        
+        if item and event.button() == Qt.LeftButton:
+            print(f"[DEBUG_TREE] Item at pos: {item.text(1)[:50]}")
+            # Extract task data immediately before item might become invalid
+            task_data = item.data(0, Qt.UserRole)
+            if task_data:
+                print(f"[DEBUG_TREE] Task data: {task_data.get('path')}:{task_data.get('line')}")
+                self._pending_task_data = task_data
+                self._timer.start(0)
+                event.accept()
+                return
+        
+        # Only call super if we didn't handle it
+        print(f"[DEBUG_TREE] Calling super().mouseDoubleClickEvent()")
+        super().mouseDoubleClickEvent(event)
+        print(f"[DEBUG_TREE] After super().mouseDoubleClickEvent(), event.isAccepted()={event.isAccepted()}")
+    
+    def _emit_deferred_double_click(self):
+        if self._pending_task_data:
+            print(f"[DEBUG_TREE] Emitting task activation for {self._pending_task_data.get('path')}")
+            # Find the parent TaskPanel and emit through it
+            parent = self.parent()
+            while parent and not hasattr(parent, 'taskActivated'):
+                parent = parent.parent()
+            if parent and hasattr(parent, 'taskActivated'):
+                parent.taskActivated.emit(self._pending_task_data['path'], self._pending_task_data.get('line') or 1)
+            self._pending_task_data = None
+    
+    def mousePressEvent(self, event):  # type: ignore[override]
+        print(f"[DEBUG_TREE] mousePressEvent: button={event.button()}, pos={event.pos()}")
+        super().mousePressEvent(event)
+        print(f"[DEBUG_TREE] After super().mousePressEvent(), event.isAccepted()={event.isAccepted()}")
+
+
 class TaskPanel(QWidget):
     taskActivated = Signal(str, int)
     focusGained = Signal()
@@ -140,13 +189,13 @@ class TaskPanel(QWidget):
             self._refresh_tasks,
         )
 
-        self.task_tree = QTreeWidget()
+        self.task_tree = DebugTaskTree()
         self.task_tree.setColumnCount(4)
         self.task_tree.setHeaderLabels(["!", "Task", "Due", "Path"])
         self.task_tree.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.task_tree.setRootIsDecorated(True)
         self.task_tree.itemActivated.connect(self._emit_task_activation)
-        self.task_tree.itemDoubleClicked.connect(self._emit_task_activation)
+        self.task_tree.itemDoubleClicked.connect(lambda item, col: self._emit_task_activation(item))
         self.task_tree.setSortingEnabled(True)
         self.sort_column = 0
         self.sort_order = Qt.AscendingOrder
@@ -157,6 +206,11 @@ class TaskPanel(QWidget):
         self.task_tree.setFocusPolicy(Qt.StrongFocus)
         self.task_tree.installEventFilter(self)
         self.task_tree.setFocusPolicy(Qt.StrongFocus)
+        
+        # Debug: Log when tree signals fire
+        self.task_tree.itemActivated.connect(lambda item: print(f"[TASK_TREE] itemActivated signal fired"))
+        self.task_tree.itemDoubleClicked.connect(lambda item, col: print(f"[TASK_TREE] itemDoubleClicked signal fired, col={col}"))
+        
         saved_header = config.load_header_state(self._header_state_key)
         if saved_header:
             try:
@@ -440,7 +494,8 @@ class TaskPanel(QWidget):
 
     def focusInEvent(self, event):  # type: ignore[override]
         super().focusInEvent(event)
-        self.focus_search()
+        # Don't auto-focus search - let user click what they want
+        # Auto-focusing search was interfering with task tree double-clicks
         try:
             self.focusGained.emit()
         except Exception:
@@ -794,7 +849,9 @@ class TaskPanel(QWidget):
     def _emit_task_activation(self, item: QTreeWidgetItem) -> None:
         task = item.data(0, Qt.UserRole)
         if not task:
+            print(f"[TASK_PANEL] _emit_task_activation: no task data on item")
             return
+        print(f"[TASK_PANEL] _emit_task_activation: emitting signal for {task['path']}:{task.get('line') or 1}")
         self.taskActivated.emit(task["path"], task.get("line") or 1)
 
     def _present_path(self, path: str) -> str:

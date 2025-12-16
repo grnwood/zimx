@@ -3172,16 +3172,12 @@ class MarkdownEditor(QTextEdit):
         # Single click on links to activate them
         if event.button() == Qt.LeftButton:
             cursor = self.cursorForPosition(event.pos())
-            # Verify the cursor position actually corresponds to the click location
-            # by checking that the rect for the cursor contains the click position
-            cursor_rect = self.cursorRect(cursor)
-            if cursor_rect.isValid() and cursor_rect.contains(event.pos()):
-                md_info = self._markdown_link_at_cursor(cursor)
-                link = md_info[3] if md_info else self._link_under_cursor(cursor)
-                if link:
-                    self.linkActivated.emit(link)
-                    event.accept()
-                    return
+            md_info = self._markdown_link_at_cursor(cursor)
+            link = md_info[3] if md_info else self._link_under_cursor(cursor)
+            if link:
+                self.linkActivated.emit(link)
+                event.accept()
+                return
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):  # type: ignore[override]
@@ -3195,7 +3191,8 @@ class MarkdownEditor(QTextEdit):
             return
         # Double-click on links also activates them
         cursor = self.cursorForPosition(event.pos())
-        link = self._link_under_cursor(cursor)
+        md_info = self._markdown_link_at_cursor(cursor)
+        link = md_info[3] if md_info else self._link_under_cursor(cursor)
         if link:
             self.linkActivated.emit(link)
             return
@@ -3469,7 +3466,7 @@ class MarkdownEditor(QTextEdit):
             match = http_iter.next()
             start = match.capturedStart()
             end = start + match.capturedLength()
-            if start <= rel <= end:
+            if start <= rel < end:
                 return match.captured("url"), start, end
 
         # Colon links (e.g., :Page:Child or :Page#anchor)
@@ -3478,7 +3475,7 @@ class MarkdownEditor(QTextEdit):
             match = colon_iter.next()
             start = match.capturedStart()
             end = start + match.capturedLength()
-            if start <= rel <= end:
+            if start <= rel < end:
                 link = ensure_root_colon_link(match.captured("link"))
                 return link, start, end
 
@@ -3552,7 +3549,7 @@ class MarkdownEditor(QTextEdit):
                             clean_link = raw_link
 
                         # Check if cursor is in the visible portion
-                        if visible_start <= rel <= visible_end:
+                        if visible_start <= rel < visible_end:
                             display_text = visible_text or clean_link
                             return (idx, label_end + 1, display_text, clean_link)
 
@@ -3578,7 +3575,7 @@ class MarkdownEditor(QTextEdit):
                 visible_end = start + 1 + len(link)
                 visible_text = link
             
-            if visible_start <= rel <= visible_end:
+            if visible_start <= rel < visible_end:
                 return (start, end, visible_text, link)
         
         # Check file links: [text](./file.ext) or [text](file.ext)

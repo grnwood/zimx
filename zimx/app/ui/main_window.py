@@ -2246,10 +2246,10 @@ class MainWindow(QMainWindow):
         self._restore_expanded_state()
         
         if self._pending_selection:
-            # Ensure parent nodes are expanded before selecting
-            self._ensure_tree_path_loaded(self._pending_selection)
-            self._select_tree_path(self._pending_selection)
+            # Defer selection to next event loop iteration to ensure tree is fully rendered
+            selection_path = self._pending_selection
             self._pending_selection = None
+            QTimer.singleShot(0, lambda: self._deferred_select_tree_path(selection_path))
         self.right_panel.refresh_tasks()
         self.right_panel.refresh_calendar()
         self._apply_nav_filter_style()
@@ -3310,10 +3310,20 @@ class MainWindow(QMainWindow):
         self.right_panel.set_font_size(ai_font_size)
 
     def _open_task_from_panel(self, path: str, line: int) -> None:
-        self._open_file(path)
-        # Focus first, then go to line so the selection isn't cleared
-        self.editor.setFocus()
+        print(f"[MAIN_WINDOW] _open_task_from_panel called: {path}:{line}, current_path={self.current_path}")
+        # Remember which widget had focus (should be task tree)
+        focused_widget = self.focusWidget()
+        print(f"[MAIN_WINDOW] Focus before: {focused_widget}")
+        
+        # Open the file and jump to the task line
+        if path != self.current_path:
+            self._open_file(path)
         self._goto_line(line, select_line=True)
+        
+        # Restore focus to the task panel so user can continue clicking tasks
+        if focused_widget and "Task" in focused_widget.__class__.__name__:
+            focused_widget.setFocus()
+            print(f"[MAIN_WINDOW] Focus restored to: {focused_widget}")
 
     def _open_link_from_panel(self, path: str) -> None:
         if not path:
@@ -5488,12 +5498,23 @@ class MainWindow(QMainWindow):
             return f"/{name}"
         return f"{parent}/{name}"
 
+    def _deferred_select_tree_path(self, target_path: str) -> None:
+        """Select tree path after deferring to next event loop iteration."""
+        if not target_path:
+            return
+        try:
+            self._ensure_tree_path_loaded(target_path)
+            self._select_tree_path(target_path)
+        except Exception as exc:
+            logNav(f"Failed to select tree path {target_path}: {exc}")
+
     def _select_tree_path(self, target_path: str) -> None:
         match = self._find_item(self.tree_model.invisibleRootItem(), target_path)
         if match:
             index = match.index()
-            self.tree_view.setCurrentIndex(index)
-            self.tree_view.scrollTo(index)
+            if index.isValid():
+                self.tree_view.setCurrentIndex(index)
+                self.tree_view.scrollTo(index)
 
     def _locate_current_page_in_tree(self) -> None:
         """Manually locate the current page in the navigator."""

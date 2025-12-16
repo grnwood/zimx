@@ -91,7 +91,7 @@ class TabbedRightPanel(QWidget):
         self.tabs.tabBar().customContextMenuRequested.connect(self._open_tab_context_menu)
         
         # Forward signals
-        self.task_panel.taskActivated.connect(self.taskActivated)
+        self.task_panel.taskActivated.connect(lambda path, line: print(f"[TABBED_PANEL] taskActivated received: {path}:{line}") or self.taskActivated.emit(path, line))
         self.task_panel.filterClearRequested.connect(self.filterClearRequested)
         self.calendar_panel.dateActivated.connect(self.dateActivated)
         self.calendar_panel.pageActivated.connect(self.calendarPageActivated)
@@ -268,11 +268,8 @@ class TabbedRightPanel(QWidget):
         if widget:
             if widget == self.calendar_panel:
                 self._sync_calendar_tab_state()
-            # If Tasks tab, focus its search bar for quick typing
-            if widget == self.task_panel and hasattr(self.task_panel, "focus_search"):
-                self.task_panel.focus_search()
-            else:
-                widget.setFocus(Qt.OtherFocusReason)
+            # Let the widget handle its own focus - don't force focus to search bar
+            widget.setFocus(Qt.OtherFocusReason)
 
     def focus_ai_chat(self, page_path=None, create=False) -> None:
         """Switch to AI Chat tab and sync to the given page."""
