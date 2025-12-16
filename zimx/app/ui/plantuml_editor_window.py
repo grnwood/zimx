@@ -7,8 +7,8 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal, QSize, QMimeData, QRect
-from PySide6.QtGui import QKeySequence, QShortcut, QPixmap, QImage, QTextCursor, QFont
+from PySide6.QtCore import Qt, QTimer, Signal, QSize, QMimeData, QRect, QUrl, QByteArray
+from PySide6.QtGui import QKeySequence, QShortcut, QPixmap, QImage, QTextCursor, QFont, QDesktopServices
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -105,6 +105,434 @@ class PlainTextEditWithLineNumbers(QPlainTextEdit):
         super().resizeEvent(event)
         cr = self.contentsRect()
         self.line_number_area.setGeometry(QRect(cr.left(), cr.top(), self.lineNumberAreaWidth(), cr.height()))
+
+
+class ViPlainTextEdit(PlainTextEditWithLineNumbers):
+    """PlainTextEdit with a lightweight vi-style navigation mode."""
+
+    viInsertModeChanged = Signal(bool)
+
+    def __init__(self):
+        super().__init__()
+        self._vi_feature_enabled: bool = False
+        self._vi_mode_active: bool = False
+        self._vi_insert_mode: bool = False
+        self._vi_block_cursor_enabled: bool = False
+        self._pending_d: bool = False
+        self._pending_y: bool = False
+        self._pending_g: bool = False
+        self._vi_clipboard: str = ""
+        width = max(1, self.cursorWidth())
+        self._default_cursor_width: int = width
+        self._auto_indent_enabled: bool = True
+
+    def set_vi_mode_enabled(self, enabled: bool) -> None:
+        self._vi_feature_enabled = bool(enabled)
+        self._pending_d = False
+        self._pending_y = False
+        self._pending_g = False
+        if self._vi_feature_enabled:
+            self._enter_vi_navigation_mode(force_emit=True)
+        else:
+            self._vi_insert_mode = False
+            self._vi_mode_active = False
+            self._apply_cursor_style()
+            self.viInsertModeChanged.emit(False)
+
+    def set_vi_block_cursor_enabled(self, enabled: bool) -> None:
+        self._vi_block_cursor_enabled = bool(enabled)
+        self._apply_cursor_style()
+
+    def _apply_cursor_style(self) -> None:
+        if self._vi_feature_enabled and self._vi_mode_active and self._vi_block_cursor_enabled:
+            try:
+                block_width = max(2, self.fontMetrics().horizontalAdvance("M"))
+            except Exception:
+                block_width = 8
+            self.setCursorWidth(block_width)
+        else:
+            self.setCursorWidth(self._default_cursor_width)
+
+    def _enter_vi_navigation_mode(self, force_emit: bool = False) -> None:
+        if not self._vi_feature_enabled:
+            return
+        emit_needed = force_emit or self._vi_insert_mode
+        self._vi_mode_active = True
+        self._vi_insert_mode = False
+        self._pending_d = False
+        self._pending_y = False
+        self._pending_g = False
+        self._apply_cursor_style()
+        if emit_needed:
+            self.viInsertModeChanged.emit(False)
+
+    def _enter_vi_insert_mode(self) -> None:
+        if not self._vi_feature_enabled:
+            return
+        self._vi_mode_active = False
+        self._vi_insert_mode = True
+        self._pending_d = False
+        self._pending_y = False
+        self._pending_g = False
+        self._apply_cursor_style()
+        self.viInsertModeChanged.emit(True)
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        key = event.key()
+        mods = event.modifiers()
+
+        # Handle Enter key for auto-indentation (works in both vi and normal mode)
+        if key in (Qt.Key_Return, Qt.Key_Enter) and self._auto_indent_enabled:
+            cursor = self.textCursor()
+            block = cursor.block()
+            # Extract leading whitespace from current line
+            line_text = block.text()
+            indent = line_text[:len(line_text) - len(line_text.lstrip(" \t"))]
+            # Insert newline + indent
+            cursor.beginEditBlock()
+            cursor.insertText("\n" + indent)
+            cursor.endEditBlock()
+            self.setTextCursor(cursor)
+            event.accept()
+            return
+
+        if not self._vi_feature_enabled:
+            return super().keyPressEvent(event)
+
+        # Ctrl+Shift+J/K -> Page Down / Page Up
+        if mods == (Qt.ControlModifier | Qt.ShiftModifier) and key in (Qt.Key_J, Qt.Key_K):
+            bar = self.verticalScrollBar()
+            step = max(1, bar.pageStep())
+            bar.setValue(bar.value() + (step if key == Qt.Key_J else -step))
+            event.accept()
+            return
+
+        # Insert mode: exit on Esc, otherwise behave normally
+        if self._vi_insert_mode:
+            if key == Qt.Key_Escape and mods in (Qt.NoModifier, Qt.ShiftModifier):
+                event.accept()
+                self._enter_vi_navigation_mode()
+                return
+            self._pending_d = False
+            self._pending_y = False
+            self._pending_g = False
+            return super().keyPressEvent(event)
+
+        # Navigation mode
+        if mods & Qt.ControlModifier:
+            if mods == Qt.ControlModifier and key == Qt.Key_R:
+                self.redo()
+                event.accept()
+                return
+            # Pass through other Ctrl shortcuts (copy/paste, etc.)
+            self._pending_d = False
+            self._pending_y = False
+            self._pending_g = False
+            return super().keyPressEvent(event)
+
+        # g + g -> start of document
+        if key == Qt.Key_G and self._pending_g:
+            self._pending_g = False
+            self._move_cursor(QTextCursor.Start)
+            event.accept()
+            return
+        if key == Qt.Key_G and (mods & Qt.ShiftModifier):
+            self._pending_g = False
+            self._move_cursor(QTextCursor.End)
+            event.accept()
+            return
+        if key == Qt.Key_G:
+            self._pending_g = True
+            event.accept()
+            return
+        self._pending_g = False
+
+        # dd / yy combos, or delete selection if one exists
+        if key == Qt.Key_D:
+            cursor = self.textCursor()
+            if cursor.hasSelection():
+                event.accept()
+                self._pending_d = False
+                self._pending_y = False
+                self._pending_g = False
+                self._cut_selection()
+                return
+            if self._pending_d:
+                self._pending_d = False
+                self._delete_current_line()
+            else:
+                self._pending_d = True
+            event.accept()
+            return
+        if key == Qt.Key_Y:
+            if self._pending_y:
+                self._pending_y = False
+                self._yank_current_line()
+            else:
+                self._pending_y = True
+            event.accept()
+            return
+        self._pending_d = False
+        self._pending_y = False
+
+        if key == Qt.Key_Escape:
+            event.accept()
+            return
+        if key == Qt.Key_I:
+            event.accept()
+            self._enter_vi_insert_mode()
+            return
+        if key == Qt.Key_A:
+            event.accept()
+            cursor = self.textCursor()
+            if not cursor.atEnd():
+                cursor.movePosition(QTextCursor.Right)
+                self.setTextCursor(cursor)
+            self._enter_vi_insert_mode()
+            return
+        if key == Qt.Key_O and (mods & Qt.ShiftModifier):
+            # Shift+O comes through as Key_O with Shift modifier
+            event.accept()
+            self._open_line_above()
+            return
+        if key == Qt.Key_O:
+            event.accept()
+            self._open_line_below()
+            return
+        if key == Qt.Key_H:
+            event.accept()
+            self._move_cursor(QTextCursor.Left)
+            return
+        if key == Qt.Key_L:
+            event.accept()
+            self._move_cursor(QTextCursor.Right)
+            return
+        if key == Qt.Key_J:
+            event.accept()
+            self._move_cursor(QTextCursor.Down)
+            return
+        if key == Qt.Key_K:
+            event.accept()
+            self._move_cursor(QTextCursor.Up)
+            return
+        if key == Qt.Key_0:
+            event.accept()
+            self._move_cursor(QTextCursor.StartOfLine)
+            return
+        if key == Qt.Key_Q and not (mods & Qt.ShiftModifier):
+            event.accept()
+            self._move_cursor(QTextCursor.StartOfLine)
+            return
+        if key == Qt.Key_Dollar:
+            event.accept()
+            self._move_cursor(QTextCursor.EndOfLine)
+            return
+        if (mods & Qt.ShiftModifier) and key == Qt.Key_N:
+            event.accept()
+            # Select downward one line; if at last line, select to document end
+            cursor = self.textCursor()
+            block = cursor.block()
+            if not block.isValid() or not block.next().isValid() or cursor.atEnd():
+                cursor.movePosition(QTextCursor.End, QTextCursor.KeepAnchor)
+                self.setTextCursor(cursor)
+            else:
+                cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor)
+                self.setTextCursor(cursor)
+            return
+        if (mods & Qt.ShiftModifier) and key == Qt.Key_U:
+            event.accept()
+            # Select upward one line; if at first line, select to start
+            cursor = self.textCursor()
+            block = cursor.block()
+            if not block.isValid() or not block.previous().isValid() or cursor.atStart():
+                cursor.movePosition(QTextCursor.Start, QTextCursor.KeepAnchor)
+                self.setTextCursor(cursor)
+            else:
+                cursor.movePosition(QTextCursor.Up, QTextCursor.KeepAnchor)
+                self.setTextCursor(cursor)
+            return
+        if key == Qt.Key_W:
+            event.accept()
+            self._move_cursor(QTextCursor.WordRight)
+            return
+        if key == Qt.Key_B:
+            event.accept()
+            self._move_cursor(QTextCursor.WordLeft)
+            return
+        if key == Qt.Key_X:
+            cursor = self.textCursor()
+            event.accept()
+            if cursor.hasSelection():
+                self._cut_selection()
+            else:
+                self._delete_char()
+            return
+        if key == Qt.Key_P:
+            event.accept()
+            self._paste_after()
+            return
+        if key == Qt.Key_U:
+            event.accept()
+            self.undo()
+            return
+
+        # Allow default navigation keys (arrows, page up/down, home/end)
+        if key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down, Qt.Key_PageUp, Qt.Key_PageDown, Qt.Key_Home, Qt.Key_End):
+            return super().keyPressEvent(event)
+
+        # Ignore other printable keys while in navigation mode
+        event.accept()
+
+    def _move_cursor(self, move: QTextCursor.MoveOperation) -> None:
+        cursor = self.textCursor()
+        cursor.movePosition(move)
+        self.setTextCursor(cursor)
+
+    def _delete_char(self) -> None:
+        cursor = self.textCursor()
+        if cursor.atEnd():
+            return
+        cursor.beginEditBlock()
+        cursor.deleteChar()
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+
+    def _cut_selection(self) -> None:
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            return
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+        try:
+            full_text = self.document().toPlainText()
+            selected = full_text[start:end]
+        except Exception:
+            selected = cursor.selectedText()
+            # Qt inserts U+2029 for paragraph separators; normalize to newlines
+            selected = selected.replace("\u2029", "\n")
+        self._vi_clipboard = selected if selected.endswith("\n") else selected + "\n"
+        cursor.beginEditBlock()
+        cursor.removeSelectedText()
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+
+    def _delete_current_line(self) -> None:
+        cursor = self.textCursor()
+        block = cursor.block()
+        line_text = block.text()
+        self._vi_clipboard = f"{line_text}\n"
+        start_pos = block.position()
+        cursor.beginEditBlock()
+        cursor.setPosition(start_pos)
+        cursor.movePosition(QTextCursor.EndOfBlock, QTextCursor.KeepAnchor)
+        cursor.removeSelectedText()
+        if block.next().isValid():
+            cursor.setPosition(start_pos)
+            cursor.deleteChar()
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+
+    def _yank_current_line(self) -> None:
+        cursor = self.textCursor()
+        block = cursor.block()
+        self._vi_clipboard = f"{block.text()}\n"
+
+    def _paste_after(self) -> None:
+        if not self._vi_clipboard:
+            return
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+        cursor.movePosition(QTextCursor.EndOfBlock)
+        cursor.insertBlock()
+        cursor.insertText(self._vi_clipboard.rstrip("\n"))
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+
+    def _open_line_below(self) -> None:
+        cursor = self.textCursor()
+        block = cursor.block()
+        indent = block.text()[: len(block.text()) - len(block.text().lstrip(" \t"))]
+        cursor.beginEditBlock()
+        cursor.movePosition(QTextCursor.EndOfBlock)
+        cursor.insertBlock()
+        cursor.insertText(indent)
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+        self._enter_vi_insert_mode()
+
+    def _open_line_above(self) -> None:
+        cursor = self.textCursor()
+        block = cursor.block()
+        indent = block.text()[: len(block.text()) - len(block.text().lstrip(" \t"))]
+        cursor.beginEditBlock()
+        cursor.movePosition(QTextCursor.StartOfBlock)
+        cursor.insertBlock()
+        cursor.movePosition(QTextCursor.Up)
+        cursor.movePosition(QTextCursor.StartOfLine)
+        cursor.insertText(indent)
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+        self._enter_vi_insert_mode()
+
+
+class ChatLineEdit(QLineEdit):
+    """Line edit with history navigation and Ctrl+Enter send."""
+
+    sendRequested = Signal()
+
+    def __init__(self, history_ref: list[str]):
+        super().__init__()
+        self._history = history_ref
+        self._history_index: int | None = None
+
+    def keyPressEvent(self, event) -> None:
+        key = event.key()
+        mods = event.modifiers()
+
+        # Ctrl+Shift+Enter/Return triggers send (original behavior)
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            if (mods & Qt.ControlModifier) and (mods & Qt.ShiftModifier):
+                event.accept()
+                self.sendRequested.emit()
+                return
+
+        # History navigation
+        if key == Qt.Key_Up:
+            if self._history:
+                if self._history_index is None:
+                    self._history_index = len(self._history) - 1
+                else:
+                    self._history_index = max(0, self._history_index - 1)
+                self._apply_history()
+            event.accept()
+            return
+
+        if key == Qt.Key_Down:
+            if self._history:
+                if self._history_index is None:
+                    # nothing selected
+                    pass
+                elif self._history_index < len(self._history) - 1:
+                    self._history_index += 1
+                    self._apply_history()
+                else:
+                    # Move past last to clear
+                    self._history_index = None
+                    self.clear()
+            event.accept()
+            return
+
+        super().keyPressEvent(event)
+
+    def _apply_history(self) -> None:
+        if self._history_index is None:
+            return
+        try:
+            self.setText(self._history[self._history_index])
+            # Move cursor to end for convenience
+            self.setCursorPosition(len(self.text()))
+        except Exception:
+            pass
 
 
 class ZoomablePreviewLabel(QLabel):
@@ -207,6 +635,11 @@ class PlantUMLEditorWindow(QMainWindow):
         
         self.file_path = Path(file_path)
         self.renderer = PlantUMLRenderer()
+        self._ai_prompt_history: list[str] = []
+        self._vi_enabled: bool = config.load_vi_mode_enabled()
+        self._vi_insert_active: bool = False
+        # Check if AI chat is enabled
+        self._ai_chat_enabled: bool = config.load_enable_ai_chats()
         self.setWindowTitle(f"PlantUML Editor - {self.file_path.name}")
         self.setGeometry(100, 100, 1400, 800)
         
@@ -298,51 +731,80 @@ class PlantUMLEditorWindow(QMainWindow):
         shortcuts_layout.setContentsMargins(5, 5, 5, 5)
         
         shortcuts_label = QLabel("Shortcuts:")
-        self.shortcuts_dropdown = QComboBox()
-        self.shortcuts_dropdown.addItem("-- Select a diagram template --", None)
+        self.shortcuts_category_combo = QComboBox()
+        self.shortcuts_variant_combo = QComboBox()
+        self.shortcuts_help_btn = QToolButton()
+        self.shortcuts_help_btn.setText("?")
+        self.shortcuts_help_btn.setToolTip("Open documentation for selected diagram type")
+        self.shortcuts_help_btn.setEnabled(False)
+        
+        self._shortcuts_data: list[dict] = []
         self._load_shortcuts()
-        self.shortcuts_dropdown.currentIndexChanged.connect(self._on_shortcut_selected)
+        
+        self.shortcuts_category_combo.currentIndexChanged.connect(self._on_shortcuts_category_changed)
+        self.shortcuts_variant_combo.currentIndexChanged.connect(self._on_shortcut_variant_selected)
+        self.shortcuts_help_btn.clicked.connect(self._on_shortcuts_help_clicked)
+        
         shortcuts_layout.addWidget(shortcuts_label)
-        shortcuts_layout.addWidget(self.shortcuts_dropdown)
+        shortcuts_layout.addWidget(self.shortcuts_category_combo)
+        shortcuts_layout.addWidget(self.shortcuts_variant_combo)
+        shortcuts_layout.addWidget(self.shortcuts_help_btn)
         
         # Add separator
         shortcuts_layout.addSpacing(20)
         
-        # Server dropdown
+        # Server dropdown (only if AI chat enabled)
         server_label = QLabel("Server:")
         self.ai_server_combo = QComboBox()
         self.ai_server_combo.setMaximumWidth(150)
         self.ai_server_combo.currentTextChanged.connect(self._on_ai_server_changed)
+        server_label.setVisible(self._ai_chat_enabled)
+        self.ai_server_combo.setVisible(self._ai_chat_enabled)
         shortcuts_layout.addWidget(server_label)
         shortcuts_layout.addWidget(self.ai_server_combo)
         
-        # Model dropdown
+        # Model dropdown (only if AI chat enabled)
         model_label = QLabel("Model:")
         self.ai_model_combo = QComboBox()
         self.ai_model_combo.setMaximumWidth(150)
+        model_label.setVisible(self._ai_chat_enabled)
+        self.ai_model_combo.setVisible(self._ai_chat_enabled)
         shortcuts_layout.addWidget(model_label)
         shortcuts_layout.addWidget(self.ai_model_combo)
         
         shortcuts_layout.addStretch()
         
-        # Load servers and models
-        self._load_ai_servers_models()
+        # Load servers and models only if AI chat enabled
+        if self._ai_chat_enabled:
+            self._load_ai_servers_models()
         
         center_layout.addLayout(shortcuts_layout)
         
-        # Create vertical splitter for editor/preview and AI chat panel
-        main_vertical_splitter = QSplitter(Qt.Vertical)
+        # Main horizontal splitter: Editor (left) | Preview & Chat (right)
+        main_h_splitter = QSplitter(Qt.Horizontal)
         
-        # Top: editor + preview split
-        splitter = QSplitter(Qt.Horizontal)
-        
-        # Left panel: PlantUML code editor (35%)
-        self.editor = PlainTextEditWithLineNumbers()
+        # LEFT: PlantUML code editor
+        self.editor = ViPlainTextEdit()
         self.editor.setPlaceholderText("Enter PlantUML diagram code here...")
         self.editor.setFont(self._get_monospace_font())
-        splitter.addWidget(self.editor)
+        # Style editor to look more like a code editor
+        self.editor.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                border: 1px solid #3e3e3e;
+                padding: 8px;
+                selection-background-color: #264f78;
+                selection-color: #ffffff;
+            }
+        """)
+        self.editor.setTabStopDistance(self.editor.fontMetrics().horizontalAdvance(' ') * 2)
+        main_h_splitter.addWidget(self.editor)
         
-        # Right panel: Preview (65%)
+        # RIGHT: Vertical splitter with Preview (top) and Chat (bottom)
+        right_v_splitter = QSplitter(Qt.Vertical)
+        
+        # Preview container
         preview_container = QWidget()
         preview_layout = QVBoxLayout()
         preview_layout.setContentsMargins(0, 0, 0, 0)
@@ -359,36 +821,65 @@ class PlantUMLEditorWindow(QMainWindow):
         
         preview_layout.addWidget(self.preview_scroll)
         preview_container.setLayout(preview_layout)
+        right_v_splitter.addWidget(preview_container)
         
-        # Add both to horizontal splitter
-        splitter.addWidget(preview_container)
+        # AI chat panel (only if enabled)
+        if self._ai_chat_enabled:
+            self.ai_panel = self._create_ai_chat_panel()
+            right_v_splitter.addWidget(self.ai_panel)
+            # Set right splitter (preview/chat) sizes: 70% preview, 30% chat
+            right_v_splitter.setSizes([490, 210])
+        else:
+            self.ai_panel = None
+            # No chat panel, just use preview at full size
+            right_v_splitter.addWidget(preview_container)
+            right_v_splitter.setSizes([700])
+        right_v_splitter.setCollapsible(0, False)
+        right_v_splitter.setCollapsible(1, True)  # Chat can be collapsed
         
-        # Set splitter sizes (35% editor, 65% preview)
-        splitter.setSizes([490, 910])  # ~35%, ~65% of 1400px
-        splitter.setCollapsible(0, False)
-        splitter.setCollapsible(1, False)
+        # Add right splitter to main horizontal splitter
+        main_h_splitter.addWidget(right_v_splitter)
         
-        # Connect splitter changes to update chat panel width
-        self.editor_preview_splitter = splitter
-        splitter.splitterMoved.connect(self._on_splitter_moved)
+        # Set main splitter sizes: 40% editor, 60% preview+chat
+        main_h_splitter.setSizes([400, 600])
+        main_h_splitter.setCollapsible(0, False)
+        main_h_splitter.setCollapsible(1, False)
         
-        main_vertical_splitter.addWidget(splitter)
+        self.editor_preview_splitter = main_h_splitter
+        main_h_splitter.splitterMoved.connect(self._on_splitter_moved)
         
-        # Bottom: AI chat panel (full width)
-        self.ai_panel = self._create_ai_chat_panel()
-        main_vertical_splitter.addWidget(self.ai_panel)
-        
-        # Set initial vertical split: give editor 3 lines height (~60-70px for 3 lines)
-        # Approximately 750-100 = 650 for top, 100 for chat
-        main_vertical_splitter.setSizes([750, 100])
-        main_vertical_splitter.setCollapsible(0, False)
-        main_vertical_splitter.setCollapsible(1, True)  # Chat can be collapsed
-        
-        center_layout.addWidget(main_vertical_splitter)
+        center_layout.addWidget(main_h_splitter)
         center_widget.setLayout(center_layout)
         main_layout.addWidget(center_widget)
         main_widget.setLayout(main_layout)
         self.setCentralWidget(main_widget)
+
+        # Debounced geometry/save timer
+        self._geom_timer = QTimer(self)
+        self._geom_timer.setSingleShot(True)
+        self._geom_timer.setInterval(400)
+        self._geom_timer.timeout.connect(self._save_geometry_prefs)
+
+        # Wire splitters to save state
+        self._vertical_splitter = right_v_splitter
+        if self._ai_chat_enabled:
+            self._vertical_splitter.splitterMoved.connect(lambda *_: self._geom_timer.start())
+        self.editor_preview_splitter.splitterMoved.connect(lambda *_: self._geom_timer.start())
+
+        # Restore geometry and splitter states
+        self._restore_geometry_prefs()
+
+        # Status badge for vi insert mode (INS)
+        self._badge_base_style = "border: 1px solid #666; padding: 2px 6px; border-radius: 3px;"
+        self._vi_badge_base_style = self._badge_base_style
+        self._vi_status_label = QLabel("INS")
+        self._vi_status_label.setObjectName("viStatusLabel")
+        self._vi_status_label.setToolTip("Vi insert mode indicator")
+        self.statusBar().addPermanentWidget(self._vi_status_label, 0)
+        self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
+        self.editor.viInsertModeChanged.connect(self._on_vi_insert_state_changed)
+        self.editor.set_vi_mode_enabled(self._vi_enabled)
+        self._update_vi_badge_visibility()
         
         # Load file content
         self._load_file()
@@ -408,12 +899,118 @@ class PlantUMLEditorWindow(QMainWindow):
         # Setup Ctrl+Enter for save
         QShortcut(QKeySequence(Qt.CTRL | Qt.Key_Return), self, self._save_file)
         
-        # Zoom levels
-        self.editor_zoom_level = 0
-        self.preview_zoom_level = 0
+        # Setup Ctrl+Shift+Space to toggle focus between editor and AI chat
+        QShortcut(QKeySequence(Qt.CTRL | Qt.SHIFT | Qt.Key_Space), self, self._toggle_focus_editor_ai)
+        
+        # Zoom levels (load persisted)
+        try:
+            self.editor_zoom_level = int(config.load_puml_editor_zoom(0))
+        except Exception:
+            self.editor_zoom_level = 0
+        try:
+            self.preview_zoom_level = int(config.load_puml_preview_zoom(0))
+        except Exception:
+            self.preview_zoom_level = 0
         self.preview_pixmap: Optional[QPixmap] = None
+        # Apply editor zoom immediately
+        try:
+            base_pt = 11
+            font = self.editor.font()
+            font.setPointSize(max(6, base_pt + self.editor_zoom_level))
+            self.editor.setFont(font)
+        except Exception:
+            pass
         
         self._render()
+
+    def _on_vi_insert_state_changed(self, insert_active: bool) -> None:
+        self._vi_insert_active = bool(insert_active)
+        self._update_vi_badge_style(insert_active)
+
+    def _update_vi_badge_visibility(self) -> None:
+        if not hasattr(self, "_vi_status_label"):
+            return
+        if self._vi_enabled:
+            self._vi_status_label.show()
+            self._update_vi_badge_style(self._vi_insert_active)
+        else:
+            self._vi_status_label.hide()
+
+    def _update_vi_badge_style(self, insert_active: bool) -> None:
+        if not hasattr(self, "_vi_status_label"):
+            return
+        style = self._vi_badge_base_style
+        if self._vi_enabled:
+            if insert_active:
+                style += " background-color: #ffd54d; color: #000;"
+            else:
+                style += " background-color: transparent; color: #e0e0e0;"
+        else:
+            style += " background-color: transparent; color: #e0e0e0;"
+        self._vi_status_label.setStyleSheet(style)
+
+    # --- Geometry persistence -------------------------------------------------
+    def _restore_geometry_prefs(self) -> None:
+        try:
+            geom64 = config.load_puml_window_geometry()
+            if geom64:
+                self.restoreGeometry(QByteArray.fromBase64(geom64.encode("utf-8")))
+        except Exception:
+            pass
+        try:
+            hstate64 = config.load_puml_hsplit_state()
+            if hstate64:
+                self.editor_preview_splitter.restoreState(QByteArray.fromBase64(hstate64.encode("utf-8")))
+        except Exception:
+            pass
+        try:
+            vstate64 = config.load_puml_vsplit_state()
+            if vstate64:
+                self._vertical_splitter.restoreState(QByteArray.fromBase64(vstate64.encode("utf-8")))
+        except Exception:
+            pass
+
+    def _save_geometry_prefs(self) -> None:
+        try:
+            g = self.saveGeometry().toBase64().data().decode("utf-8")
+            config.save_puml_window_geometry(g)
+            size = self.geometry().size()
+            print(f"[PlantUML] Saved geometry: {size.width()}x{size.height()} (base64 {len(g)} chars)")
+        except Exception as exc:
+            print(f"[PlantUML] Save geometry failed: {exc}")
+        try:
+            h = self.editor_preview_splitter.saveState().toBase64().data().decode("utf-8")
+            config.save_puml_hsplit_state(h)
+            sizes = self.editor_preview_splitter.sizes()
+            print(f"[PlantUML] Saved HSplit sizes: {sizes}")
+        except Exception as exc:
+            print(f"[PlantUML] Save HSplit failed: {exc}")
+        try:
+            v = self._vertical_splitter.saveState().toBase64().data().decode("utf-8")
+            config.save_puml_vsplit_state(v)
+            sizes = self._vertical_splitter.sizes()
+            print(f"[PlantUML] Saved VSplit sizes: {sizes}")
+        except Exception as exc:
+            print(f"[PlantUML] Save VSplit failed: {exc}")
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if hasattr(self, "_geom_timer"):
+            self._geom_timer.start()
+
+    def moveEvent(self, event) -> None:  # type: ignore[override]
+        super().moveEvent(event)
+        if hasattr(self, "_geom_timer"):
+            self._geom_timer.start()
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        try:
+            if hasattr(self, "_geom_timer"):
+                self._geom_timer.stop()
+        except Exception:
+            pass
+        self._save_geometry_prefs()
+        return super().closeEvent(event)
 
     def _get_monospace_font(self):
         """Get a monospace font suitable for code editing."""
@@ -427,42 +1024,139 @@ class PlantUMLEditorWindow(QMainWindow):
     # --- AI prompt handling ----------------------------------------------------
 
     def _load_shortcuts(self) -> None:
-        """Load PlantUML diagram templates from puml_shortcuts.json."""
+        """Load PlantUML diagram templates from puml_shortcuts.json into two-level combos."""
+        # Reset
+        self.shortcuts_category_combo.clear()
+        self.shortcuts_variant_combo.clear()
+        self.shortcuts_category_combo.addItem("-- Pick a type --", None)
+        self.shortcuts_variant_combo.addItem("-- Pick variant --", None)
+        self.shortcuts_variant_combo.setEnabled(False)
+        self.shortcuts_help_btn.setEnabled(False)
+        self._shortcuts_data = []
         try:
-            shortcuts_path = Path(__file__).resolve().parents[1] / "puml_shortcuts.json"
-            if shortcuts_path.exists():
-                with open(shortcuts_path, 'r', encoding='utf-8') as f:
-                    shortcuts = json.load(f)
-                    for item in shortcuts:
-                        name = item.get("name", "")
-                        code = item.get("sample puml", "")  # Use "sample puml" key
-                        self.shortcuts_dropdown.addItem(name, code)
-        except Exception as exc:
-            if _LOGGING:
-                print(f"[PlantUML] Failed to load shortcuts: {exc}")
+            shortcuts = None
+            loaded_from = None
+            # Candidate locations
+            candidates = [
+                Path(__file__).resolve().parents[1] / "puml_shortcuts.json",  # zimx/app/puml_shortcuts.json
+                Path(__file__).resolve().parents[0] / "puml_shortcuts.json",  # zimx/app/ui/puml_shortcuts.json (fallback)
+                Path.cwd() / "zimx" / "app" / "puml_shortcuts.json",
+            ]
+            for p in candidates:
+                try:
+                    if p.exists():
+                        with open(p, 'r', encoding='utf-8') as f:
+                            shortcuts = json.load(f)
+                        loaded_from = str(p)
+                        print(f"[PlantUML] Loaded shortcuts from {p} ({len(shortcuts) if isinstance(shortcuts, list) else 'invalid'} items)")
+                        break
+                except Exception as exc:
+                    print(f"[PlantUML] Failed reading {p}: {exc}")
+            # Try importlib.resources as a last resort
+            if shortcuts is None:
+                try:
+                    import importlib.resources as ilr
+                    data = ilr.files("zimx.app").joinpath("puml_shortcuts.json").read_text(encoding="utf-8")
+                    shortcuts = json.loads(data)
+                    loaded_from = "package:zimx.app/puml_shortcuts.json"
+                    print("[PlantUML] Loaded shortcuts via importlib.resources")
+                except Exception as exc:
+                    print(f"[PlantUML] resources load failed: {exc}")
 
-    def _on_shortcut_selected(self, index: int) -> None:
-        """Insert selected shortcut template at cursor position."""
-        if index <= 0:  # Skip default item
+            if isinstance(shortcuts, list):
+                self._shortcuts_data = shortcuts
+                for item in shortcuts:
+                    name = item.get("name", "")
+                    if name:
+                        self.shortcuts_category_combo.addItem(name, name)
+                print(f"[PlantUML] Shortcuts loaded: {len(shortcuts)} categories from {loaded_from}")
+            else:
+                print("[PlantUML] No shortcuts loaded (not a list)")
+        except Exception as exc:
+            print(f"[PlantUML] Failed to load shortcuts: {exc}")
+
+    def _on_shortcuts_category_changed(self, index: int) -> None:
+        """When the category changes, offer Simple/Advanced variants and enable help."""
+        # Reset variants
+        self.shortcuts_variant_combo.blockSignals(True)
+        self.shortcuts_variant_combo.clear()
+        self.shortcuts_variant_combo.addItem("-- Pick variant --", None)
+        self.shortcuts_variant_combo.blockSignals(False)
+        self.shortcuts_variant_combo.setEnabled(False)
+        self.shortcuts_help_btn.setEnabled(False)
+
+        if index <= 0:
             return
-        code = self.shortcuts_dropdown.itemData(index)
+        name = self.shortcuts_category_combo.itemData(index)
+        item = next((it for it in self._shortcuts_data if it.get("name") == name), None)
+        if not item:
+            return
+        # Add variants present in the JSON
+        variants = []
+        if item.get("simple_puml"):
+            variants.append(("Simple", "simple_puml"))
+        if item.get("advanced_puml"):
+            variants.append(("Advanced", "advanced_puml"))
+        for label, key in variants:
+            self.shortcuts_variant_combo.addItem(label, key)
+        self.shortcuts_variant_combo.setEnabled(bool(variants))
+        self.shortcuts_help_btn.setEnabled(bool(item.get("help")))
+
+    def _on_shortcut_variant_selected(self, index: int) -> None:
+        """Insert the selected variant (Simple/Advanced) for the current category."""
+        if index <= 0:
+            return
+        cat_index = self.shortcuts_category_combo.currentIndex()
+        if cat_index <= 0:
+            return
+        name = self.shortcuts_category_combo.itemData(cat_index)
+        item = next((it for it in self._shortcuts_data if it.get("name") == name), None)
+        if not item:
+            return
+        key = self.shortcuts_variant_combo.itemData(index)
+        code = item.get(key or "", "")
         if not code:
             return
-        
+        # Replace !!BR!! markers with actual newlines
+        code = code.replace("!!BR!!", "\n")
         cursor = self.editor.textCursor()
         pos = cursor.position()
         text = self.editor.toPlainText()
-        
-        # If mid-line, prepend newline
         if pos > 0 and text and text[pos - 1] != '\n':
             cursor.insertText('\n')
-        
-        # Insert template
         cursor.insertText(code)
         cursor.insertText('\n')
-        
-        # Reset dropdown to default
-        self.shortcuts_dropdown.setCurrentIndex(0)
+        # Reset variant to placeholder after insert so user can choose again
+        try:
+            self.shortcuts_variant_combo.blockSignals(True)
+            self.shortcuts_variant_combo.setCurrentIndex(0)
+        finally:
+            self.shortcuts_variant_combo.blockSignals(False)
+
+    def _on_shortcuts_help_clicked(self) -> None:
+        cat_index = self.shortcuts_category_combo.currentIndex()
+        if cat_index <= 0:
+            return
+        name = self.shortcuts_category_combo.itemData(cat_index)
+        item = next((it for it in self._shortcuts_data if it.get("name") == name), None)
+        if not item:
+            return
+        url = item.get("help")
+        if not url:
+            return
+        try:
+            QDesktopServices.openUrl(QUrl(url))
+        except Exception as exc:
+            if _LOGGING:
+                print(f"[PlantUML] Failed to open help URL: {exc}")
+
+    def _toggle_focus_editor_ai(self) -> None:
+        """Toggle focus between editor and AI chat input (Ctrl+Shift+Space)."""
+        if self.editor.hasFocus():
+            self.ai_input.setFocus()
+            self.ai_input.selectAll()
+        else:
+            self.editor.setFocus()
 
     def _on_splitter_moved(self, pos: int, index: int) -> None:
         """Handle splitter moves (currently not needed for full-width chat panel)."""
@@ -471,13 +1165,19 @@ class PlantUMLEditorWindow(QMainWindow):
     def _create_ai_chat_panel(self) -> QWidget:
         """Create AI chat panel with message input and send button."""
         panel = QWidget()
-        panel.setStyleSheet("QWidget { background-color: #1e1e1e; border-top: 1px solid #444; } QLineEdit { background-color: #2d2d2d; color: #e0e0e0; border: 1px solid #444; padding: 4px; }")
+        panel.setStyleSheet("QWidget { background-color: #1e1e1e; border-top: 1px solid #444; } QLineEdit { background-color: #2d2d2d; color: #e0e0e0; border: 1px solid #444; }")
         layout = QHBoxLayout()
-        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         
-        # Chat input field
-        self.ai_input = QLineEdit()
+        # Chat input field with history and Ctrl+Enter
+        self.ai_input = ChatLineEdit(self._ai_prompt_history)
         self.ai_input.setPlaceholderText("Describe the diagram you want to generate...")
+        self.ai_input.sendRequested.connect(self._on_ai_send)
+        # Set height to approximately 3 lines
+        font_metrics = self.ai_input.fontMetrics()
+        line_height = font_metrics.lineSpacing()
+        self.ai_input.setFixedHeight(line_height * 3)
         layout.addWidget(self.ai_input)
         
         # Send button
@@ -485,10 +1185,8 @@ class PlantUMLEditorWindow(QMainWindow):
         self.ai_send_btn.setText("📤 Send")
         self.ai_send_btn.setToolTip("Send message to AI (Ctrl+Enter)")
         self.ai_send_btn.clicked.connect(self._on_ai_send)
+        self.ai_send_btn.setFixedHeight(line_height * 3)
         layout.addWidget(self.ai_send_btn)
-        
-        # Setup Ctrl+Enter in input to send
-        QShortcut(QKeySequence(Qt.CTRL | Qt.Key_Return), self.ai_input, self._on_ai_send)
         
         panel.setLayout(layout)
         return panel
@@ -570,6 +1268,20 @@ class PlantUMLEditorWindow(QMainWindow):
         self.ai_input.setEnabled(False)
         self.ai_send_btn.setEnabled(False)
         
+        # Show toast message and busy cursor
+        self.statusBar().showMessage("🤔 AI is thinking...", 0)
+        QApplication.setOverrideCursor(Qt.BusyCursor)
+        
+        # Save to history (no duplicates back-to-back)
+        try:
+            if not self._ai_prompt_history or self._ai_prompt_history[-1] != user_message:
+                self._ai_prompt_history.append(user_message)
+            # Reset history cursor in input
+            if hasattr(self.ai_input, "_history_index"):
+                self.ai_input._history_index = None
+        except Exception:
+            pass
+        
         try:
             # Get selected server and model from dropdowns
             server_name = self.ai_server_combo.currentText()
@@ -644,8 +1356,10 @@ class PlantUMLEditorWindow(QMainWindow):
 
     def _on_ai_response_finished(self, content: str) -> None:
         """Display AI response with accept/decline buttons."""
+        QApplication.restoreOverrideCursor()
         self.ai_input.setEnabled(True)
         self.ai_send_btn.setEnabled(True)
+        self.statusBar().showMessage("✓ AI response received", 3000)  # Show for 3 seconds
         
         try:
             response = self._ai_response_buffer or content or ""
@@ -689,8 +1403,10 @@ class PlantUMLEditorWindow(QMainWindow):
 
     def _on_ai_response_failed(self, message: str) -> None:
         """Handle AI error."""
+        QApplication.restoreOverrideCursor()
         self.ai_input.setEnabled(True)
         self.ai_send_btn.setEnabled(True)
+        self.statusBar().showMessage("✗ AI request failed", 3000)  # Show for 3 seconds
         QMessageBox.warning(self, "AI Error", f"Failed to get AI response: {message}")
         try:
             self._ai_worker = None
@@ -1136,6 +1852,12 @@ class PlantUMLEditorWindow(QMainWindow):
         font = self.editor.font()
         font.setPointSize(11 + self.editor_zoom_level)
         self.editor.setFont(font)
+        try:
+            config.save_puml_editor_zoom(self.editor_zoom_level)
+        except Exception:
+            pass
+        if hasattr(self, "_geom_timer"):
+            self._geom_timer.start()
 
     def _zoom_out_editor(self) -> None:
         """Zoom out editor text."""
@@ -1144,6 +1866,12 @@ class PlantUMLEditorWindow(QMainWindow):
             font = self.editor.font()
             font.setPointSize(11 + self.editor_zoom_level)
             self.editor.setFont(font)
+            try:
+                config.save_puml_editor_zoom(self.editor_zoom_level)
+            except Exception:
+                pass
+            if hasattr(self, "_geom_timer"):
+                self._geom_timer.start()
 
     def _zoom_in_preview(self) -> None:
         """Zoom in preview image."""
@@ -1152,6 +1880,12 @@ class PlantUMLEditorWindow(QMainWindow):
             self._update_preview_display()
         except RuntimeError:
             pass
+        try:
+            config.save_puml_preview_zoom(self.preview_zoom_level)
+        except Exception:
+            pass
+        if hasattr(self, "_geom_timer"):
+            self._geom_timer.start()
 
     def _zoom_out_preview(self) -> None:
         """Zoom out preview image."""
@@ -1161,6 +1895,12 @@ class PlantUMLEditorWindow(QMainWindow):
                 self._update_preview_display()
             except RuntimeError:
                 pass
+            try:
+                config.save_puml_preview_zoom(self.preview_zoom_level)
+            except Exception:
+                pass
+            if hasattr(self, "_geom_timer"):
+                self._geom_timer.start()
 
     def _on_preview_wheel_zoom(self, delta: int) -> None:
         """Handle Ctrl+MouseWheel zoom on preview."""

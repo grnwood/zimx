@@ -143,6 +143,8 @@ def load_vi_mode_enabled() -> bool:
     return bool(payload.get("enable_vi_mode", False))
 
 
+
+
 def load_minimal_font_scan_enabled() -> bool:
     """Return whether minimal font scanning is enabled globally (default: True)."""
     payload = _read_global_config()
@@ -901,6 +903,110 @@ def save_editor_splitter_state(state: str) -> None:
     if not conn:
         return
     conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("editor_splitter_state", state))
+    conn.commit()
+
+# --- PlantUML Editor window prefs -------------------------------------------
+
+def load_puml_window_geometry() -> Optional[str]:
+    """Load saved geometry for PlantUML editor window (base64 QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("puml_window_geometry",))
+    row = cur.fetchone()
+    return str(row[0]) if row else None
+
+
+def save_puml_window_geometry(geometry: str) -> None:
+    """Persist geometry for PlantUML editor window (base64 QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("puml_window_geometry", geometry))
+    conn.commit()
+
+
+def load_puml_hsplit_state() -> Optional[str]:
+    """Load horizontal split state (editor|preview) for PlantUML editor (base64 QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("puml_hsplit_state",))
+    row = cur.fetchone()
+    return str(row[0]) if row else None
+
+
+def save_puml_hsplit_state(state: str) -> None:
+    """Persist horizontal splitter state for PlantUML editor (base64 QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("puml_hsplit_state", state))
+    conn.commit()
+
+
+def load_puml_vsplit_state() -> Optional[str]:
+    """Load vertical split state (top|chat) for PlantUML editor (base64 QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("puml_vsplit_state",))
+    row = cur.fetchone()
+    return str(row[0]) if row else None
+
+
+def save_puml_vsplit_state(state: str) -> None:
+    """Persist vertical splitter state for PlantUML editor (base64 QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("puml_vsplit_state", state))
+    conn.commit()
+
+
+def load_puml_editor_zoom(default: int = 0) -> int:
+    """Load saved editor zoom level delta for PlantUML editor (int, relative to 11pt)."""
+    conn = _get_conn()
+    if not conn:
+        return default
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("puml_editor_zoom",))
+    row = cur.fetchone()
+    if not row:
+        return default
+    try:
+        return int(row[0])
+    except Exception:
+        return default
+
+
+def save_puml_editor_zoom(level: int) -> None:
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("puml_editor_zoom", str(int(level))))
+    conn.commit()
+
+
+def load_puml_preview_zoom(default: int = 0) -> int:
+    """Load saved preview zoom level delta for PlantUML editor (int increments of 10%)."""
+    conn = _get_conn()
+    if not conn:
+        return default
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("puml_preview_zoom",))
+    row = cur.fetchone()
+    if not row:
+        return default
+    try:
+        return int(row[0])
+    except Exception:
+        return default
+
+
+def save_puml_preview_zoom(level: int) -> None:
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("puml_preview_zoom", str(int(level))))
     conn.commit()
 
 def load_panel_visibility() -> dict:
