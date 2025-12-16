@@ -1525,6 +1525,15 @@ class MarkdownEditor(QTextEdit):
         t0 = time.perf_counter()
         self._mark_page_load("render start")
         
+        # Strip excessive trailing newlines (preserve max 10) to prevent performance issues
+        # Files with thousands of trailing newlines cause catastrophic regex backtracking
+        if content.endswith('\n'):
+            # Count trailing newlines
+            stripped = content.rstrip('\n')
+            trailing_count = len(content) - len(stripped)
+            if trailing_count > 10:
+                content = stripped + '\n' * 10
+        
         normalized = self._normalize_markdown_images(content)
         t1 = time.perf_counter()
         self._mark_page_load("normalize images")
@@ -5623,11 +5632,13 @@ class MarkdownEditor(QTextEdit):
         # Qt's toPlainText() strips trailing newlines, so we need to check for
         # empty blocks at the end to restore them
         # Count empty trailing blocks (these represent the newlines toPlainText stripped)
+        # Cap at 100 to prevent performance issues with files that have thousands of trailing newlines
         if block_count > 0:
             last_block = self.document().lastBlock()
             empty_trailing_blocks = 0
             check_block = last_block
-            while check_block.isValid() and check_block.text() == "":
+            max_trailing = 100  # Reasonable limit to prevent pathological cases
+            while check_block.isValid() and check_block.text() == "" and empty_trailing_blocks < max_trailing:
                 empty_trailing_blocks += 1
                 check_block = check_block.previous()
             

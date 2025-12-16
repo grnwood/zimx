@@ -47,10 +47,16 @@ ZIMX_VERSION = os.getenv('ZIMX_VERSION','0.1.0')
 # Data files: templates + bundled assets
 _datas = [
     (os.path.join(ROOT, 'zimx', 'templates'), 'zimx/templates'),
+    (os.path.join(ROOT, 'zimx', 'app', 'puml_shortcuts.json'), 'zimx/app'),
 ]
+
+# Add optional subdirectories if they exist
+for subdir in ['assets', 'slipstream', 'rag', 'ai']:
+    path = os.path.join(ROOT, 'zimx', subdir)
+    if os.path.exists(path):
+        _datas.append((path, f'zimx/{subdir}'))
+
 _assets_dir = os.path.join(ROOT, 'zimx', 'assets')
-if os.path.exists(_assets_dir):
-    _datas.append((_assets_dir, 'assets'))
 
 datas = _datas
 
