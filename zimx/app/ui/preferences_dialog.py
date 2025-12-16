@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog,
@@ -623,7 +625,8 @@ class PreferencesDialog(QDialog):
             config.save_main_soft_scroll_lines(self.main_soft_scroll_lines_spin.value())
         except Exception:
             pass
-        print(f"[DEBUG] Saving enable_ai_chats: {self.enable_ai_chats_checkbox.isChecked()}")
+        if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
+            print(f"[DEBUG] Saving enable_ai_chats: {self.enable_ai_chats_checkbox.isChecked()}")
         config.save_enable_ai_chats(self.enable_ai_chats_checkbox.isChecked())
         config.save_default_ai_server(self.default_server_combo.currentText() or None)
         config.save_default_ai_model(self.default_model_combo.currentText() or None)

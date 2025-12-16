@@ -2508,6 +2508,10 @@ class MarkdownEditor(QTextEdit):
         if self._read_only_mode:
             if self._handle_read_only_keypress(event):
                 return
+        # Reserve Ctrl+\ and Ctrl+Backslash for application shortcuts (task panel focus)
+        if event.modifiers() == Qt.ControlModifier and event.key() in (Qt.Key_Backslash, 0x5C):
+            event.ignore()
+            return
         # Markdown formatting shortcuts and undo/redo (Ctrl+Z/Ctrl+Y)
         if event.modifiers() == Qt.ControlModifier:
             if event.key() == Qt.Key_B:
@@ -5629,7 +5633,8 @@ class MarkdownEditor(QTextEdit):
             
             # Each empty trailing block represents a newline that was typed but toPlainText stripped
             if empty_trailing_blocks > 0:
-                print(f"[DEBUG _doc_to_markdown] Found {empty_trailing_blocks} empty trailing blocks, adding newlines")
+                if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
+                    print(f"[DEBUG _doc_to_markdown] Found {empty_trailing_blocks} empty trailing blocks, adding newlines")
                 # Add newlines for the empty blocks
                 result += "\n" * empty_trailing_blocks
         

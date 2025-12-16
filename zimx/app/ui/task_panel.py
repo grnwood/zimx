@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 import html
+import os
 import re
 from typing import Iterable, Optional
 
@@ -60,30 +61,38 @@ class DebugTaskTree(QTreeWidget):
         self._pending_task_data = None
     
     def mouseDoubleClickEvent(self, event):  # type: ignore[override]
-        print(f"[DEBUG_TREE] mouseDoubleClickEvent: button={event.button()}, pos={event.pos()}")
+        debug = os.getenv("ZIMX_DEBUG_TASKS", "0") not in ("0", "false", "False", "")
+        if debug:
+            print(f"[DEBUG_TREE] mouseDoubleClickEvent: button={event.button()}, pos={event.pos()}")
         item = self.itemAt(event.pos())
         column = self.columnAt(event.pos().x())
-        print(f"[DEBUG_TREE] Column at click: {column}")
+        if debug:
+            print(f"[DEBUG_TREE] Column at click: {column}")
         
         if item and event.button() == Qt.LeftButton:
-            print(f"[DEBUG_TREE] Item at pos: {item.text(1)[:50]}")
+            if debug:
+                print(f"[DEBUG_TREE] Item at pos: {item.text(1)[:50]}")
             # Extract task data immediately before item might become invalid
             task_data = item.data(0, Qt.UserRole)
             if task_data:
-                print(f"[DEBUG_TREE] Task data: {task_data.get('path')}:{task_data.get('line')}")
+                if debug:
+                    print(f"[DEBUG_TREE] Task data: {task_data.get('path')}:{task_data.get('line')}")
                 self._pending_task_data = task_data
                 self._timer.start(0)
                 event.accept()
                 return
         
         # Only call super if we didn't handle it
-        print(f"[DEBUG_TREE] Calling super().mouseDoubleClickEvent()")
+        if debug:
+            print(f"[DEBUG_TREE] Calling super().mouseDoubleClickEvent()")
         super().mouseDoubleClickEvent(event)
-        print(f"[DEBUG_TREE] After super().mouseDoubleClickEvent(), event.isAccepted()={event.isAccepted()}")
+        if debug:
+            print(f"[DEBUG_TREE] After super().mouseDoubleClickEvent(), event.isAccepted()={event.isAccepted()}")
     
     def _emit_deferred_double_click(self):
         if self._pending_task_data:
-            print(f"[DEBUG_TREE] Emitting task activation for {self._pending_task_data.get('path')}")
+            if os.getenv("ZIMX_DEBUG_TASKS", "0") not in ("0", "false", "False", ""):
+                print(f"[DEBUG_TREE] Emitting task activation for {self._pending_task_data.get('path')}")
             # Find the parent TaskPanel and emit through it
             parent = self.parent()
             while parent and not hasattr(parent, 'taskActivated'):
@@ -93,9 +102,11 @@ class DebugTaskTree(QTreeWidget):
             self._pending_task_data = None
     
     def mousePressEvent(self, event):  # type: ignore[override]
-        print(f"[DEBUG_TREE] mousePressEvent: button={event.button()}, pos={event.pos()}")
+        if os.getenv("ZIMX_DEBUG_TASKS", "0") not in ("0", "false", "False", ""):
+            print(f"[DEBUG_TREE] mousePressEvent: button={event.button()}, pos={event.pos()}")
         super().mousePressEvent(event)
-        print(f"[DEBUG_TREE] After super().mousePressEvent(), event.isAccepted()={event.isAccepted()}")
+        if os.getenv("ZIMX_DEBUG_TASKS", "0") not in ("0", "false", "False", ""):
+            print(f"[DEBUG_TREE] After super().mousePressEvent(), event.isAccepted()={event.isAccepted()}")
 
 
 class TaskPanel(QWidget):
@@ -207,9 +218,10 @@ class TaskPanel(QWidget):
         self.task_tree.installEventFilter(self)
         self.task_tree.setFocusPolicy(Qt.StrongFocus)
         
-        # Debug: Log when tree signals fire
-        self.task_tree.itemActivated.connect(lambda item: print(f"[TASK_TREE] itemActivated signal fired"))
-        self.task_tree.itemDoubleClicked.connect(lambda item, col: print(f"[TASK_TREE] itemDoubleClicked signal fired, col={col}"))
+        # Debug: Log when tree signals fire (if enabled)
+        if os.getenv("ZIMX_DEBUG_TASKS", "0") not in ("0", "false", "False", ""):
+            self.task_tree.itemActivated.connect(lambda item: print(f"[TASK_TREE] itemActivated signal fired"))
+            self.task_tree.itemDoubleClicked.connect(lambda item, col: print(f"[TASK_TREE] itemDoubleClicked signal fired, col={col}"))
         
         saved_header = config.load_header_state(self._header_state_key)
         if saved_header:
@@ -849,9 +861,11 @@ class TaskPanel(QWidget):
     def _emit_task_activation(self, item: QTreeWidgetItem) -> None:
         task = item.data(0, Qt.UserRole)
         if not task:
-            print(f"[TASK_PANEL] _emit_task_activation: no task data on item")
+            if os.getenv("ZIMX_DEBUG_TASKS", "0") not in ("0", "false", "False", ""):
+                print(f"[TASK_PANEL] _emit_task_activation: no task data on item")
             return
-        print(f"[TASK_PANEL] _emit_task_activation: emitting signal for {task['path']}:{task.get('line') or 1}")
+        if os.getenv("ZIMX_DEBUG_TASKS", "0") not in ("0", "false", "False", ""):
+            print(f"[TASK_PANEL] _emit_task_activation: emitting signal for {task['path']}:{task.get('line') or 1}")
         self.taskActivated.emit(task["path"], task.get("line") or 1)
 
     def _present_path(self, path: str) -> str:

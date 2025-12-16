@@ -400,8 +400,8 @@ class VaultTreeView(QTreeView):
 
 
 def logNav(message: str) -> None:
-    """Log navigation operations if LOG_NAV_OPERATIONS is enabled (default: '1')."""
-    if os.getenv("LOG_NAV_OPERATIONS", "1") not in ("0", "false", "False", ""):
+    """Log navigation operations if ZIMX_DEBUG_NAV is enabled."""
+    if os.getenv("ZIMX_DEBUG_NAV", "0") not in ("0", "false", "False", ""):
         print(f"[Nav] {message}")
 
 
@@ -579,7 +579,7 @@ class MainWindow(QMainWindow):
         self.autosave_timer.timeout.connect(lambda: self._save_current_file(auto=True))
         self.editor.imageSaved.connect(self._on_image_saved)
         self.editor.textChanged.connect(lambda: self.autosave_timer.start())
-        self.editor.focusLost.connect(lambda: (self._remember_history_cursor(), self._save_current_file(auto=True)))
+        self.editor.focusLost.connect(self._on_editor_focus_lost)
         self.editor.cursorMoved.connect(self._on_editor_cursor_moved)
         self.editor.linkHovered.connect(self._on_link_hovered)
         self.editor.linkCopied.connect(self._on_link_copied)
@@ -2507,7 +2507,8 @@ class MainWindow(QMainWindow):
             if not self.page_history or self.page_history[-1] != path:
                 self.page_history.append(path)
                 self.history_index = len(self.page_history) - 1
-                print(f"[HISTORY] Added to history: {path}, history_index={self.history_index}, total={len(self.page_history)}")
+                if os.getenv("ZIMX_DEBUG_HISTORY", "0") not in ("0", "false", "False", ""):
+                    print(f"[HISTORY] Added to history: {path}, history_index={self.history_index}, total={len(self.page_history)}")
                 # Refresh history buttons
                 self._refresh_history_buttons()
         
@@ -2528,7 +2529,8 @@ class MainWindow(QMainWindow):
             self._alert_api_error(exc, f"Failed to open {path}")
             return
         content = resp.json().get("content", "")
-        print(f"[DEBUG load] Loaded from API: {len(content)} chars, ends_with_newline={content.endswith('\\n')}, last_20_chars={repr(content[-20:])}")
+        if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
+            print(f"[DEBUG load] Loaded from API: {len(content)} chars, ends_with_newline={content.endswith('\\n')}, last_20_chars={repr(content[-20:])}")
         if self.link_update_mode == "lazy":
             content, rewritten = self._rewrite_links(content)
             if rewritten:
@@ -2703,7 +2705,8 @@ class MainWindow(QMainWindow):
                 return
         
         payload_content = self.editor.to_markdown()
-        print(f"[DEBUG save] to_markdown() returned {len(payload_content)} chars, ends_with_newline={payload_content.endswith('\\n')}, last_20_chars={repr(payload_content[-20:])}")
+        if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
+            print(f"[DEBUG save] to_markdown() returned {len(payload_content)} chars, ends_with_newline={payload_content.endswith('\\n')}, last_20_chars={repr(payload_content[-20:])}")
         # Keep buffer and on-disk content in sync when we inject a missing title
         title_content = self._ensure_page_title(payload_content, self.current_path)
         if title_content != payload_content:
@@ -2941,6 +2944,20 @@ class MainWindow(QMainWindow):
         # Refresh attachments panel to show the new image
         self.right_panel.refresh_attachments()
 
+    def _on_editor_focus_lost(self) -> None:
+        """Handle editor focus loss - save if not moving to right panel."""
+        # Check where focus is going
+        from PySide6.QtWidgets import QApplication
+        new_focus = QApplication.focusWidget()
+        # Only skip save if focus is moving to the right panel
+        if new_focus and (new_focus is self.right_panel or self.right_panel.isAncestorOf(new_focus)):
+            # Focus is staying in the right panel, just remember cursor
+            self._remember_history_cursor()
+        else:
+            # Focus is going elsewhere, save normally
+            self._remember_history_cursor()
+            self._save_current_file(auto=True)
+
     def _find_asset(self, name: str) -> Optional[Path]:
         """Locate an asset in development or PyInstaller layouts."""
         rel = os.path.join("assets", name)
@@ -3041,14 +3058,16 @@ class MainWindow(QMainWindow):
         editor_cursor = self.editor.textCursor()
         saved_cursor_pos = editor_cursor.position()
         saved_anchor_pos = editor_cursor.anchor()
-        print(f"[DEBUG _insert_link] BEFORE save: pos={saved_cursor_pos}, anchor={saved_anchor_pos}, doc_len={len(self.editor.toPlainText())}")
+        if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
+            print(f"[DEBUG _insert_link] BEFORE save: pos={saved_cursor_pos}, anchor={saved_anchor_pos}, doc_len={len(self.editor.toPlainText())}")
         
         # Save current page before inserting link to ensure it's indexed
         # Note: Save may reset cursor, but we've already captured the position as integers
         if self.current_path:
             self._save_current_file(auto=True)
         
-        print(f"[DEBUG _insert_link] AFTER save: cursor.pos={self.editor.textCursor().position()}, doc_len={len(self.editor.toPlainText())}")
+        if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
+            print(f"[DEBUG _insert_link] AFTER save: cursor.pos={self.editor.textCursor().position()}, doc_len={len(self.editor.toPlainText())}")
         
         # Get selected text if any
         selection_range: tuple[int, int] | None = None
@@ -3065,7 +3084,8 @@ class MainWindow(QMainWindow):
             doc_len = len(self.editor.toPlainText())
             anchor = max(0, min(saved_anchor_pos, doc_len))
             pos = max(0, min(saved_cursor_pos, doc_len))
-            print(f"[DEBUG _restore_cursor] doc_len={doc_len}, saved_anchor={saved_anchor_pos}, saved_pos={saved_cursor_pos}, clamped_anchor={anchor}, clamped_pos={pos}")
+            if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
+                print(f"[DEBUG _restore_cursor] doc_len={doc_len}, saved_anchor={saved_anchor_pos}, saved_pos={saved_cursor_pos}, clamped_anchor={anchor}, clamped_pos={pos}")
             cursor = QTextCursor(self.editor.document())
             cursor.setPosition(anchor)
             cursor.setPosition(
@@ -3310,10 +3330,12 @@ class MainWindow(QMainWindow):
         self.right_panel.set_font_size(ai_font_size)
 
     def _open_task_from_panel(self, path: str, line: int) -> None:
-        print(f"[MAIN_WINDOW] _open_task_from_panel called: {path}:{line}, current_path={self.current_path}")
+        if os.getenv("ZIMX_DEBUG_PANELS", "0") not in ("0", "false", "False", ""):
+            print(f"[MAIN_WINDOW] _open_task_from_panel called: {path}:{line}, current_path={self.current_path}")
         # Remember which widget had focus (should be task tree)
         focused_widget = self.focusWidget()
-        print(f"[MAIN_WINDOW] Focus before: {focused_widget}")
+        if os.getenv("ZIMX_DEBUG_PANELS", "0") not in ("0", "false", "False", ""):
+            print(f"[MAIN_WINDOW] Focus before: {focused_widget}")
         
         # Open the file and jump to the task line
         if path != self.current_path:
@@ -3323,7 +3345,8 @@ class MainWindow(QMainWindow):
         # Restore focus to the task panel so user can continue clicking tasks
         if focused_widget and "Task" in focused_widget.__class__.__name__:
             focused_widget.setFocus()
-            print(f"[MAIN_WINDOW] Focus restored to: {focused_widget}")
+            if os.getenv("ZIMX_DEBUG_PANELS", "0") not in ("0", "false", "False", ""):
+                print(f"[MAIN_WINDOW] Focus restored to: {focused_widget}")
 
     def _open_link_from_panel(self, path: str) -> None:
         if not path:
@@ -3768,6 +3791,8 @@ class MainWindow(QMainWindow):
             self._saved_right_width = sizes[1]
             self.right_panel.hide()
             self.editor_split.setSizes([sum(sizes), 0])
+            # Give focus back to editor when hiding the right panel
+            self.editor.setFocus(Qt.OtherFocusReason)
         else:
             self.right_panel.show()
             width = getattr(self, "_saved_right_width", 360)
@@ -4260,21 +4285,66 @@ class MainWindow(QMainWindow):
         self.editor.setFocus()
 
     def _focus_tasks_search(self) -> None:
-        """Focus the Tasks tab search bar."""
-        # Ensure right panel is visible if hidden
+        """Focus the Tasks tab search bar. If external task window exists, focus that instead."""
+        # First check if there's an external task panel window
+        for window in self._detached_panels:
+            if window.windowTitle() == "Tasks" and window.isVisible():
+                try:
+                    # Bring external window to front and focus it
+                    window.raise_()
+                    window.activateWindow()
+                    # Focus the search box in the external panel
+                    central_widget = window.centralWidget()
+                    if hasattr(central_widget, "focus_search"):
+                        central_widget.focus_search()
+                    elif hasattr(central_widget, "search"):
+                        central_widget.search.setFocus(Qt.ShortcutFocusReason)
+                    return
+                except Exception:
+                    pass
+        
+        # No external window - ensure right panel is visible if hidden
         sizes = self.editor_split.sizes()
         if len(sizes) >= 2 and sizes[1] == 0:
             width = getattr(self, "_saved_right_width", 360)
             total = sum(sizes)
             self.editor_split.setSizes([max(1, total - width), width])
+        
+        # Ensure right panel widget is visible
+        if not self.right_panel.isVisible():
+            self.right_panel.setVisible(True)
+        
+        # Switch to Tasks tab (this will trigger _focus_current_tab but that's OK)
+        self.right_panel.tabs.setCurrentIndex(0)
+        
+        # Use QTimer to defer focus until tab switch completes and UI updates
+        QTimer.singleShot(0, self._deferred_focus_tasks_search)
+    
+    def _deferred_focus_tasks_search(self) -> None:
+        """Deferred helper to focus task search after tab switch completes."""
         try:
-            # Switch to Tasks tab
-            self.right_panel.tabs.setCurrentIndex(0)
-            # Explicitly focus the search box
-            if hasattr(self.right_panel.task_panel, "focus_search"):
-                self.right_panel.task_panel.focus_search()
-            else:
-                self.right_panel.task_panel.search.setFocus(Qt.ShortcutFocusReason)
+            # Get the search box directly
+            search_box = getattr(self.right_panel.task_panel, "search", None)
+            if search_box and search_box.isVisible():
+                # Ensure editor doesn't have focus
+                self.editor.clearFocus()
+                # Set focus on search box
+                search_box.setFocus(Qt.TabFocusReason)
+                search_box.selectAll()
+                # Process events to ensure focus is applied
+                from PySide6.QtCore import QCoreApplication
+                QCoreApplication.processEvents()
+                # Schedule one more focus attempt after a delay to catch any focus-stealing
+                QTimer.singleShot(100, lambda: self._force_search_focus(search_box))
+        except Exception:
+            pass
+    
+    def _force_search_focus(self, search_box) -> None:
+        """Force focus to search box, called a short time after initial focus attempt."""
+        try:
+            if search_box and search_box.isVisible():
+                search_box.setFocus(Qt.TabFocusReason)
+                search_box.selectAll()
         except Exception:
             pass
 
@@ -5645,7 +5715,8 @@ class MainWindow(QMainWindow):
 
     def _apply_rewritten_editor_content(self, new_content: str) -> None:
         """Update editor text after a lazy link rewrite while attempting to preserve cursor."""
-        print(f"[DEBUG _apply_rewritten_editor_content] called, cursor will be reset")
+        if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
+            print(f"[DEBUG _apply_rewritten_editor_content] called, cursor will be reset")
         try:
             cursor = self.editor.textCursor()
             pos = cursor.position()
@@ -5709,7 +5780,8 @@ class MainWindow(QMainWindow):
         self._remember_history_cursor()
         self.history_index -= 1
         target_path = self.page_history[self.history_index]
-        print(f"[HISTORY] Navigate back: index {self.history_index+1} -> {self.history_index}, opening: {target_path}")
+        if os.getenv("ZIMX_DEBUG_HISTORY", "0") not in ("0", "false", "False", ""):
+            print(f"[HISTORY] Navigate back: index {self.history_index+1} -> {self.history_index}, opening: {target_path}")
         self._suspend_selection_open = True
         try:
             self._open_file(target_path, add_to_history=False, restore_history_cursor=True)
@@ -5724,7 +5796,8 @@ class MainWindow(QMainWindow):
         self._remember_history_cursor()
         self.history_index += 1
         target_path = self.page_history[self.history_index]
-        print(f"[HISTORY] Navigate forward: index {self.history_index-1} -> {self.history_index}, opening: {target_path}")
+        if os.getenv("ZIMX_DEBUG_HISTORY", "0") not in ("0", "false", "False", ""):
+            print(f"[HISTORY] Navigate forward: index {self.history_index-1} -> {self.history_index}, opening: {target_path}")
         self._suspend_selection_open = True
         try:
             self._open_file(target_path, add_to_history=False, restore_history_cursor=True)

@@ -28,8 +28,9 @@ from PySide6.QtWidgets import (
     QDialog,
 )
 
+from .page_load_logger import PAGE_LOGGING_ENABLED
+
 _DETAILED_LOGGING = os.getenv("ZIMX_DETAILED_LOGGING", "0") not in ("0", "false", "False", "", None)
-_PAGE_LOGGING = os.getenv("ZIMX_DETAILED_PAGE_LOGGING", "0") not in ("0", "false", "False", "", None)
 
 
 class AttachmentsListWidget(QListWidget):
@@ -144,7 +145,7 @@ class AttachmentsPanel(QWidget):
         t0 = time.perf_counter()
         self.current_page_path = page_path
         self._refresh_attachments()
-        if _PAGE_LOGGING:
+        if PAGE_LOGGING_ENABLED:
             print(f"[PageLoadAndRender] attachments set_page elapsed={(time.perf_counter()-t0)*1000:.1f}ms")
     
     def focusInEvent(self, event) -> None:
@@ -165,7 +166,7 @@ class AttachmentsPanel(QWidget):
         if not self.current_page_path:
             self.open_folder_button.setEnabled(False)
             self.refresh_button.setEnabled(False)
-            if _PAGE_LOGGING:
+            if PAGE_LOGGING_ENABLED:
                 print(f"[PageLoadAndRender] attachments refresh skipped (no page) elapsed={(time.perf_counter()-t0)*1000:.1f}ms")
             return
         
@@ -215,14 +216,14 @@ class AttachmentsPanel(QWidget):
                         item.setIcon(icon)
 
                     self.attachments_list.addItem(item)
-            if _PAGE_LOGGING:
+            if PAGE_LOGGING_ENABLED:
                 print(
                     f"[PageLoadAndRender] attachments refresh listed={len(files)} elapsed={(time.perf_counter()-t_list)*1000:.1f}ms total={(time.perf_counter()-t0)*1000:.1f}ms"
                 )
         except (OSError, PermissionError):
             pass
         else:
-            if _PAGE_LOGGING:
+            if PAGE_LOGGING_ENABLED:
                 print(f"[PageLoadAndRender] attachments refresh total={(time.perf_counter()-t0)*1000:.1f}ms")
             self._sync_with_server(attachments)
         self._update_remove_button_state()
@@ -381,7 +382,7 @@ class AttachmentsPanel(QWidget):
                     size = 144
                 
                 scaled = pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                if _PAGE_LOGGING:
+                if PAGE_LOGGING_ENABLED:
                     print(f"[PageLoadAndRender] attachments thumbnail {file_path.name} load+scale={(time.perf_counter()-load_t0)*1000:.1f}ms")
                 return QIcon(scaled)
         

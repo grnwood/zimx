@@ -224,8 +224,9 @@ Alice -> Bob: test
                 cmd = [java_cmd, "-jar", jar_cmd, "-tsvg", "-pipe"]
 
             # Debug output: show command
-            print(f"[PlantUML] Command: {' '.join(cmd)}", file=sys.stdout, flush=True)
-            print(f"[PlantUML] Input length: {len(puml_text)} bytes", file=sys.stdout, flush=True)
+            if os.getenv("ZIMX_DEBUG_PLANTUML", "0") not in ("0", "false", "False", ""):
+                print(f"[PlantUML] Command: {' '.join(cmd)}", file=sys.stdout, flush=True)
+                print(f"[PlantUML] Input length: {len(puml_text)} bytes", file=sys.stdout, flush=True)
 
             result = subprocess.run(
                 cmd,
@@ -235,9 +236,10 @@ Alice -> Bob: test
             )
 
             # Debug output: show result
-            print(f"[PlantUML] Return code: {result.returncode}", file=sys.stdout, flush=True)
-            print(f"[PlantUML] Stdout length: {len(result.stdout)} bytes", file=sys.stdout, flush=True)
-            print(f"[PlantUML] Stderr length: {len(result.stderr)} bytes", file=sys.stdout, flush=True)
+            if os.getenv("ZIMX_DEBUG_PLANTUML", "0") not in ("0", "false", "False", ""):
+                print(f"[PlantUML] Return code: {result.returncode}", file=sys.stdout, flush=True)
+                print(f"[PlantUML] Stdout length: {len(result.stdout)} bytes", file=sys.stdout, flush=True)
+                print(f"[PlantUML] Stderr length: {len(result.stderr)} bytes", file=sys.stdout, flush=True)
 
             # Try to extract SVG regardless of exit code (PlantUML sometimes returns non-zero with valid SVG)
             svg_content = result.stdout.decode("utf-8", errors="replace")
@@ -245,14 +247,16 @@ Alice -> Bob: test
             
             # Check if we got valid SVG
             if '<svg' in svg_content:
-                print(f"[PlantUML] ✓ Render successful (SVG produced)", file=sys.stdout, flush=True)
-                if result.returncode != 0 and stderr_text:
-                    print(f"[PlantUML] Warning - non-zero exit but SVG produced:\n{stderr_text}", file=sys.stdout, flush=True)
+                if os.getenv("ZIMX_DEBUG_PLANTUML", "0") not in ("0", "false", "False", ""):
+                    print(f"[PlantUML] ✓ Render successful (SVG produced)", file=sys.stdout, flush=True)
+                    if result.returncode != 0 and stderr_text:
+                        print(f"[PlantUML] Warning - non-zero exit but SVG produced:\n{stderr_text}", file=sys.stdout, flush=True)
                 return RenderResult(success=True, svg_content=svg_content)
             
             # No valid SVG - report error
             if result.returncode != 0:
-                print(f"[PlantUML] Stderr output:\n{stderr_text}", file=sys.stdout, flush=True)
+                if os.getenv("ZIMX_DEBUG_PLANTUML", "0") not in ("0", "false", "False", ""):
+                    print(f"[PlantUML] Stderr output:\n{stderr_text}", file=sys.stdout, flush=True)
                 return RenderResult(
                     success=False,
                     error_message=f"PlantUML render error (exit {result.returncode})",
@@ -260,7 +264,8 @@ Alice -> Bob: test
                 )
             
             # Zero exit code but no SVG - also an error
-            print(f"[PlantUML] Invalid SVG - stderr:\n{stderr_text}", file=sys.stdout, flush=True)
+            if os.getenv("ZIMX_DEBUG_PLANTUML", "0") not in ("0", "false", "False", ""):
+                print(f"[PlantUML] Invalid SVG - stderr:\n{stderr_text}", file=sys.stdout, flush=True)
             return RenderResult(
                 success=False,
                 error_message="Invalid SVG output from PlantUML",

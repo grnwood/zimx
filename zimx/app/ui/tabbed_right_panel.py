@@ -16,8 +16,7 @@ from .task_panel import TaskPanel
 from .attachments_panel import AttachmentsPanel
 from .link_navigator_panel import LinkNavigatorPanel
 from .calendar_panel import CalendarPanel
-
-_PAGE_LOGGING = os.getenv("ZIMX_DETAILED_PAGE_LOGGING", "0") not in ("0", "false", "False", "", None)
+from .page_load_logger import PAGE_LOGGING_ENABLED
 
 
 class TabbedRightPanel(QWidget):
@@ -91,7 +90,10 @@ class TabbedRightPanel(QWidget):
         self.tabs.tabBar().customContextMenuRequested.connect(self._open_tab_context_menu)
         
         # Forward signals
-        self.task_panel.taskActivated.connect(lambda path, line: print(f"[TABBED_PANEL] taskActivated received: {path}:{line}") or self.taskActivated.emit(path, line))
+        if os.getenv("ZIMX_DEBUG_PANELS", "0") not in ("0", "false", "False", ""):
+            self.task_panel.taskActivated.connect(lambda path, line: print(f"[TABBED_PANEL] taskActivated received: {path}:{line}") or self.taskActivated.emit(path, line))
+        else:
+            self.task_panel.taskActivated.connect(self.taskActivated)
         self.task_panel.filterClearRequested.connect(self.filterClearRequested)
         self.calendar_panel.dateActivated.connect(self.dateActivated)
         self.calendar_panel.pageActivated.connect(self.calendarPageActivated)
@@ -165,14 +167,14 @@ class TabbedRightPanel(QWidget):
                     self._pending_calendar_path = relative_path
         except Exception:
             pass
-        if _PAGE_LOGGING:
+        if PAGE_LOGGING_ENABLED:
             print(
                 f"[PageLoadAndRender] right panel update attachments={(t1-t0)*1000:.1f}ms links={(t2-t1)*1000:.1f}ms"
             )
         if self.ai_chat_panel:
             self.ai_chat_panel.set_current_page(relative_path)
         t3 = time.perf_counter()
-        if _PAGE_LOGGING:
+        if PAGE_LOGGING_ENABLED:
             print(
                 f"[PageLoadAndRender] right panel ai chat {(t3-t2)*1000:.1f}ms"
             )
@@ -268,8 +270,15 @@ class TabbedRightPanel(QWidget):
         if widget:
             if widget == self.calendar_panel:
                 self._sync_calendar_tab_state()
-            # Let the widget handle its own focus - don't force focus to search bar
-            widget.setFocus(Qt.OtherFocusReason)
+            # For task panel, focus the search box specifically
+            if widget == self.task_panel:
+                if hasattr(widget, "focus_search"):
+                    widget.focus_search()
+                else:
+                    widget.setFocus(Qt.OtherFocusReason)
+            else:
+                # For other tabs, just set widget focus
+                widget.setFocus(Qt.OtherFocusReason)
 
     def focus_ai_chat(self, page_path=None, create=False) -> None:
         """Switch to AI Chat tab and sync to the given page."""

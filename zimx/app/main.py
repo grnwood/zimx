@@ -20,6 +20,32 @@ from zimx.app import config
 from zimx.app.ui.main_window import MainWindow
 
 
+# ============================================================================
+# DEBUG CONFIGURATION - Environment Variables
+# ============================================================================
+# Set these environment variables to "1" or "true" to enable detailed logging
+# By default, all are OFF for cleaner stdout (only startup and API calls shown)
+#
+# ZIMX_DEBUG_EDITOR      - Editor operations (markdown save/load, cursor positioning)
+# ZIMX_DEBUG_NAV         - Navigation operations (tree selection, history)  
+# ZIMX_DEBUG_HISTORY     - Page history tracking
+# ZIMX_DEBUG_PANELS      - Right panel signal forwarding
+# ZIMX_DEBUG_TASKS       - Task panel mouse events and signal emission
+# ZIMX_DEBUG_PLANTUML    - PlantUML rendering operations
+# ZIMX_DETAILED_PAGE_LOG - Detailed page load timing and operations
+# ZIMX_DETAILED_LOGGING  - Additional low-level internal logging (various modules)
+#
+# Examples:
+#   export ZIMX_DEBUG_NAV=1        # Enable navigation debugging
+#   export ZIMX_DEBUG_TASKS=1      # Enable task panel debugging
+#   ZIMX_DEBUG_EDITOR=1 ./sv.sh   # Enable for single run
+# ============================================================================
+
+def _debug_enabled(var_name: str) -> bool:
+    """Check if a debug flag is enabled."""
+    return os.getenv(var_name, "0") not in ("0", "false", "False", "", None)
+
+
 def _resource_candidates(rel_path: str) -> list[str]:
     """Return likely absolute paths for a bundled resource.
 
