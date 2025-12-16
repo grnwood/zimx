@@ -447,6 +447,7 @@ class MainWindow(QMainWindow):
         self._tree_refresh_in_progress: bool = False
         self._pending_tree_refresh: bool = False
         self._tree_cache: dict[str, list[dict]] = {}
+        self._expanded_paths: set[str] = set()
         self._pending_link_path_maps: list[dict[str, str]] = []
         self.link_update_mode: str = config.load_link_update_mode()
         self._pending_reindex_trigger: bool = False
@@ -2092,6 +2093,57 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _save_expanded_state(self) -> None:
+        """Save currently expanded tree paths."""
+        model = self.tree_model
+        if not model:
+            return
+        
+        before_count = len(self._expanded_paths)
+        
+        def walk_tree(parent_index: QModelIndex) -> None:
+            rows = model.rowCount(parent_index)
+            for row in range(rows):
+                idx = model.index(row, 0, parent_index)
+                if self.tree_view.isExpanded(idx):
+                    item = model.itemFromIndex(idx)
+                    if item:
+                        path = self._normalize_tree_path(item.data(PATH_ROLE))
+                        if path:
+                            self._expanded_paths.add(path)
+                walk_tree(idx)
+        
+        walk_tree(QModelIndex())
+        logNav(f"_save_expanded_state: saved {len(self._expanded_paths)} paths (was {before_count})")
+
+    def _restore_expanded_state(self) -> None:
+        """Restore previously expanded tree paths."""
+        if not self._expanded_paths:
+            logNav("_restore_expanded_state: no paths to restore")
+            return
+        
+        model = self.tree_model
+        if not model:
+            return
+        
+        restored_count = 0
+        
+        def walk_tree(parent_index: QModelIndex) -> None:
+            nonlocal restored_count
+            rows = model.rowCount(parent_index)
+            for row in range(rows):
+                idx = model.index(row, 0, parent_index)
+                item = model.itemFromIndex(idx)
+                if item:
+                    path = self._normalize_tree_path(item.data(PATH_ROLE))
+                    if path and path in self._expanded_paths:
+                        self.tree_view.expand(idx)
+                        restored_count += 1
+                walk_tree(idx)
+        
+        walk_tree(QModelIndex())
+        logNav(f"_restore_expanded_state: restored {restored_count} of {len(self._expanded_paths)} paths")
+
     def _populate_vault_tree(self) -> None:
         self._cancel_inline_editor()
         if not self.vault_root:
@@ -2184,8 +2236,13 @@ class MainWindow(QMainWindow):
             self.tree_view.setUpdatesEnabled(True)
             if selection_blocker:
                 del selection_blocker
-        self.tree_view.collapseAll()
+        
+        # Restore previously expanded paths
+        self._restore_expanded_state()
+        
         if self._pending_selection:
+            # Ensure parent nodes are expanded before selecting
+            self._ensure_tree_path_loaded(self._pending_selection)
             self._select_tree_path(self._pending_selection)
             self._pending_selection = None
         self.right_panel.refresh_tasks()
@@ -2466,6 +2523,7 @@ class MainWindow(QMainWindow):
             self._alert_api_error(exc, f"Failed to open {path}")
             return
         content = resp.json().get("content", "")
+        print(f"[DEBUG load] Loaded from API: {len(content)} chars, ends_with_newline={content.endswith('\\n')}, last_20_chars={repr(content[-20:])}")
         if self.link_update_mode == "lazy":
             content, rewritten = self._rewrite_links(content)
             if rewritten:
@@ -2640,6 +2698,7 @@ class MainWindow(QMainWindow):
                 return
         
         payload_content = self.editor.to_markdown()
+        print(f"[DEBUG save] to_markdown() returned {len(payload_content)} chars, ends_with_newline={payload_content.endswith('\\n')}, last_20_chars={repr(payload_content[-20:])}")
         # Keep buffer and on-disk content in sync when we inject a missing title
         title_content = self._ensure_page_title(payload_content, self.current_path)
         if title_content != payload_content:
@@ -2972,15 +3031,21 @@ class MainWindow(QMainWindow):
         """Open insert link dialog and insert selected link at cursor."""
         if not config.has_active_vault():
             return
+        
+        # Capture cursor position BEFORE saving (as integers, immune to cursor object changes)
+        editor_cursor = self.editor.textCursor()
+        saved_cursor_pos = editor_cursor.position()
+        saved_anchor_pos = editor_cursor.anchor()
+        print(f"[DEBUG _insert_link] BEFORE save: pos={saved_cursor_pos}, anchor={saved_anchor_pos}, doc_len={len(self.editor.toPlainText())}")
+        
         # Save current page before inserting link to ensure it's indexed
+        # Note: Save may reset cursor, but we've already captured the position as integers
         if self.current_path:
             self._save_current_file(auto=True)
         
+        print(f"[DEBUG _insert_link] AFTER save: cursor.pos={self.editor.textCursor().position()}, doc_len={len(self.editor.toPlainText())}")
+        
         # Get selected text if any
-        editor_cursor = self.editor.textCursor()
-        # Remember caret/selection so the modal dialog can't reset it
-        saved_cursor_pos = editor_cursor.position()
-        saved_anchor_pos = editor_cursor.anchor()
         selection_range: tuple[int, int] | None = None
         selected_text = ""
         if editor_cursor.hasSelection():
@@ -2995,6 +3060,7 @@ class MainWindow(QMainWindow):
             doc_len = len(self.editor.toPlainText())
             anchor = max(0, min(saved_anchor_pos, doc_len))
             pos = max(0, min(saved_cursor_pos, doc_len))
+            print(f"[DEBUG _restore_cursor] doc_len={doc_len}, saved_anchor={saved_anchor_pos}, saved_pos={saved_cursor_pos}, clamped_anchor={anchor}, clamped_pos={pos}")
             cursor = QTextCursor(self.editor.document())
             cursor.setPosition(anchor)
             cursor.setPosition(
@@ -3038,7 +3104,9 @@ class MainWindow(QMainWindow):
                     restore_cursor.setPosition(start)
                     restore_cursor.setPosition(end, QTextCursor.KeepAnchor)
                     restore_cursor.removeSelectedText()
-                    self.editor.setTextCursor(restore_cursor)
+                
+                # Always set the cursor before inserting the link
+                self.editor.setTextCursor(restore_cursor)
                 label = link_name or selected_text or colon_path
                 self.editor.insert_link(colon_path, label)
                 inserted = True
@@ -4377,7 +4445,7 @@ class MainWindow(QMainWindow):
             path = index.data(PATH_ROLE) or "/"
             menu.addAction(
                 "New Page",
-                lambda checked=False, p=path, idx=index: self._start_inline_creation(p, global_pos, idx),
+                lambda checked=False: self._show_new_page_dialog(),
             )
             collapse_action = menu.addAction("Collapse")
             collapse_action.triggered.connect(
@@ -4428,7 +4496,7 @@ class MainWindow(QMainWindow):
                 ai_chat_action = menu.addAction("AI Chat…")
                 ai_chat_action.triggered.connect(lambda checked=False, fp=file_path: self._open_ai_chat_for_path(fp, create=True))
         else:
-            menu.addAction("New Page", lambda checked=False: self._start_inline_creation("/", global_pos, None))
+            menu.addAction("New Page", lambda checked=False: self._show_new_page_dialog())
         if menu.actions():
             menu.exec(global_pos)
 
@@ -5521,6 +5589,7 @@ class MainWindow(QMainWindow):
 
     def _apply_rewritten_editor_content(self, new_content: str) -> None:
         """Update editor text after a lazy link rewrite while attempting to preserve cursor."""
+        print(f"[DEBUG _apply_rewritten_editor_content] called, cursor will be reset")
         try:
             cursor = self.editor.textCursor()
             pos = cursor.position()

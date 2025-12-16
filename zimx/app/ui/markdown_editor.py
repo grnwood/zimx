@@ -1585,6 +1585,12 @@ class MarkdownEditor(QTextEdit):
                         buf = []
                 t3 = time.perf_counter()
             else:
+                # Qt's setPlainText with "text\n" creates 1 block: ["text"]
+                # But we need "text\n" to roundtrip, so if display ends with \n,
+                # we need to ensure toPlainText() returns it with \n
+                # The trick: if display ends with N newlines, setPlainText will create N+1 blocks
+                # So "text\n" → blocks["text", ""] but toPlainText() returns "text\n"
+                # and "text\n\n" → blocks["text", "", ""] and toPlainText() returns "text\n\n"
                 self.setPlainText(display)
                 t3 = time.perf_counter()
             self._mark_page_load("document populated")
@@ -1887,9 +1893,9 @@ class MarkdownEditor(QTextEdit):
         self.viewport().unsetCursor()
 
     def insert_link(self, colon_path: str, link_name: str | None = None) -> None:
-        """Insert a link at the current cursor position.
+        """Insert a link at the current cursor position in display format.
         
-        Always inserts in unified [link|label] format (label may be empty).
+        Inserts directly as \x00target\x00label\x00 (display format with sentinels).
         """
         if not colon_path:
             return
@@ -1897,10 +1903,7 @@ class MarkdownEditor(QTextEdit):
         is_http_url = colon_path.startswith(("http://", "https://"))
         target = self._normalize_external_link(colon_path) if is_http_url else ensure_root_colon_link(colon_path)
         
-        cursor = self.textCursor()
-        pos_before = cursor.position()
-        
-        # Always use [link|label] format; default label is empty when it matches the link
+        # Determine the display label
         label = ""
         if link_name and link_name.strip():
             candidate = link_name.strip()
@@ -1908,55 +1911,28 @@ class MarkdownEditor(QTextEdit):
             target_left = target.lstrip(":/")
             if match_left != target_left:
                 label = candidate
-        link_text = f"[{target}|{label}]"
         
-        # Insert the storage format text
-        cursor.insertText(link_text)
-        pos_after_insert = cursor.position()
+        # If no custom label, use the target as the label
+        if not label:
+            label = target
         
-        # Full refresh ensures wiki links convert to hidden-display format immediately.
-        self._refresh_display()
+        # Insert directly in display format: \x00target\x00label\x00
+        display_link = f"\x00{target}\x00{label}\x00"
         
-        # After refresh, find the link in display format and position cursor after it
-        # The cursor should be after the link's closing sentinel
-        block = self.document().findBlock(pos_before)
-        if block.isValid():
-            text = block.text()
-            block_pos = block.position()
-            rel_pos = pos_before - block_pos
-            
-            # Find the display link that starts at or near our insertion point
-            idx = 0
-            found = False
-            while idx < len(text):
-                if text[idx] == '\x00':
-                    link_start = idx + 1
-                    link_end = text.find('\x00', link_start)
-                    if link_end > link_start:
-                        label_start = link_end + 1
-                        label_end = text.find('\x00', label_start)
-                        if label_end >= label_start:
-                            # Check if this link is at or near our insertion point
-                            if idx <= rel_pos <= label_end + 1:
-                                # Position cursor after the closing sentinel
-                                new_cursor = QTextCursor(self.document())
-                                new_cursor.setPosition(block_pos + label_end + 1)
-                                self.setTextCursor(new_cursor)
-                                found = True
-                                break
-                            idx = label_end + 1
-                            continue
-                idx += 1
-            
-            if found:
-                return
+        cursor = self.textCursor()
+        cursor.insertText(display_link)
         
-        # Fallback: position at a safe location
-        # Use the original position after insert, but cap it to document length
-        safe_pos = min(pos_after_insert, self.document().characterCount() - 1)
-        new_cursor = QTextCursor(self.document())
-        new_cursor.setPosition(max(0, safe_pos))
-        self.setTextCursor(new_cursor)
+        # Cursor is now positioned right after the link (after the closing sentinel)
+        # No need to reposition - insertText leaves cursor at the right place
+        
+        # Mark document as modified and trigger rehighlighting
+        self.document().setModified(True)
+        
+        # Force rehighlight of the affected block to apply sentinel formatting
+        if self.highlighter:
+            block = cursor.block()
+            if block.isValid():
+                self.highlighter.rehighlightBlock(block)
 
     def toggle_task_state(self) -> None:
         cursor = self.textCursor()
@@ -3196,12 +3172,16 @@ class MarkdownEditor(QTextEdit):
         # Single click on links to activate them
         if event.button() == Qt.LeftButton:
             cursor = self.cursorForPosition(event.pos())
-            md_info = self._markdown_link_at_cursor(cursor)
-            link = md_info[3] if md_info else self._link_under_cursor(cursor)
-            if link:
-                self.linkActivated.emit(link)
-                event.accept()
-                return
+            # Verify the cursor position actually corresponds to the click location
+            # by checking that the rect for the cursor contains the click position
+            cursor_rect = self.cursorRect(cursor)
+            if cursor_rect.isValid() and cursor_rect.contains(event.pos()):
+                md_info = self._markdown_link_at_cursor(cursor)
+                link = md_info[3] if md_info else self._link_under_cursor(cursor)
+                if link:
+                    self.linkActivated.emit(link)
+                    event.accept()
+                    return
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):  # type: ignore[override]
@@ -5611,8 +5591,14 @@ class MarkdownEditor(QTextEdit):
         sb.setValue(sb.value() + step)
 
     def _doc_to_markdown(self) -> str:
+        """Convert document to markdown, preserving trailing newlines.
+        
+        Qt's toPlainText() STRIPS trailing newlines, so we must check for empty
+        trailing blocks to preserve them when saving.
+        """
         parts: list[str] = []
         block = self.document().begin()
+        block_count = 0
         while block.isValid():
             it = block.begin()
             while not it.atEnd():
@@ -5626,10 +5612,31 @@ class MarkdownEditor(QTextEdit):
                 else:
                     parts.append(fragment.text())
                 it += 1
+            block_count += 1
             block = block.next()
             if block.isValid():
                 parts.append("\n")
-        return "".join(parts)
+        
+        result = "".join(parts)
+        
+        # Qt's toPlainText() strips trailing newlines, so we need to check for
+        # empty blocks at the end to restore them
+        # Count empty trailing blocks (these represent the newlines toPlainText stripped)
+        if block_count > 0:
+            last_block = self.document().lastBlock()
+            empty_trailing_blocks = 0
+            check_block = last_block
+            while check_block.isValid() and check_block.text() == "":
+                empty_trailing_blocks += 1
+                check_block = check_block.previous()
+            
+            # Each empty trailing block represents a newline that was typed but toPlainText stripped
+            if empty_trailing_blocks > 0:
+                print(f"[DEBUG _doc_to_markdown] Found {empty_trailing_blocks} empty trailing blocks, adding newlines")
+                # Add newlines for the empty blocks
+                result += "\n" * empty_trailing_blocks
+        
+        return result
 
     def _markdown_from_image_format(self, img_fmt: QTextImageFormat) -> str:
         """Return markdown representation for an inline image fragment.
