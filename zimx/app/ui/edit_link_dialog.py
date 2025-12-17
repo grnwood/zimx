@@ -15,6 +15,9 @@ from PySide6.QtWidgets import (
 
 from zimx.app import config
 from .path_utils import path_to_colon, normalize_link_target
+from .insert_link_dialog import HTMLDelegate
+import html
+import re
 
 
 class EditLinkDialog(QDialog):
@@ -62,6 +65,7 @@ class EditLinkDialog(QDialog):
         layout.addLayout(form)
 
         self.list_widget = QListWidget()
+        self.list_widget.setItemDelegate(HTMLDelegate(self.list_widget))
         self.list_widget.itemDoubleClicked.connect(self._accept_from_list)
         self.list_widget.currentItemChanged.connect(self._on_selection_changed)
         layout.addWidget(self.list_widget, 1)
@@ -124,8 +128,9 @@ class EditLinkDialog(QDialog):
             if not colon:
                 continue
             normalized_colon = normalize_link_target(colon)
-            item = QListWidgetItem(normalized_colon)
-            item.setToolTip(normalized_colon)
+            display_text = self._display_label(page, normalized_colon)
+            item = QListWidgetItem(display_text)
+            item.setToolTip(display_text)
             item.setData(Qt.UserRole, normalized_colon)
             self.list_widget.addItem(item)
         # Do not auto-select an item; user can choose via arrows/double-click
@@ -193,3 +198,20 @@ class EditLinkDialog(QDialog):
         text = self.text_edit.text().strip()
         # Clean any line breaks or paragraph separators
         return text.replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ').strip()
+
+    def _display_label(self, page: dict, colon_path: str) -> str:
+        """Format like insert link dialog: title then path, with search highlighting."""
+        title = page.get("title", "")
+        normalized_colon = normalize_link_target(colon_path)
+        display_text = f"{title} — {normalized_colon}" if title else normalized_colon
+        return self._highlight_search_term(display_text)
+
+    def _highlight_search_term(self, text: str) -> str:
+        """Highlight the current search term using the same styling as insert link."""
+        search_term = self.search_edit.text().strip()
+        if not search_term or len(search_term) < 2:
+            return html.escape(text)
+        escaped_text = html.escape(text)
+        escaped_search = re.escape(search_term)
+        pattern = re.compile(f"({escaped_search})", re.IGNORECASE)
+        return pattern.sub(r'<span style="font-weight: bold; font-size: 105%;">\\1</span>', escaped_text)

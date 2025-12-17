@@ -1,8 +1,8 @@
 """Dialog for inserting links to other pages in colon notation."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QByteArray, QTimer
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtCore import Qt, QByteArray, QTimer, QRectF, QSize
+from PySide6.QtGui import QKeyEvent, QPainter, QTextDocument, QAbstractTextDocumentLayout
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -13,10 +13,58 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QVBoxLayout,
+    QStyledItemDelegate,
+    QStyle,
 )
 
 from zimx.app import config
 from .path_utils import path_to_colon, normalize_link_target
+import html
+import re
+
+
+class HTMLDelegate(QStyledItemDelegate):
+    """Custom delegate to render HTML in list items."""
+    
+    def paint(self, painter: QPainter, option, index):
+        painter.save()
+        
+        # Get the HTML text from the item
+        text = index.data(Qt.DisplayRole)
+        
+        # Create a QTextDocument to render HTML
+        doc = QTextDocument()
+        doc.setHtml(text)
+        doc.setDefaultFont(option.font)
+        doc.setDocumentMargin(2)
+        
+        # Set the width to match the item width
+        doc.setTextWidth(option.rect.width())
+        
+        # Draw background if selected
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, option.palette.highlight())
+            # Adjust text color for selection
+            doc.setDefaultStyleSheet("body { color: white; }")
+            doc.setHtml(text)  # Re-parse with new stylesheet
+        
+        # Translate painter to item position
+        painter.translate(option.rect.topLeft())
+        
+        # Render the document
+        doc.drawContents(painter)
+        
+        painter.restore()
+    
+    def sizeHint(self, option, index):
+        text = index.data(Qt.DisplayRole)
+        doc = QTextDocument()
+        doc.setHtml(text)
+        doc.setDefaultFont(option.font)
+        doc.setDocumentMargin(2)
+        doc.setTextWidth(option.rect.width() if option.rect.width() > 0 else 400)
+        size = doc.size()
+        return QSize(int(size.width()), int(size.height()))
 
 
 class InsertLinkDialog(QDialog):
@@ -29,9 +77,12 @@ class InsertLinkDialog(QDialog):
         filter_prefix: str | None = None,
         filter_label: str | None = None,
         clear_filter_cb=None,
+        editing: bool = False,
+        initial_link_target: str | None = None,
+        initial_link_label: str | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Insert Link")
+        self.setWindowTitle("Edit Link" if editing else "Insert Link")
         self.setModal(True)
         self.setWindowModality(Qt.ApplicationModal)
         self._filter_prefix = filter_prefix
@@ -70,6 +121,8 @@ class InsertLinkDialog(QDialog):
         # Track whether user has manually edited the link name
         self._link_name_manually_edited = False
         self._ignore_search_change = False
+        normalized_initial_target: str | None = None
+        initial_label_clean: str | None = None
 
         # Form layout for Link to and Link Name fields
         form = QFormLayout()
@@ -99,26 +152,27 @@ class InsertLinkDialog(QDialog):
             pass
         form.addRow("Link Name:", self.link_name)
         
-        # Initialize with selected text if provided
-        if selected_text:
-            clean_text = selected_text.replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ').strip()
-            self._launched_with_selection = True
-            self._seeded_text = clean_text
-            self._link_name_manually_edited = True
-            self._ignore_search_change = True
-            self.search.blockSignals(True)
-            self.search.setText(clean_text)
-            self.search.blockSignals(False)
-            self._ignore_search_change = False
-            self.link_name.blockSignals(True)
-            self.link_name.setText(clean_text)
-            self.link_name.blockSignals(False)
-            # Select all text in search field so typing replaces it
-            self.search.selectAll()
+        # Initialize link name with selected editor text when available
+        seeded_text = self._prepare_selected_text(selected_text) or self._prepare_selected_text(
+            self._pull_selected_text_from_parent(parent)
+        )
+        if seeded_text:
+            self._seed_link_name(seeded_text, mark_as_selection=True)
+
+        # Editing existing link: pre-fill target and label
+        if initial_link_target:
+            normalized_initial_target = (
+                initial_link_target.strip()
+                if initial_link_target.strip().startswith(("http://", "https://", "HTTP://", "HTTPS://"))
+                else normalize_link_target(initial_link_target)
+            )
+        if initial_link_label:
+            initial_label_clean = self._prepare_selected_text(initial_link_label) or None
 
         layout.addLayout(form)
 
         self.list_widget = QListWidget()
+        self.list_widget.setItemDelegate(HTMLDelegate(self.list_widget))
         self.list_widget.itemDoubleClicked.connect(self._accept_from_list)
         self.list_widget.currentItemChanged.connect(self._on_selection_changed)
         layout.addWidget(self.list_widget, 1)
@@ -127,6 +181,15 @@ class InsertLinkDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+        # Apply editing seed data now that widgets are ready
+        if initial_label_clean:
+            self._seed_link_name(initial_label_clean, mark_as_selection=False)
+        if normalized_initial_target is not None:
+            self.search.blockSignals(True)
+            self.search.setText(normalized_initial_target)
+            self.search.blockSignals(False)
+            self._on_search_changed()
 
         self.setLayout(layout)
         
@@ -139,11 +202,39 @@ class InsertLinkDialog(QDialog):
         else:
             self.list_widget.clear()
 
+    def _prepare_selected_text(self, text: str | None) -> str:
+        """Normalize selected text for seeding the link name."""
+        if not text:
+            return ""
+        return text.replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ').strip()
+
+    def _pull_selected_text_from_parent(self, parent) -> str:
+        """Best-effort grab of selected text from the parent editor if not explicitly provided."""
+        try:
+            editor = getattr(parent, "editor", None)
+            if editor and hasattr(editor, "textCursor"):
+                cursor = editor.textCursor()
+                if cursor and cursor.hasSelection():
+                    return cursor.selectedText()
+        except Exception:
+            pass
+        return ""
+
+    def _seed_link_name(self, clean_text: str, *, mark_as_selection: bool) -> None:
+        """Apply selected text into the link name field and mark it as user-provided."""
+        if mark_as_selection:
+            self._launched_with_selection = True
+            self._seeded_text = clean_text
+        self.link_name.blockSignals(True)
+        self.link_name.setText(clean_text)
+        self.link_name.blockSignals(False)
+        self._link_name_manually_edited = True
+
     def selected_colon_path(self) -> str | None:
         """Return the selected page in colon notation or HTTP URL."""
         text = self.search.text().strip()
         # Don't normalize HTTP URLs
-        if text.startswith(("http://", "https://")):
+        if text.startswith(("http://", "https://", "HTTP://", "HTTPS://")):
             return text or None
         if self._launched_with_selection and text == self._seeded_text:
             return text or None
@@ -356,16 +447,38 @@ class InsertLinkDialog(QDialog):
         self._refresh()
 
     def _display_label(self, page: dict, colon_path: str) -> str:
+        """Format display label with title first, then path (like jump dialog), with search highlighting."""
         title = page.get("title", "")
         if self._filter_prefix and page.get("path", "").startswith(self._filter_prefix):
             rel = page["path"][len(self._filter_prefix) :].lstrip("/")
             rel_colon = normalize_link_target(path_to_colon("/" + rel)) if rel else colon_path
-            return rel_colon or title or colon_path
-        normalized_colon = normalize_link_target(colon_path)
-        page_name = normalized_colon.split(":")[-1] if ":" in normalized_colon else normalized_colon
-        if title and title != page_name:
-            return f"{normalized_colon} — {title}"
-        return normalized_colon
+            display_text = rel_colon or title or colon_path
+        else:
+            normalized_colon = normalize_link_target(colon_path)
+            # Format like jump dialog: "Title — Path" or just "Path"
+            display_text = f"{title} — {normalized_colon}" if title else normalized_colon
+        
+        # Apply search term highlighting
+        return self._highlight_search_term(display_text)
+    
+    def _highlight_search_term(self, text: str) -> str:
+        """Highlight search term in text using HTML."""
+        search_term = self.search.text().strip()
+        if not search_term or len(search_term) < 2:
+            # Escape HTML but don't highlight
+            return html.escape(text)
+        
+        # Escape the text first
+        escaped_text = html.escape(text)
+        
+        # Escape the search term for regex
+        escaped_search = re.escape(search_term)
+        
+        # Case-insensitive highlighting with subtle styling
+        pattern = re.compile(f"({escaped_search})", re.IGNORECASE)
+        highlighted = pattern.sub(r'<span style="font-weight: bold; font-size: 105%;">\1</span>', escaped_text)
+        
+        return highlighted
     
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """Save dialog geometry when closing."""

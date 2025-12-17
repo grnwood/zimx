@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QByteArray, QTimer
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtCore import Qt, QByteArray, QTimer, QRectF, QSize
+from PySide6.QtGui import QKeyEvent, QPainter, QTextDocument, QAbstractTextDocumentLayout
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -11,11 +11,59 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QVBoxLayout,
+    QStyledItemDelegate,
+    QStyle,
 )
 
 from zimx.app import config
 from zimx.server.adapters.files import PAGE_SUFFIX
 from .path_utils import path_to_colon
+import html
+import re
+
+
+class HTMLDelegate(QStyledItemDelegate):
+    """Custom delegate to render HTML in list items."""
+    
+    def paint(self, painter: QPainter, option, index):
+        painter.save()
+        
+        # Get the HTML text from the item
+        text = index.data(Qt.DisplayRole)
+        
+        # Create a QTextDocument to render HTML
+        doc = QTextDocument()
+        doc.setHtml(text)
+        doc.setDefaultFont(option.font)
+        doc.setDocumentMargin(2)
+        
+        # Set the width to match the item width
+        doc.setTextWidth(option.rect.width())
+        
+        # Draw background if selected
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, option.palette.highlight())
+            # Adjust text color for selection
+            doc.setDefaultStyleSheet("body { color: white; }")
+            doc.setHtml(text)  # Re-parse with new stylesheet
+        
+        # Translate painter to item position
+        painter.translate(option.rect.topLeft())
+        
+        # Render the document
+        doc.drawContents(painter)
+        
+        painter.restore()
+    
+    def sizeHint(self, option, index):
+        text = index.data(Qt.DisplayRole)
+        doc = QTextDocument()
+        doc.setHtml(text)
+        doc.setDefaultFont(option.font)
+        doc.setDocumentMargin(2)
+        doc.setTextWidth(option.rect.width() if option.rect.width() > 0 else 400)
+        size = doc.size()
+        return QSize(int(size.width()), int(size.height()))
 
 
 class JumpToPageDialog(QDialog):
@@ -67,6 +115,7 @@ class JumpToPageDialog(QDialog):
         layout.addWidget(self.search)
 
         self.list_widget = QListWidget()
+        self.list_widget.setItemDelegate(HTMLDelegate(self.list_widget))
         self.list_widget.itemDoubleClicked.connect(self.accept)
         layout.addWidget(self.list_widget, 1)
 
@@ -138,14 +187,19 @@ class JumpToPageDialog(QDialog):
             self.list_widget.setCurrentRow(0)
 
     def _display_label(self, page: dict) -> str:
+        """Format display label with search term highlighting."""
         full_path = page.get("path") or ""
         title = page.get("title") or ""
         if self._filter_prefix and full_path.startswith(self._filter_prefix):
             rel = full_path[len(self._filter_prefix) :].lstrip("/")
             rel_colon = path_to_colon("/" + rel) if rel else path_to_colon(full_path)
-            return rel_colon or rel or title or full_path
-        pretty_path = path_to_colon(full_path)
-        return f"{title} — {pretty_path}" if title else pretty_path
+            display_text = rel_colon or rel or title or full_path
+        else:
+            pretty_path = path_to_colon(full_path)
+            display_text = f"{title} — {pretty_path}" if title else pretty_path
+        
+        # Apply search term highlighting
+        return self._highlight_search_term(display_text)
     
     def _restore_geometry(self) -> None:
         """Restore saved dialog geometry."""
@@ -186,6 +240,25 @@ class JumpToPageDialog(QDialog):
         if self.filter_banner:
             self.filter_banner.hide()
         self._refresh()
+    
+    def _highlight_search_term(self, text: str) -> str:
+        """Highlight search term in text using HTML."""
+        search_term = self.search.text().strip()
+        if not search_term or len(search_term) < 2:
+            # Escape HTML but don't highlight
+            return html.escape(text)
+        
+        # Escape the text first
+        escaped_text = html.escape(text)
+        
+        # Escape the search term for regex
+        escaped_search = re.escape(search_term)
+        
+        # Case-insensitive highlighting with bold styling
+        pattern = re.compile(f"({escaped_search})", re.IGNORECASE)
+        highlighted = pattern.sub(r'<span style="font-weight: bold; font-size: 105%;">\1</span>', escaped_text)
+        
+        return highlighted
     
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """Save dialog geometry when closing."""

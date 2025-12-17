@@ -1470,115 +1470,122 @@ class MainWindow(QMainWindow):
                 self._apply_read_only_state()
 
     def _set_vault(self, directory: str, vault_name: Optional[str] = None) -> bool:
-        # Persist current history before switching away
-        self._persist_recent_history()
-        # Release any existing lock before switching vaults
-        self._release_vault_lock()
-        # Close any previous vault DB connection
-        config.set_active_vault(None)
-        # Persist history before clearing
-        self._persist_recent_history()
-        prefer_read_only = False
+        self.editor._push_paint_block()
         try:
-            config.set_active_vault(directory)
-            prefer_read_only = config.load_vault_force_read_only()
-        except Exception:
-            prefer_read_only = False
-        try:
-            self._ai_chat_store = AIChatStore(vault_root=directory)
-            if self._ai_badge_icon is None:
-                ai_path = self._find_asset("ai.svg")
-                self._ai_badge_icon = self._load_icon(ai_path, QColor("#4A90E2"), size=14)
-        except Exception:
-            self._ai_chat_store = None
-        if not self._check_and_acquire_vault_lock(directory, prefer_read_only=prefer_read_only):
-            return False
-        self.right_panel.clear_tasks()
-        try:
-            resp = self.http.post("/api/vault/select", json={"path": directory})
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            self._alert_api_error(exc, "Failed to set vault")
+            # Persist current history before switching away
+            self._persist_recent_history()
+            # Release any existing lock before switching vaults
             self._release_vault_lock()
-            return False
-        self.vault_root = resp.json().get("root")
-        self.vault_root_name = Path(self.vault_root).name if self.vault_root else None
-        index_dir_missing = False
-        if self.vault_root:
-            index_dir = Path(self.vault_root) / ".zimx"
-            if not index_dir.exists():
-                reply = QMessageBox.question(
-                    self,
-                    "No Vault Detected",
-                    "No Vault Detected, Create new Index?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.Yes,
-                )
-                if reply != QMessageBox.Yes:
-                    self.statusBar().showMessage("Vault open cancelled (no index).", 4000)
-                    self.vault_root = None
-                    self.vault_root_name = None
-                    return
-                index_dir_missing = True
-        if self.vault_root:
-            # ensure DB connection is set (may already be set above)
-            config.set_active_vault(self.vault_root)
-            config.save_last_vault(self.vault_root)
-            display_name = vault_name or Path(self.vault_root).name
-            config.remember_vault(self.vault_root, display_name)
+            # Close any previous vault DB connection
+            config.set_active_vault(None)
+            # Persist history before clearing
+            self._persist_recent_history()
+            prefer_read_only = False
             try:
-                self.refresh_tree_button.setEnabled(True)
+                config.set_active_vault(directory)
+                prefer_read_only = config.load_vault_force_read_only()
             except Exception:
-                pass
+                prefer_read_only = False
             try:
-                self.link_update_mode = config.load_link_update_mode()
+                self._ai_chat_store = AIChatStore(vault_root=directory)
+                if self._ai_badge_icon is None:
+                    ai_path = self._find_asset("ai.svg")
+                    self._ai_badge_icon = self._load_icon(ai_path, QColor("#4A90E2"), size=14)
             except Exception:
-                self.link_update_mode = "reindex"
+                self._ai_chat_store = None
+            if not self._check_and_acquire_vault_lock(directory, prefer_read_only=prefer_read_only):
+                return False
+            self.right_panel.clear_tasks()
             try:
-                self.update_links_on_index = config.load_update_links_on_index()
-            except Exception:
-                self.update_links_on_index = True
-            # Restore recent history (including cursor positions) for this vault
-            self._restore_recent_history()
-            try:
-                if config.load_vault_force_read_only():
-                    # Respect per-vault read-only preference; release any lock we took.
-                    self._release_vault_lock(reset_read_only=False)
-                    self._read_only = True
-                    self._apply_read_only_state()
-                    # Intentionally no warning/toast; this is a user preference.
-            except Exception:
-                pass
-            # Respect globally persisted editor font size (not per-vault)
-            self.font_size = config.load_global_editor_font_size(self.font_size)
-            self.editor.set_font_point_size(self.font_size)
-            # Load show_journal setting
-            show_journal = config.load_show_journal()
-            self.show_journal_button.setChecked(show_journal)
-        self.editor.set_context(self.vault_root, None)
-        self.editor.set_markdown("")
-        self._vi_initial_page_loaded = False
-        if self._vi_enabled:
-            self._vi_enable_pending = True
-            self.editor.set_vi_mode_enabled(False)
-        self.current_path = None
-        self.right_panel.set_current_page(None, None)
-        self.statusBar().showMessage(f"Vault: {self.vault_root}")
-        self._update_window_title()
-        self._populate_vault_tree()
-        
-        # Check if index is empty and rebuild if needed
-        needs_index = index_dir_missing or config.is_vault_index_empty()
-        if needs_index:
-            self._reindex_vault(show_progress=True)
+                resp = self.http.post("/api/vault/select", json={"path": directory})
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                self._alert_api_error(exc, "Failed to set vault")
+                self._release_vault_lock()
+                return False
+            self.vault_root = resp.json().get("root")
+            self.vault_root_name = Path(self.vault_root).name if self.vault_root else None
+            index_dir_missing = False
+            if self.vault_root:
+                index_dir = Path(self.vault_root) / ".zimx"
+                if not index_dir.exists():
+                    reply = QMessageBox.question(
+                        self,
+                        "No Vault Detected",
+                        "No Vault Detected, Create new Index?",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.Yes,
+                    )
+                    if reply != QMessageBox.Yes:
+                        self.statusBar().showMessage("Vault open cancelled (no index).", 4000)
+                        self.vault_root = None
+                        self.vault_root_name = None
+                        return False
+                    index_dir_missing = True
+            if self.vault_root:
+                # ensure DB connection is set (may already be set above)
+                config.set_active_vault(self.vault_root)
+                config.save_last_vault(self.vault_root)
+                display_name = vault_name or Path(self.vault_root).name
+                config.remember_vault(self.vault_root, display_name)
+                try:
+                    self.refresh_tree_button.setEnabled(True)
+                except Exception:
+                    pass
+                try:
+                    self.link_update_mode = config.load_link_update_mode()
+                except Exception:
+                    self.link_update_mode = "reindex"
+                try:
+                    self.update_links_on_index = config.load_update_links_on_index()
+                except Exception:
+                    self.update_links_on_index = True
+                # Restore recent history (including cursor positions) for this vault
+                self._restore_recent_history()
+                try:
+                    if config.load_vault_force_read_only():
+                        # Respect per-vault read-only preference; release any lock we took.
+                        self._release_vault_lock(reset_read_only=False)
+                        self._read_only = True
+                        self._apply_read_only_state()
+                        # Intentionally no warning/toast; this is a user preference.
+                except Exception:
+                    pass
+                # Respect globally persisted editor font size (not per-vault)
+                self.font_size = config.load_global_editor_font_size(self.font_size)
+                self.editor.set_font_point_size(self.font_size)
+                # Load show_journal setting
+                show_journal = config.load_show_journal()
+                self.show_journal_button.setChecked(show_journal)
+            self.editor.set_context(self.vault_root, None)
+            self.editor.set_markdown("")
+            self._vi_initial_page_loaded = False
+            if self._vi_enabled:
+                self._vi_enable_pending = True
+                self.editor.set_vi_mode_enabled(False)
+            self.current_path = None
+            self.right_panel.set_current_page(None, None)
+            self.statusBar().showMessage(f"Vault: {self.vault_root}")
+            self._update_window_title()
+            self._populate_vault_tree()
+            
+            # Check if index is empty and rebuild if needed
+            needs_index = index_dir_missing or config.is_vault_index_empty()
+            if needs_index:
+                self._reindex_vault(show_progress=True)
 
-        self._load_bookmarks()
-        if self.vault_root:
-            self.right_panel.set_vault_root(self.vault_root)
-        
-        # Restore window geometry and splitter positions
-        self._restore_geometry()
-        return True
+            self._load_bookmarks()
+            if self.vault_root:
+                self.right_panel.set_vault_root(self.vault_root)
+            
+            # Restore window geometry and splitter positions
+            self._restore_geometry()
+            return True
+        finally:
+            try:
+                self.editor._pop_paint_block()
+            except Exception:
+                pass
 
     def _add_bookmark(self) -> None:
         """Add the current page to bookmarks."""
@@ -1987,6 +1994,10 @@ class MainWindow(QMainWindow):
                 self._heading_picker.close()
             except Exception:
                 pass
+        # Pause autosave while picker is active to avoid API writes on focus shuffle
+        self._heading_picker_active = True
+        self._heading_picker_autosave_active = self.autosave_timer.isActive()
+        self.autosave_timer.stop()
         popup = QWidget(self, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         popup.setStyleSheet(
             "QWidget { background: rgba(32,32,32,240); border: 1px solid #666; border-radius: 6px; }"
@@ -2020,9 +2031,19 @@ class MainWindow(QMainWindow):
             if list_widget.count():
                 list_widget.setCurrentRow(0)
 
+        def finish_picker() -> None:
+            self._heading_picker_active = False
+            if getattr(self, "_heading_picker_autosave_active", False) and not self._read_only:
+                try:
+                    self.autosave_timer.start()
+                except Exception:
+                    pass
+            self._heading_picker_autosave_active = False
+
         def activate_current() -> None:
             item = list_widget.currentItem()
             if not item:
+                finish_picker()
                 popup.close()
                 return
             data = item.data(Qt.UserRole) or {}
@@ -2032,12 +2053,14 @@ class MainWindow(QMainWindow):
                 pos = 0
             cursor = self._cursor_at_position(max(0, pos))
             self._animate_or_flash_to_cursor(cursor)
+            finish_picker()
             popup.close()
             QTimer.singleShot(0, lambda: self.editor.setFocus(Qt.OtherFocusReason))
 
         filter_edit.textChanged.connect(populate)
         list_widget.itemDoubleClicked.connect(lambda *_: activate_current())
         list_widget.itemActivated.connect(lambda *_: activate_current())
+        popup.destroyed.connect(lambda *_: finish_picker())
 
         editor_ref = self.editor
 
@@ -2058,6 +2081,7 @@ class MainWindow(QMainWindow):
                             list_widget.setCurrentRow(max(0, row - 1))
                         return True
                     if ev.key() == Qt.Key_Escape:
+                        finish_picker()
                         popup.close()
                         if editor_ref:
                             QTimer.singleShot(0, lambda: editor_ref.setFocus(Qt.OtherFocusReason))
@@ -2659,6 +2683,9 @@ class MainWindow(QMainWindow):
             )
 
     def _save_current_file(self, auto: bool = False) -> None:
+        if getattr(self, "_heading_picker_active", False):
+            # Skip saves triggered while the heading picker popup is active (vi 't')
+            return
         if self._suspend_autosave:
             self._debug("Autosave suppressed (suspend flag set).")
             return
@@ -2772,6 +2799,8 @@ class MainWindow(QMainWindow):
 
     def _save_dirty_page(self) -> None:
         """Save the current page if there are unsaved edits."""
+        if getattr(self, "_heading_picker_active", False):
+            return
         if self._read_only:
             return
         if self._is_editor_dirty():
@@ -3133,7 +3162,11 @@ class MainWindow(QMainWindow):
                 # Always set the cursor before inserting the link
                 self.editor.setTextCursor(restore_cursor)
                 label = link_name or selected_text or colon_path
-                self.editor.insert_link(colon_path, label)
+                self.editor.insert_link(
+                    colon_path,
+                    label,
+                    surround_with_spaces=selection_range is None,
+                )
                 inserted = True
 
 

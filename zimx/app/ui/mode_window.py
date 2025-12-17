@@ -375,6 +375,8 @@ class ModeWindow(QMainWindow):
                 cursor = self.editor.textCursor()
                 cursor.setPosition(max(0, int(self._initial_cursor)))
                 self.editor.setTextCursor(cursor)
+                # Defer scroll until after window is fully shown and layout is complete
+                QTimer.singleShot(100, lambda: self.editor.ensureCursorVisible())
             except Exception:
                 pass
 

@@ -1284,6 +1284,9 @@ class MarkdownEditor(QTextEdit):
         self._editor_alive = True
         self._layout_alive = True
         self._viewport_alive = True
+        self._suppress_paint = False
+        self._suppress_paint_depth = 0
+        self._saved_updates_enabled: Optional[bool] = None
         self.destroyed.connect(self._on_editor_destroyed)
         self._connect_document_signals(self.document())
         viewport = self.viewport()
@@ -1406,6 +1409,7 @@ class MarkdownEditor(QTextEdit):
 
     def _on_document_destroyed(self) -> None:
         self._document_alive = False
+        self._push_paint_block()
 
     def _on_editor_destroyed(self) -> None:
         self._editor_alive = False
@@ -1416,27 +1420,57 @@ class MarkdownEditor(QTextEdit):
     def _is_alive(self, obj) -> bool:
         return bool(obj) and Shiboken.isValid(obj)
 
+    def _push_paint_block(self) -> None:
+        """Disable painting (and updates) with nesting support."""
+        self._suppress_paint_depth += 1
+        if self._suppress_paint_depth == 1:
+            self._saved_updates_enabled = self.updatesEnabled()
+            try:
+                self.setUpdatesEnabled(False)
+            except Exception:
+                pass
+        self._suppress_paint = True
+
+    def _pop_paint_block(self) -> None:
+        if self._suppress_paint_depth == 0:
+            self._suppress_paint = False
+            return
+        self._suppress_paint_depth -= 1
+        if self._suppress_paint_depth == 0:
+            self._suppress_paint = False
+            if self._saved_updates_enabled is not None:
+                try:
+                    self.setUpdatesEnabled(self._saved_updates_enabled)
+                except Exception:
+                    pass
+                self._saved_updates_enabled = None
+
     def paintEvent(self, event):  # type: ignore[override]
         """Custom paint to draw horizontal rules as visual lines."""
         self._vi_paint_in_progress = True
         painter: Optional[QPainter] = None
         try:
+            # Guard against paint events firing while the underlying Qt objects are
+            # being torn down (e.g., during vault switches). Hitting an invalid
+            # document/layout inside QTextEdit's paintEvent can segfault, so we bail
+            # out early if anything looks dead.
+            if not self._editor_alive or not self._document_alive or not self._is_alive(self):
+                return
+            document = self.document()
+            if not self._is_alive(document):
+                return
+            layout = document.documentLayout()
+            if not self._layout_alive or not self._is_alive(layout):
+                return
+            viewport = self.viewport()
+            if not self._is_alive(viewport):
+                return
+
             super().paintEvent(event)
             if not self._vi_has_painted:
                 self._vi_has_painted = True
 
             try:
-                if not self._editor_alive or not self._document_alive or not self._is_alive(self):
-                    return
-                document = self.document()
-                if not self._is_alive(document):
-                    return
-                layout = document.documentLayout()
-                if not self._layout_alive or not self._is_alive(layout):
-                    return
-                viewport = self.viewport()
-                if not self._is_alive(viewport):
-                    return
                 if not self._viewport_alive:
                     try:
                         viewport.destroyed.connect(self._on_viewport_destroyed)
@@ -1479,6 +1513,7 @@ class MarkdownEditor(QTextEdit):
         self._current_path = relative_path
 
     def setDocument(self, document: QTextDocument) -> None:  # type: ignore[override]
+        self._push_paint_block()
         old_document = self.document()
         if old_document is not None:
             try:
@@ -1491,8 +1526,11 @@ class MarkdownEditor(QTextEdit):
                     old_layout.destroyed.disconnect(self._on_layout_destroyed)
                 except (TypeError, RuntimeError):
                     pass
-        super().setDocument(document)
-        self._connect_document_signals(document)
+        try:
+            super().setDocument(document)
+            self._connect_document_signals(document)
+        finally:
+            self._pop_paint_block()
 
     def current_relative_path(self) -> Optional[str]:
         return self._current_path
@@ -1519,153 +1557,125 @@ class MarkdownEditor(QTextEdit):
             self._page_load_logger.end(label)
             self._page_load_logger = None
 
+
     def set_markdown(self, content: str) -> None:
-        import time
-        from os import getenv
-        t0 = time.perf_counter()
-        self._mark_page_load("render start")
-        
-        # Strip excessive trailing newlines (preserve max 10) to prevent performance issues
-        # Files with thousands of trailing newlines cause catastrophic regex backtracking
-        if content.endswith('\n'):
-            # Count trailing newlines
-            stripped = content.rstrip('\n')
-            trailing_count = len(content) - len(stripped)
-            if trailing_count > 10:
-                content = stripped + '\n' * 10
-        
-        normalized = self._normalize_markdown_images(content)
-        t1 = time.perf_counter()
-        self._mark_page_load("normalize images")
-        
-        display = self._to_display(normalized)
-        t2 = time.perf_counter()
-        self._mark_page_load("convert to display text")
-        
-        # Enable highlighter timing instrumentation (will be disabled at end)
-        self.highlighter.enable_timing(True)
-        self.highlighter.reset_timing()
-        type(self)._LOAD_GUARD_DEPTH += 1
-        self._display_guard = True
-        self.setUpdatesEnabled(False)
-        self._suppress_vi_cursor = True
-        self._suppress_link_scan = True
-        self._cursor_events_blocked = True
-        cursor_signals_were_connected = getattr(self, "_cursor_signals_connected", False)
-        if cursor_signals_were_connected:
-            try:
-                self.cursorPositionChanged.disconnect(self._emit_cursor)
-                self.cursorPositionChanged.disconnect(self._maybe_update_vi_cursor)
-                self._cursor_signals_connected = False
-            except Exception:
-                pass
-        blocker = QSignalBlocker(self)
+        self._push_paint_block()
         try:
-            self.document().clear()
-            
-            # Temporarily disconnect expensive textChanged handlers during bulk loading
-            self.textChanged.disconnect(self._enforce_display_symbols)
-            self.textChanged.disconnect(self._schedule_heading_outline)
-            
-            # Also temporarily disable highlighter for very slow documents
-            highlighter_disabled = False
-            if getenv("ZIMX_DISABLE_HIGHLIGHTER_LOAD") == "1":
-                highlighter_disabled = True
-                self.highlighter.setDocument(None)
-            
-            incremental = False
-            batch_ms_total = 0.0
-            batches = 0
-            if getenv("ZIMX_INCREMENTAL_LOAD") == "1":
-                # Incremental batch insertion to compare performance with setPlainText
-                incremental = True
-                lines = display.splitlines(keepends=True)
-                batch_size = 50  # tune if needed
-                buf = []
-                import time as _time
-                for i, line in enumerate(lines):
-                    buf.append(line)
-                    if len(buf) >= batch_size or i == len(lines) - 1:
-                        b0 = _time.perf_counter()
-                        self.insertPlainText("".join(buf))
-                        b1 = _time.perf_counter()
-                        batch_ms_total += (b1 - b0) * 1000.0
-                        batches += 1
-                        buf = []
-                t3 = time.perf_counter()
-            else:
-                # Qt's setPlainText with "text\n" creates 1 block: ["text"]
-                # But we need "text\n" to roundtrip, so if display ends with \n,
-                # we need to ensure toPlainText() returns it with \n
-                # The trick: if display ends with N newlines, setPlainText will create N+1 blocks
-                # So "text\n" → blocks["text", ""] but toPlainText() returns "text\n"
-                # and "text\n\n" → blocks["text", "", ""] and toPlainText() returns "text\n\n"
-                self.setPlainText(display)
-                t3 = time.perf_counter()
-            self._mark_page_load("document populated")
-            
-            # Reconnect the textChanged handlers
-            self.textChanged.connect(self._enforce_display_symbols)
-            self.textChanged.connect(self._schedule_heading_outline)
-            
-            # Re-enable highlighter if it was disabled
-            if highlighter_disabled:
-                self.highlighter.setDocument(self.document())
-            self.setUpdatesEnabled(True)
-            
-            # Render images immediately (lazy load removed to avoid missed renders)
-            self._render_images(display, time.perf_counter())
-            t4 = time.perf_counter()
-            self._mark_page_load("render images")
-            
-            self._display_guard = False
-            self._schedule_heading_outline()
-            # Ensure scroll-past-end margin is applied after new content
-            self._apply_scroll_past_end_margin()
-        finally:
-            del blocker
-            self._suppress_vi_cursor = False
-            self._suppress_link_scan = False
-            QTimer.singleShot(0, lambda: setattr(self, "_cursor_events_blocked", False))
-            type(self)._LOAD_GUARD_DEPTH = max(0, type(self)._LOAD_GUARD_DEPTH - 1)
-            if cursor_signals_were_connected and not getattr(self, "_cursor_signals_connected", False):
+            import time
+            from os import getenv
+            t0 = time.perf_counter()
+            self._mark_page_load("render start")
+            if content.endswith('\\n'):
+                stripped = content.rstrip('\\n')
+                trailing_count = len(content) - len(stripped)
+                if trailing_count > 10:
+                    content = stripped + '\\n' * 10
+            normalized = self._normalize_markdown_images(content)
+            t1 = time.perf_counter()
+            self._mark_page_load("normalize images")
+            display = self._to_display(normalized)
+            t2 = time.perf_counter()
+            self._mark_page_load("convert to display text")
+            self.highlighter.enable_timing(True)
+            self.highlighter.reset_timing()
+            type(self)._LOAD_GUARD_DEPTH += 1
+            self._display_guard = True
+            self.setUpdatesEnabled(False)
+            self._suppress_vi_cursor = True
+            self._suppress_link_scan = True
+            self._cursor_events_blocked = True
+            cursor_signals_were_connected = getattr(self, "_cursor_signals_connected", False)
+            if cursor_signals_were_connected:
                 try:
-                    self.cursorPositionChanged.connect(self._emit_cursor)
-                    self.cursorPositionChanged.connect(self._maybe_update_vi_cursor)
-                    self._cursor_signals_connected = True
+                    self.cursorPositionChanged.disconnect(self._emit_cursor)
+                    self.cursorPositionChanged.disconnect(self._maybe_update_vi_cursor)
+                    self._cursor_signals_connected = False
                 except Exception:
                     pass
-        t5 = time.perf_counter()
-        self._mark_page_load("outline + margin scheduled")
-        
-        if _DETAILED_LOGGING:
-            print(f"[TIMING] set_markdown breakdown:")
-            print(f"  normalize_images: {(t1-t0)*1000:.1f}ms")
-            print(f"  to_display: {(t2-t1)*1000:.1f}ms")
-            print(f"  setPlainText: {(t3-t2)*1000:.1f}ms")
-            print(f"  render_images: {(t4-t3)*1000:.1f}ms (lazy - deferred)")
-            print(f"  schedule_outline+margin: {(t5-t4)*1000:.1f}ms")
-            print(f"  TOTAL: {(t5-t0)*1000:.1f}ms")
-        
-            # Warn about potential performance issues
-            setPlainText_time_ms = (t3-t2)*1000
-            if setPlainText_time_ms > 1000:
-                print(f"[PERF WARNING] setPlainText took {setPlainText_time_ms:.1f}ms - unusually slow!")
-                print("  This may indicate regex backtracking or signal cascade issues.")
-                print("  Try environment variable ZIMX_DISABLE_HIGHLIGHTER_LOAD=1 for testing.")
-            if incremental:
-                print(f"[TIMING] Incremental batches={batches} cumulative_insert={batch_ms_total:.1f}ms avg_batch={(batch_ms_total/max(batches,1)):.1f}ms")
-            # Report highlighter timing
-            if self.highlighter._timing_blocks:
-                avg = (self.highlighter._timing_total / self.highlighter._timing_blocks) * 1000.0
-                total = self.highlighter._timing_total * 1000.0
-                print(f"[TIMING] Highlighter: blocks={self.highlighter._timing_blocks} total={total:.1f}ms avg={avg:.2f}ms")
-        # Disable timing to avoid overhead for subsequent edits
-        self.highlighter.enable_timing(False)
-        self._mark_page_load("editor focus ready")
-
-        # Ensure the editor has focus after loading and rendering
-        self.setFocus()
+            blocker = QSignalBlocker(self)
+            try:
+                self.document().clear()
+                self.textChanged.disconnect(self._enforce_display_symbols)
+                self.textChanged.disconnect(self._schedule_heading_outline)
+                highlighter_disabled = False
+                if getenv("ZIMX_DISABLE_HIGHLIGHTER_LOAD") == "1":
+                    highlighter_disabled = True
+                    self.highlighter.setDocument(None)
+                incremental = False
+                batch_ms_total = 0.0
+                batches = 0
+                if getenv("ZIMX_INCREMENTAL_LOAD") == "1":
+                    incremental = True
+                    lines = display.splitlines(keepends=True)
+                    batch_size = 50
+                    buf = []
+                    import time as _time
+                    for i, line in enumerate(lines):
+                        buf.append(line)
+                        if len(buf) >= batch_size or i == len(lines) - 1:
+                            b0 = _time.perf_counter()
+                            self.insertPlainText("".join(buf))
+                            b1 = _time.perf_counter()
+                            batch_ms_total += (b1 - b0) * 1000.0
+                            batches += 1
+                            buf = []
+                    t3 = time.perf_counter()
+                else:
+                    self.setPlainText(display)
+                    t3 = time.perf_counter()
+                self._mark_page_load("document populated")
+                self.textChanged.connect(self._enforce_display_symbols)
+                self.textChanged.connect(self._schedule_heading_outline)
+                if highlighter_disabled:
+                    self.highlighter.setDocument(self.document())
+                self.setUpdatesEnabled(True)
+                self._render_images(display, time.perf_counter())
+                t4 = time.perf_counter()
+                self._mark_page_load("render images")
+                self._display_guard = False
+                self._schedule_heading_outline()
+                self._apply_scroll_past_end_margin()
+            finally:
+                del blocker
+                self._suppress_vi_cursor = False
+                self._suppress_link_scan = False
+                QTimer.singleShot(0, lambda: setattr(self, "_cursor_events_blocked", False))
+                type(self)._LOAD_GUARD_DEPTH = max(0, type(self)._LOAD_GUARD_DEPTH - 1)
+                if cursor_signals_were_connected and not getattr(self, "_cursor_signals_connected", False):
+                    try:
+                        self.cursorPositionChanged.connect(self._emit_cursor)
+                        self.cursorPositionChanged.connect(self._maybe_update_vi_cursor)
+                        self._cursor_signals_connected = True
+                    except Exception:
+                        pass
+                self._pop_paint_block()
+            t5 = time.perf_counter()
+            self._mark_page_load("outline + margin scheduled")
+            if _DETAILED_LOGGING:
+                print(f"[TIMING] set_markdown breakdown:")
+                print(f"  normalize_images: {(t1-t0)*1000:.1f}ms")
+                print(f"  to_display: {(t2-t1)*1000:.1f}ms")
+                print(f"  setPlainText: {(t3-t2)*1000:.1f}ms")
+                print(f"  render_images: {(t4-t3)*1000:.1f}ms (lazy - deferred)")
+                print(f"  schedule_outline+margin: {(t5-t4)*1000:.1f}ms")
+                print(f"  TOTAL: {(t5-t0)*1000:.1f}ms")
+                setPlainText_time_ms = (t3-t2)*1000
+                if setPlainText_time_ms > 1000:
+                    print(f"[PERF WARNING] setPlainText took {setPlainText_time_ms:.1f}ms - unusually slow!")
+                    print("  This may indicate regex backtracking or signal cascade issues.")
+                    print("  Try environment variable ZIMX_DISABLE_HIGHLIGHTER_LOAD=1 for testing.")
+                if incremental:
+                    print(f"[TIMING] Incremental batches={batches} cumulative_insert={batch_ms_total:.1f}ms avg_batch={(batch_ms_total/max(batches,1)):.1f}ms")
+                if self.highlighter._timing_blocks:
+                    avg = (self.highlighter._timing_total / self.highlighter._timing_blocks) * 1000.0
+                    total = self.highlighter._timing_total * 1000.0
+                    print(f"[TIMING] Highlighter: blocks={self.highlighter._timing_blocks} total={total:.1f}ms avg={avg:.2f}ms")
+            self.highlighter.enable_timing(False)
+            self._mark_page_load("editor focus ready")
+            self.setFocus()
+        finally:
+            if self._suppress_paint_depth:
+                self._pop_paint_block()
 
     def unload_for_delete(self) -> None:
         """Clear the document safely when the current page is being deleted."""
@@ -1901,10 +1911,12 @@ class MarkdownEditor(QTextEdit):
         self.setContextMenuPolicy(Qt.DefaultContextMenu)
         self.viewport().unsetCursor()
 
-    def insert_link(self, colon_path: str, link_name: str | None = None) -> None:
+    def insert_link(self, colon_path: str, link_name: str | None = None, *, surround_with_spaces: bool = False) -> None:
         """Insert a link at the current cursor position in display format.
         
         Inserts directly as \x00target\x00label\x00 (display format with sentinels).
+        When surround_with_spaces is True, adds missing spaces around the link to avoid
+        embedding sentinels in the middle of a word.
         """
         if not colon_path:
             return
@@ -1929,7 +1941,21 @@ class MarkdownEditor(QTextEdit):
         display_link = f"\x00{target}\x00{label}\x00"
         
         cursor = self.textCursor()
-        cursor.insertText(display_link)
+        prefix = ""
+        suffix = ""
+        if surround_with_spaces and not cursor.hasSelection():
+            text = self.toPlainText()
+            pos = cursor.position()
+            prev_char = text[pos - 1] if pos > 0 else ""
+            next_char = text[pos] if pos < len(text) else ""
+            if prev_char and not prev_char.isspace():
+                prefix = " "
+            if next_char and not next_char.isspace() and next_char not in ".,;:!?)]}":
+                suffix = " "
+
+        cursor.beginEditBlock()
+        cursor.insertText(prefix + display_link + suffix)
+        cursor.endEditBlock()
         
         # Cursor is now positioned right after the link (after the closing sentinel)
         # No need to reposition - insertText leaves cursor at the right place
@@ -3650,8 +3676,8 @@ class MarkdownEditor(QTextEdit):
                 return
 
     def _edit_link_at_cursor(self, cursor: QTextCursor) -> None:
-        """Open edit link dialog and replace link under cursor (supports markdown, plain colon, or HTTP link)."""
-        from .edit_link_dialog import EditLinkDialog
+        """Open edit link dialog (reuse insert link UI) and replace link under cursor."""
+        from .insert_link_dialog import InsertLinkDialog
         from PySide6.QtWidgets import QApplication
         # Find the main window to use as parent
         main_window = None
@@ -3710,25 +3736,27 @@ class MarkdownEditor(QTextEdit):
             if rng is None:
                 return
             start, end = rng
-        dlg = EditLinkDialog(link_to=link_val, link_text=text_val, parent=parent)
+        dlg = InsertLinkDialog(
+            parent=parent,
+            selected_text="",
+            editing=True,
+            initial_link_target=link_val,
+            initial_link_label=text_val,
+        )
         dlg.setWindowModality(Qt.ApplicationModal)
         dlg.activateWindow()
         dlg.raise_()
-        dlg.search_edit.setFocus()
+        dlg.search.setFocus()
         self.begin_dialog_block()
         try:
             if dlg.exec() == QDialog.Accepted:
-                new_to = dlg.link_to() or link_val
-                raw_label = dlg.link_text().strip()
-                # Normalize target for both HTTP and colon links
+                new_to = dlg.selected_colon_path() or link_val
+                raw_label = dlg.selected_link_name() or ""
                 if new_to and new_to.startswith(("http://", "https://")):
                     new_to = self._normalize_external_link(new_to)
                 elif new_to:
-                    match = COLON_LINK_PATTERN.match(new_to)
-                    if match.hasMatch():
-                        new_to = ensure_root_colon_link(new_to)
+                    new_to = ensure_root_colon_link(new_to)
 
-                # Only keep a label if it differs from the target
                 link_label = ""
                 if raw_label:
                     match_left = raw_label.lstrip(":/")

@@ -1009,6 +1009,31 @@ def save_puml_preview_zoom(level: int) -> None:
     conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("puml_preview_zoom", str(int(level))))
     conn.commit()
 
+
+def load_puml_auto_render(default: bool = False) -> bool:
+    """Load PlantUML auto-render setting (default: False)."""
+    conn = _get_conn()
+    if not conn:
+        return default
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("puml_auto_render",))
+    row = cur.fetchone()
+    if not row:
+        return default
+    try:
+        return row[0].lower() in ("1", "true", "yes")
+    except Exception:
+        return default
+
+
+def save_puml_auto_render(enabled: bool) -> None:
+    """Save PlantUML auto-render setting."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("puml_auto_render", "1" if enabled else "0"))
+    conn.commit()
+
+
 def load_panel_visibility() -> dict:
     """Load persisted panel visibility states for main/left/right rails."""
     conn = _get_conn()

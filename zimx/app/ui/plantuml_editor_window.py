@@ -327,6 +327,10 @@ class ViPlainTextEdit(PlainTextEditWithLineNumbers):
             event.accept()
             self._move_cursor(QTextCursor.EndOfLine)
             return
+        if key == Qt.Key_Semicolon:
+            event.accept()
+            self._move_cursor(QTextCursor.EndOfLine)
+            return
         if (mods & Qt.ShiftModifier) and key == Qt.Key_N:
             event.accept()
             # Select downward one line; if at last line, select to document end
@@ -559,13 +563,16 @@ class ZoomablePreviewLabel(QLabel):
     
     def mousePressEvent(self, event) -> None:
         """Start pan operation on left mouse button."""
-        if event.button() == Qt.LeftButton and self.pixmap() and self.pixmap().width() > self.width():
-            self.is_panning = True
-            self.pan_start_pos = event.globalPos()
-            self.setCursor(Qt.ClosedHandCursor)
-            event.accept()
-        else:
-            super().mousePressEvent(event)
+        pixmap = self.pixmap()
+        if event.button() == Qt.LeftButton and pixmap:
+            # Allow panning if image is larger than viewport in either dimension
+            if pixmap.width() > self.width() or pixmap.height() > self.height():
+                self.is_panning = True
+                self.pan_start_pos = event.globalPos()
+                self.setCursor(Qt.ClosedHandCursor)
+                event.accept()
+                return
+        super().mousePressEvent(event)
     
     def mouseMoveEvent(self, event) -> None:
         """Handle panning when dragging."""
@@ -640,6 +647,9 @@ class PlantUMLEditorWindow(QMainWindow):
         self._vi_insert_active: bool = False
         # Check if AI chat is enabled
         self._ai_chat_enabled: bool = config.load_enable_ai_chats()
+        # Load auto-render setting (default: False)
+        self._auto_render_enabled: bool = config.load_puml_auto_render(default=False)
+        self._editor_dirty: bool = False
         self.setWindowTitle(f"PlantUML Editor - {self.file_path.name}")
         self.setGeometry(100, 100, 1400, 800)
         
@@ -676,6 +686,22 @@ class PlantUMLEditorWindow(QMainWindow):
         self.editor_zoom_in_btn.setToolTip("Zoom in editor")
         self.editor_zoom_in_btn.clicked.connect(self._zoom_in_editor)
         editor_section.addWidget(self.editor_zoom_in_btn)
+        
+        editor_section.addSpacing(15)
+        
+        # Auto-render checkbox
+        from PySide6.QtWidgets import QCheckBox
+        self.auto_render_checkbox = QCheckBox("Auto render?")
+        self.auto_render_checkbox.setToolTip("Automatically render diagram on text changes")
+        self.auto_render_checkbox.setChecked(self._auto_render_enabled)
+        self.auto_render_checkbox.toggled.connect(self._on_auto_render_toggled)
+        editor_section.addWidget(self.auto_render_checkbox)
+        
+        # Manual render status label
+        self.render_status_label = QLabel()
+        self.render_status_label.setStyleSheet("color: #ffa500; font-style: italic; margin-left: 10px;")
+        editor_section.addWidget(self.render_status_label)
+        self._update_render_status_label()
         
         toolbar_layout.addLayout(editor_section)
         toolbar_layout.addStretch()
@@ -820,6 +846,11 @@ class PlantUMLEditorWindow(QMainWindow):
         self.preview_scroll.setWidget(self.preview_label)
         
         preview_layout.addWidget(self.preview_scroll)
+        
+        # Loading overlay
+        self.loading_overlay = self._create_loading_overlay(preview_container)
+        self.loading_overlay.hide()
+        
         preview_container.setLayout(preview_layout)
         right_v_splitter.addWidget(preview_container)
         
@@ -893,11 +924,12 @@ class PlantUMLEditorWindow(QMainWindow):
         # Now connect editor changes (after timer is created)
         self.editor.textChanged.connect(self._on_editor_changed)
         
-        # Setup Ctrl+S shortcut for rendering
-        QShortcut(QKeySequence.Save, self, self._render)
+        # Setup Ctrl+S shortcut for save
+        QShortcut(QKeySequence.Save, self, self._save_file)
         
-        # Setup Ctrl+Enter for save
-        QShortcut(QKeySequence(Qt.CTRL | Qt.Key_Return), self, self._save_file)
+        # Setup Ctrl+Enter for manual render (works when editor has focus)
+        ctrl_enter_shortcut = QShortcut(QKeySequence(Qt.CTRL | Qt.Key_Return), self.editor)
+        ctrl_enter_shortcut.activated.connect(self._render)
         
         # Setup Ctrl+Shift+Space to toggle focus between editor and AI chat
         QShortcut(QKeySequence(Qt.CTRL | Qt.SHIFT | Qt.Key_Space), self, self._toggle_focus_editor_ai)
@@ -949,6 +981,93 @@ class PlantUMLEditorWindow(QMainWindow):
             style += " background-color: transparent; color: #e0e0e0;"
         self._vi_status_label.setStyleSheet(style)
 
+    def _on_auto_render_toggled(self, checked: bool) -> None:
+        """Handle auto-render checkbox toggle."""
+        self._auto_render_enabled = checked
+        config.save_puml_auto_render(checked)
+        self._update_render_status_label()
+        # If auto-render is enabled and editor is dirty, trigger render
+        if checked and self._editor_dirty:
+            self.render_timer.start()
+
+    def _update_render_status_label(self) -> None:
+        """Update the render status label based on auto-render and dirty state."""
+        if not hasattr(self, 'render_status_label'):
+            return
+        if not self._auto_render_enabled and self._editor_dirty:
+            self.render_status_label.setText("Ctrl+Enter to render...")
+        else:
+            self.render_status_label.setText("")
+
+    def _create_loading_overlay(self, parent: QWidget) -> QWidget:
+        """Create a loading overlay widget with spinner."""
+        overlay = QWidget(parent)
+        overlay.setObjectName("loadingOverlay")
+        overlay.setStyleSheet("""
+            QWidget#loadingOverlay {
+                background-color: rgba(0, 0, 0, 220);
+            }
+            QLabel {
+                color: white;
+                font-size: 16px;
+                font-weight: bold;
+            }
+        """)
+        
+        layout = QVBoxLayout(overlay)
+        layout.setAlignment(Qt.AlignCenter)
+        
+        # Spinner label (using Unicode spinner character)
+        self.spinner_label = QLabel("⟳")
+        self.spinner_label.setStyleSheet("font-size: 80px; color: #4CAF50;")
+        self.spinner_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.spinner_label)
+        
+        # Loading text
+        loading_text = QLabel("Rendering diagram...")
+        loading_text.setAlignment(Qt.AlignCenter)
+        layout.addWidget(loading_text)
+        
+        # Animation timer for spinner
+        self.spinner_timer = QTimer()
+        self.spinner_timer.setInterval(100)
+        self.spinner_angle = 0
+        self.spinner_timer.timeout.connect(self._animate_spinner)
+        
+        return overlay
+
+    def _animate_spinner(self) -> None:
+        """Animate the spinner by rotating through Unicode spinner characters."""
+        spinners = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        if hasattr(self, 'spinner_label'):
+            self.spinner_angle = (self.spinner_angle + 1) % len(spinners)
+            self.spinner_label.setText(spinners[self.spinner_angle])
+
+    def _show_loading(self) -> None:
+        """Show the loading overlay with animation."""
+        if not hasattr(self, 'loading_overlay'):
+            return
+        try:
+            # Position overlay to cover the entire parent container
+            parent = self.loading_overlay.parent()
+            if parent:
+                self.loading_overlay.setGeometry(0, 0, parent.width(), parent.height())
+            self.loading_overlay.raise_()
+            self.loading_overlay.show()
+            self.spinner_timer.start()
+        except Exception:
+            pass
+
+    def _hide_loading(self) -> None:
+        """Hide the loading overlay and restore preview."""
+        if not hasattr(self, 'loading_overlay'):
+            return
+        try:
+            self.spinner_timer.stop()
+            self.loading_overlay.hide()
+        except Exception:
+            pass
+
     # --- Geometry persistence -------------------------------------------------
     def _restore_geometry_prefs(self) -> None:
         try:
@@ -997,6 +1116,11 @@ class PlantUMLEditorWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "_geom_timer"):
             self._geom_timer.start()
+        # Update loading overlay position if visible
+        if hasattr(self, 'loading_overlay') and self.loading_overlay.isVisible():
+            parent = self.loading_overlay.parent()
+            if parent:
+                self.loading_overlay.setGeometry(0, 0, parent.width(), parent.height())
 
     def moveEvent(self, event) -> None:  # type: ignore[override]
         super().moveEvent(event)
@@ -1159,8 +1283,15 @@ class PlantUMLEditorWindow(QMainWindow):
             self.editor.setFocus()
 
     def _on_splitter_moved(self, pos: int, index: int) -> None:
-        """Handle splitter moves (currently not needed for full-width chat panel)."""
-        pass
+        """Handle splitter moves - update loading overlay position if visible."""
+        if hasattr(self, 'loading_overlay') and self.loading_overlay.isVisible():
+            # Use QTimer to defer geometry update until splitter animation completes
+            def update_overlay():
+                if hasattr(self, 'loading_overlay'):
+                    parent = self.loading_overlay.parent()
+                    if parent:
+                        self.loading_overlay.setGeometry(0, 0, parent.width(), parent.height())
+            QTimer.singleShot(10, update_overlay)
 
     def _create_ai_chat_panel(self) -> QWidget:
         """Create AI chat panel with message input and send button."""
@@ -1693,11 +1824,16 @@ class PlantUMLEditorWindow(QMainWindow):
 
     def _on_editor_changed(self) -> None:
         """Debounce rendering when editor text changes."""
-        self.render_timer.start()
+        self._editor_dirty = True
+        self._update_render_status_label()
+        if self._auto_render_enabled:
+            self.render_timer.start()
 
     def _render(self) -> None:
         """Render the PlantUML diagram."""
         self.render_timer.stop()
+        self._editor_dirty = False
+        self._update_render_status_label()
         
         # Check if window still exists
         try:
@@ -1707,12 +1843,16 @@ class PlantUMLEditorWindow(QMainWindow):
         except RuntimeError:
             return
         
+        # Show loading overlay
+        self._show_loading()
+        
         puml_text = self.editor.toPlainText()
         
         try:
             result = self.renderer.render_svg(puml_text)
         except Exception as exc:
             print(f"[PlantUML Editor] Render exception: {exc}", file=__import__('sys').stdout, flush=True)
+            self._hide_loading()
             return
         
         # Check again after async operation
@@ -1742,6 +1882,7 @@ class PlantUMLEditorWindow(QMainWindow):
                         if self.preview_pixmap:
                             self._update_preview_display()
                         self.render_btn.setText("✗ Render")
+                    self._hide_loading()
                 except Exception as svg_exc:
                     print(f"[PlantUML Editor] SVG error: {svg_exc}", file=__import__('sys').stdout, flush=True)
                     # Show error diagram
@@ -1754,6 +1895,7 @@ class PlantUMLEditorWindow(QMainWindow):
                     except RuntimeError:
                         pass
                     self.render_btn.setText("✗ Render")
+                    self._hide_loading()
             else:
                 error_msg = result.error_message or result.stderr or "Unknown error"
                 # Extract line number if present (e.g., "line 5: Error description")
@@ -1781,6 +1923,7 @@ class PlantUMLEditorWindow(QMainWindow):
                 except RuntimeError:
                     pass
                 self.render_btn.setText("✗ Render")
+                self._hide_loading()
         except Exception as exc:
             print(f"[PlantUML Editor] Render error: {exc}", file=__import__('sys').stdout, flush=True)
             error_svg = _generate_error_svg(f"Internal error:\n{str(exc)}")
@@ -1792,6 +1935,7 @@ class PlantUMLEditorWindow(QMainWindow):
             except RuntimeError:
                 pass
             self.render_btn.setText("✗ Render")
+            self._hide_loading()
 
     def _svg_to_pixmap(self, svg_content: str) -> Optional[QPixmap]:
         """Convert SVG string to QPixmap."""
