@@ -26,13 +26,13 @@ from pathlib import Path
 from typing import Iterable, List, Literal, Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException, File as FastAPISingleFile, Form, Request, UploadFile
+from fastapi import FastAPI, HTTPException, File as FastAPISingleFile, Form, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ConfigDict
 
 from . import indexer
 from . import file_ops
-from .adapters import files, tasks
+from .adapters import files
 from .adapters.files import FileAccessError
 from .state import vault_state
 from .vector import vector_manager
@@ -52,6 +52,8 @@ _LOCAL_FILE_OPS_ENABLED = os.getenv("ATTACHMENTS_LOCAL_FILE_OPS", "0") not in (
 )
 
 _LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
+_TASKS_CACHE: dict[tuple[str, tuple[str, ...], Optional[str]], list[dict]] = {}
+_TASK_CACHE_VERSION: int = -1
 
 _TREE_CACHE: dict[tuple[str, str, bool], dict[str, object]] = {}
 
@@ -94,6 +96,79 @@ def _should_use_local_file_ops(request: Request) -> bool:
     if not client:
         return False
     return client.host in _LOCAL_HOSTS
+
+
+def _clear_task_cache() -> None:
+    global _TASK_CACHE_VERSION
+    _TASKS_CACHE.clear()
+    _TASK_CACHE_VERSION = -1
+
+
+def _normalize_tags(raw_tags: Optional[List[str]]) -> tuple[str, ...]:
+    if not raw_tags:
+        return ()
+    seen: list[str] = []
+    for raw in raw_tags:
+        for chunk in raw.split(","):
+            tag = chunk.strip()
+            if tag and tag not in seen:
+                seen.append(tag)
+    return tuple(seen)
+
+
+def _normalize_status(status: Optional[str]) -> Optional[str]:
+    if status is None:
+        return None
+    normalized = status.strip().lower()
+    if normalized in ("todo", "done"):
+        return normalized
+    if normalized == "all" or normalized == "":
+        return None
+    raise HTTPException(status_code=400, detail="Status must be one of: todo, done, all")
+
+
+def _fetch_tasks(query: str, tags: tuple[str, ...], status: Optional[str]) -> list[dict]:
+    global _TASK_CACHE_VERSION
+    current_version = config.get_task_index_version()
+    if _TASK_CACHE_VERSION != current_version:
+        _clear_task_cache()
+        _TASK_CACHE_VERSION = current_version
+    cache_key = (query, tags, status)
+    if cache_key in _TASKS_CACHE:
+        return _TASKS_CACHE[cache_key]
+    include_done = status != "todo"
+    tasks_from_db = config.fetch_tasks(
+        query=query,
+        tags=tags,
+        include_done=include_done,
+        include_ancestors=False,
+    )
+    if status == "done":
+        tasks_from_db = [task for task in tasks_from_db if (task.get("status") or "").lower() == "done"]
+    elif status == "todo":
+        tasks_from_db = [task for task in tasks_from_db if (task.get("status") or "").lower() != "done"]
+    _TASKS_CACHE[cache_key] = tasks_from_db
+    return tasks_from_db
+
+
+def _serialize_task(task: dict) -> dict:
+    status = (task.get("status") or "todo").lower()
+    done = status == "done"
+    return {
+        "id": task.get("id"),
+        "path": task.get("path"),
+        "line": task.get("line"),
+        "text": task.get("text") or "",
+        "status": status,
+        "done": done,
+        "priority": task.get("priority") or 0,
+        "due": task.get("due"),
+        "starts": task.get("starts"),
+        "parent": task.get("parent"),
+        "level": task.get("level") or 0,
+        "tags": task.get("tags") or [],
+        "actionable": task.get("actionable", not done),
+    }
 
 
 class FilePathPayload(BaseModel):
@@ -198,6 +273,11 @@ def select_vault(payload: VaultSelectPayload) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _clear_tree_cache()
+    try:
+        config.set_active_vault(str(root))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to initialize vault: {exc}") from exc
+    _clear_task_cache()
     return {"root": str(root)}
 
 
@@ -268,17 +348,17 @@ def journal_today(payload: JournalPayload) -> dict:
 
 
 @app.get("/api/tasks")
-def api_tasks(query: Optional[str] = None) -> dict:
-    root = vault_state.get_root()
-    md_files = []
-    for path in root.rglob("*.txt"):
-        rel = f"/{path.relative_to(root).as_posix()}"
-        md_files.append((rel, path.read_text(encoding="utf-8")))
-    extracted = tasks.aggregate_tasks(md_files)
-    if query:
-        query_lower = query.lower()
-        extracted = [t for t in extracted if query_lower in t.text.lower()]
-    return {"items": [t.__dict__ for t in extracted]}
+def api_tasks(
+    query: Optional[str] = None,
+    tags: Optional[List[str]] = Query(None),
+    status: Optional[str] = None,
+) -> dict:
+    _get_vault_root()
+    normalized_query = (query or "").strip()
+    normalized_tags = _normalize_tags(tags)
+    normalized_status = _normalize_status(status)
+    task_rows = _fetch_tasks(normalized_query, normalized_tags, normalized_status)
+    return {"items": [_serialize_task(task) for task in task_rows]}
 
 
 @app.get("/api/search")

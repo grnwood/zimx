@@ -5,7 +5,9 @@ import os
 import platform
 import sqlite3
 import time
+from collections import OrderedDict
 from pathlib import Path
+from threading import RLock
 from typing import Iterable, Optional, Sequence
 
 from zimx.server.adapters.files import PAGE_SUFFIX
@@ -14,6 +16,113 @@ GLOBAL_CONFIG = Path.home() / ".zimx_config.json"
 
 _ACTIVE_CONN: Optional[sqlite3.Connection] = None
 _ACTIVE_ROOT: Optional[Path] = None
+_TASK_FETCH_CACHE: OrderedDict[tuple, list[dict]] = OrderedDict()
+
+_TASK_FETCH_CACHE_SIZE = 32
+_TASKS_FTS_ENABLED = False
+_TASKS_FTS_THRESHOLD = 500
+_TASK_INDEX_VERSION = 0
+_TASK_VERSION_LOCK = RLock()
+
+_PAGE_CACHE_ROWS: list[dict] = []
+_PAGE_RESULT_CACHE: OrderedDict[str, list[dict]] = OrderedDict()
+_PAGE_RESULT_CACHE_LIMIT = 64
+
+
+def _invalidate_page_cache() -> None:
+    _PAGE_CACHE_ROWS.clear()
+    _PAGE_RESULT_CACHE.clear()
+
+
+def _prime_page_cache() -> None:
+    conn = _get_conn()
+    if not conn:
+        _invalidate_page_cache()
+        return
+    try:
+        rows = conn.execute(
+            "SELECT path, title, path_ci, title_ci, COALESCE(updated, 0) FROM pages"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        _invalidate_page_cache()
+        return
+    _PAGE_CACHE_ROWS[:] = [
+        {
+            "path": row[0],
+            "title": row[1] or "",
+            "path_ci": (row[2] or row[0] or "").lower(),
+            "title_ci": (row[3] or row[1] or "").lower(),
+            "updated": float(row[4] or 0),
+        }
+        for row in rows
+    ]
+    _PAGE_RESULT_CACHE.clear()
+
+
+def _ensure_page_cache_loaded() -> None:
+    if _PAGE_CACHE_ROWS:
+        return
+    _prime_page_cache()
+
+
+def _remember_page_search_result(term_lower: str, results: list[dict]) -> None:
+    if term_lower == "":
+        return
+    if len(_PAGE_RESULT_CACHE) >= _PAGE_RESULT_CACHE_LIMIT:
+        _PAGE_RESULT_CACHE.popitem(last=False)
+    _PAGE_RESULT_CACHE[term_lower] = [dict(row) for row in results]
+
+
+def _page_sort_key(row: dict, term_lower: str) -> tuple[int, float]:
+    path_ci = row.get("path_ci", "").lower()
+    title_ci = row.get("title_ci", "").lower()
+    exact_path = f"/{term_lower}"
+    child_prefix = f"{exact_path}/"
+    priority = 4
+    if path_ci == exact_path:
+        priority = 0
+    elif path_ci.startswith(child_prefix):
+        priority = 1
+    elif title_ci == term_lower:
+        priority = 2
+    elif term_lower and term_lower in title_ci:
+        priority = 3
+    return priority, -(row.get("updated") or 0.0)
+
+
+def _filter_pages(candidates: list[dict], term_lower: str) -> list[dict]:
+    matches = []
+    for row in candidates:
+        path_ci = row.get("path_ci", "")
+        title_ci = row.get("title_ci", "")
+        if term_lower and term_lower not in path_ci and term_lower not in title_ci:
+            continue
+        matches.append(row)
+    return sorted(matches, key=lambda row: _page_sort_key(row, term_lower))
+
+
+def _search_cached_pages(term_lower: str, limit: int) -> list[dict] | None:
+    if not _PAGE_CACHE_ROWS:
+        return None
+    if term_lower in _PAGE_RESULT_CACHE:
+        cached = _PAGE_RESULT_CACHE[term_lower]
+        _PAGE_RESULT_CACHE.move_to_end(term_lower)
+        return [
+            {"path": row.get("path"), "title": row.get("title")}
+            for row in cached[:limit]
+        ]
+    base_candidates: list[dict] = _PAGE_CACHE_ROWS
+    for i in range(len(term_lower), 0, -1):
+        prefix = term_lower[:i]
+        if prefix in _PAGE_RESULT_CACHE:
+            base_candidates = _PAGE_RESULT_CACHE[prefix]
+            break
+    results = _filter_pages(base_candidates, term_lower)
+    _remember_page_search_result(term_lower, results)
+    return [
+        {"path": row.get("path"), "title": row.get("title")}
+        for row in results[:limit]
+    ]
 
 
 def init_settings() -> None:
@@ -1254,6 +1363,7 @@ def update_page_index(
     conn = _get_conn()
     if not conn:
         return
+    _invalidate_task_cache()
     now = time.time()
     modified_ts = last_modified if last_modified is not None else now
     parent_path = _parent_folder_for_page(path)
@@ -1274,16 +1384,26 @@ def update_page_index(
         unique_links = list(dict.fromkeys(links))
         conn.execute(
             """
-            INSERT INTO pages(path, title, updated, parent_path, display_order)
-            VALUES(?, ?, ?, ?, ?)
+            INSERT INTO pages(path, title, updated, parent_path, display_order, path_ci, title_ci)
+            VALUES(?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(path) DO UPDATE SET
                 title = excluded.title,
                 updated = excluded.updated,
                 last_modified = excluded.updated,
                 parent_path = excluded.parent_path,
-                display_order = COALESCE(excluded.display_order, pages.display_order)
+                display_order = COALESCE(excluded.display_order, pages.display_order),
+                path_ci = excluded.path_ci,
+                title_ci = excluded.title_ci
             """,
-            (path, title, modified_ts, parent_path, display_order),
+            (
+                path,
+                title,
+                modified_ts,
+                parent_path,
+                display_order,
+                path.lower(),
+                (title or "").lower(),
+            ),
         )
         conn.execute("DELETE FROM page_tags WHERE page = ?", (path,))
         conn.executemany(
@@ -1297,6 +1417,8 @@ def update_page_index(
         )
         conn.execute("DELETE FROM tasks WHERE path = ?", (path,))
         conn.execute("DELETE FROM task_tags WHERE task_id LIKE ?", (f"{path}:%",))
+        if _TASKS_FTS_ENABLED:
+            conn.execute("DELETE FROM tasks_fts WHERE task_id LIKE ?", (f"{path}:%",))
         conn.executemany(
             """
             INSERT INTO tasks(task_id, path, line, text, status, priority, due, starts, parent_id, level, actionable)
@@ -1327,6 +1449,13 @@ def update_page_index(
                 all_tags.append((task["id"], tag))
         if all_tags:
             conn.executemany("INSERT INTO task_tags(task_id, tag) VALUES(?, ?)", all_tags)
+        if _TASKS_FTS_ENABLED and tasks:
+            conn.executemany(
+                "INSERT INTO tasks_fts(task_id, text) VALUES(?, ?)",
+                ((task["id"], task.get("text") or "") for task in tasks),
+            )
+    _invalidate_page_cache()
+    bump_task_index_version()
 
 
 def delete_page_index(path: str) -> None:
@@ -1334,6 +1463,7 @@ def delete_page_index(path: str) -> None:
     conn = _get_conn()
     if not conn:
         return
+    _invalidate_task_cache()
     like = f"{path}:%"
     with conn:
         conn.execute("DELETE FROM pages WHERE path = ?", (path,))
@@ -1341,6 +1471,10 @@ def delete_page_index(path: str) -> None:
         conn.execute("DELETE FROM links WHERE from_path = ? OR to_path = ?", (path, path))
         conn.execute("DELETE FROM tasks WHERE path = ?", (path,))
         conn.execute("DELETE FROM task_tags WHERE task_id LIKE ?", (like,))
+        if _TASKS_FTS_ENABLED:
+            conn.execute("DELETE FROM tasks_fts WHERE task_id LIKE ?", (like,))
+    _invalidate_page_cache()
+    bump_task_index_version()
 
 
 def delete_folder_index(folder_path: str) -> None:
@@ -1378,6 +1512,7 @@ def _normalize_folder_prefix(folder_path: str) -> str:
 
 
 def _delete_index_for_prefix(conn: sqlite3.Connection, folder_prefix: str) -> None:
+    _invalidate_task_cache()
     like_pattern = f"{folder_prefix}/%"
     with conn:
         conn.execute("DELETE FROM pages WHERE path LIKE ?", (like_pattern,))
@@ -1385,11 +1520,15 @@ def _delete_index_for_prefix(conn: sqlite3.Connection, folder_prefix: str) -> No
         conn.execute("DELETE FROM links WHERE from_path LIKE ? OR to_path LIKE ?", (like_pattern, like_pattern))
         conn.execute("DELETE FROM tasks WHERE path LIKE ?", (like_pattern,))
         conn.execute("DELETE FROM task_tags WHERE task_id LIKE ?", (f"{folder_prefix}/%:%",))
+        if _TASKS_FTS_ENABLED:
+            conn.execute("DELETE FROM tasks_fts WHERE task_id LIKE ?", (f"{folder_prefix}/%:%",))
         conn.execute("DELETE FROM bookmarks WHERE path LIKE ?", (like_pattern,))
         conn.execute("DELETE FROM cursor_positions WHERE path LIKE ?", (like_pattern,))
         conn.execute("DELETE FROM attachments WHERE page_path LIKE ?", (like_pattern,))
         conn.execute("DELETE FROM attachments WHERE attachment_path LIKE ?", (like_pattern,))
         conn.execute("DELETE FROM kv WHERE key LIKE ?", (f"hash:{folder_prefix}/%",))
+    _invalidate_page_cache()
+    bump_task_index_version()
 
 
 def _rebase_page_path(page_path: str, old_folder: str, new_folder: str) -> str:
@@ -1442,6 +1581,7 @@ def move_tree_index(old_folder_path: str, new_folder_path: str, root: Path, *, s
         ).fetchall()
         if not rows:
             return {"path_map": {}, "orders": {}}
+        _invalidate_task_cache()
         path_map: dict[str, str] = {}
         orders: dict[str, int] = {}
         old_parent = _parent_folder_for_page(old_page_path)
@@ -1476,9 +1616,25 @@ def move_tree_index(old_folder_path: str, new_folder_path: str, root: Path, *, s
                 raise RuntimeError(f"Destination already contains page(s): {', '.join(sorted(conflicts))}")
         with conn:
             conn.executemany(
-                "UPDATE pages SET path = ?, parent_path = ?, display_order = ?, last_modified = ? WHERE path = ?",
+                """
+                UPDATE pages
+                SET path = ?,
+                    parent_path = ?,
+                    display_order = ?,
+                    last_modified = ?,
+                    path_ci = ?,
+                    title_ci = lower(COALESCE(title, ''))
+                WHERE path = ?
+                """,
                 (
-                    (new_path, _parent_folder_for_page(new_path), orders[new_path], now, old_path)
+                    (
+                        new_path,
+                        _parent_folder_for_page(new_path),
+                        orders[new_path],
+                        now,
+                        new_path.lower(),
+                        old_path,
+                    )
                     for old_path, new_path in path_map.items()
                 ),
             )
@@ -1494,6 +1650,11 @@ def move_tree_index(old_folder_path: str, new_folder_path: str, root: Path, *, s
                     "UPDATE task_tags SET task_id = REPLACE(task_id, ?, ?) WHERE task_id LIKE ?",
                     (f"{old_path}:", f"{new_path}:", f"{old_path}:%"),
                 )
+                if _TASKS_FTS_ENABLED:
+                    conn.execute(
+                        "UPDATE tasks_fts SET task_id = REPLACE(task_id, ?, ?) WHERE task_id LIKE ?",
+                        (f"{old_path}:", f"{new_path}:", f"{old_path}:%"),
+                    )
                 conn.execute("UPDATE bookmarks SET path = ? WHERE path = ?", (new_path, old_path))
                 conn.execute("UPDATE cursor_positions SET path = ? WHERE path = ?", (new_path, old_path))
                 conn.execute("UPDATE attachments SET page_path = ? WHERE page_path = ?", (new_path, old_path))
@@ -1515,6 +1676,7 @@ def move_tree_index(old_folder_path: str, new_folder_path: str, root: Path, *, s
                 "UPDATE kv SET key = REPLACE(key, ?, ?) WHERE key LIKE ?",
                 (f"hash:{old_prefix}", f"hash:{new_prefix}", f"hash:{old_prefix}/%"),
             )
+        _invalidate_page_cache()
         return {"path_map": path_map, "orders": orders}
     finally:
         conn.close()
@@ -1558,6 +1720,7 @@ def rebuild_index_from_disk(root: Path, keep_tables: Optional[set[str]] = None) 
         _ensure_schema(conn)
     finally:
         conn.close()
+        _invalidate_page_cache()
 
 
 def ensure_page_entry(page_path: str, title: Optional[str] = None) -> None:
@@ -1578,15 +1741,26 @@ def ensure_page_entry(page_path: str, title: Optional[str] = None) -> None:
         with conn:
             conn.execute(
                 """
-                INSERT INTO pages(path, title, updated, parent_path, display_order)
-                VALUES(?, ?, ?, ?, ?)
+                INSERT INTO pages(path, title, updated, parent_path, display_order, path_ci, title_ci)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(path) DO UPDATE SET
                     parent_path = excluded.parent_path,
                     last_modified = excluded.updated,
-                    display_order = COALESCE(pages.display_order, excluded.display_order)
+                    display_order = COALESCE(pages.display_order, excluded.display_order),
+                    path_ci = excluded.path_ci,
+                    title_ci = lower(COALESCE(pages.title, excluded.title))
                 """,
-            (page_path, page_title, now, parent_path, order),
+            (
+                page_path,
+                page_title,
+                now,
+                parent_path,
+                order,
+                page_path.lower(),
+                (page_title or "").lower(),
+            ),
         )
+        _invalidate_page_cache()
     finally:
         conn.close()
 
@@ -1644,21 +1818,24 @@ def search_pages(term: str, limit: int = 50) -> list[dict]:
     if not conn:
         return []
     term_lower = term.lower()
+    _ensure_page_cache_loaded()
+    cached = _search_cached_pages(term_lower, limit)
+    if cached is not None:
+        return cached
     like = f"%{term_lower}%"
     exact_path = f"/{term_lower}"
     starts_path = f"{exact_path}/%"
-    # Prioritize exact leaf matches first, then children, then exact title matches,
-    # then title-like matches, then others (all ordered by updated desc as tiebreaker).
     cur = conn.execute(
         """
-        SELECT path, title FROM pages
-        WHERE lower(path) LIKE ? OR lower(title) LIKE ?
+        SELECT path, title, path_ci, title_ci, COALESCE(updated, 0)
+        FROM pages
+        WHERE path_ci LIKE ? OR title_ci LIKE ?
         ORDER BY
             CASE
-                WHEN lower(path) = ? THEN 0
-                WHEN lower(path) LIKE ? THEN 1
-                WHEN lower(title) = ? THEN 2
-                WHEN lower(title) LIKE ? THEN 3
+                WHEN path_ci = ? THEN 0
+                WHEN path_ci LIKE ? THEN 1
+                WHEN title_ci = ? THEN 2
+                WHEN title_ci LIKE ? THEN 3
                 ELSE 4
             END,
             updated DESC
@@ -1666,7 +1843,19 @@ def search_pages(term: str, limit: int = 50) -> list[dict]:
         """,
         (like, like, exact_path, starts_path, term_lower, like, limit),
     )
-    return [{"path": row[0], "title": row[1]} for row in cur.fetchall()]
+    rows = cur.fetchall()
+    results = [
+        {
+            "path": row[0],
+            "title": row[1],
+            "path_ci": (row[2] or row[0] or "").lower(),
+            "title_ci": (row[3] or row[1] or "").lower(),
+            "updated": float(row[4] or 0),
+        }
+        for row in rows
+    ]
+    _remember_page_search_result(term_lower, results)
+    return [{"path": row[0], "title": row[1]} for row in rows]
 
 
 def fetch_tag_summary() -> list[tuple[str, int]]:
@@ -1685,6 +1874,20 @@ def fetch_task_tags() -> list[tuple[str, int]]:
     return [(row[0], row[1]) for row in cur.fetchall()]
 
 
+def bump_task_index_version() -> int:
+    """Increment the in-memory task index version used for cache invalidation."""
+    global _TASK_INDEX_VERSION
+    with _TASK_VERSION_LOCK:
+        _TASK_INDEX_VERSION += 1
+        return _TASK_INDEX_VERSION
+
+
+def get_task_index_version() -> int:
+    """Return the current in-memory task index version."""
+    with _TASK_VERSION_LOCK:
+        return _TASK_INDEX_VERSION
+
+
 def fetch_tasks(
     query: str = "",
     tags: Sequence[str] = (),
@@ -1695,8 +1898,20 @@ def fetch_tasks(
     conn = _get_conn()
     if not conn:
         return []
-
-    non_actionable_tags = set(load_non_actionable_task_tags_list())
+    non_actionable_tags_list = load_non_actionable_task_tags_list()
+    non_actionable_tags = set(non_actionable_tags_list)
+    cache_key = _task_cache_key(
+        query,
+        tags,
+        include_done,
+        include_ancestors,
+        actionable_only,
+        non_actionable_tags_list,
+    )
+    cached = _TASK_FETCH_CACHE.get(cache_key)
+    if cached is not None:
+        _TASK_FETCH_CACHE.move_to_end(cache_key)
+        return _clone_cached_tasks(cached)
     select_cols = """
         SELECT
             t.task_id,
@@ -1715,9 +1930,23 @@ def fetch_tasks(
     conditions = []
     params: list = []
     having_clause = ""
+    total_tasks = None
+    use_fts = False
     if query:
-        conditions.append("lower(t.text) LIKE ?")
-        params.append(f"%{query.lower()}%")
+        try:
+            total_tasks = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        except sqlite3.OperationalError:
+            total_tasks = None
+        fts_query = _normalize_fts_query(query)
+        use_fts = bool(fts_query) and _should_use_task_fts(conn, total_tasks)
+        if use_fts:
+            conditions.append(
+                "t.task_id IN (SELECT task_id FROM tasks_fts WHERE tasks_fts MATCH ?)"
+            )
+            params.append(fts_query)
+        else:
+            conditions.append("lower(t.text) LIKE ?")
+            params.append(f"%{query.lower()}%")
     if tags:
         placeholders = ",".join("?" for _ in tags)
         conditions.append(f"tt.tag IN ({placeholders})")
@@ -1819,10 +2048,12 @@ def fetch_tasks(
             keep_ids = actionable_ids
         tasks = {task_id: task for task_id, task in tasks.items() if task_id in keep_ids}
 
-    return sorted(
+    result = sorted(
         tasks.values(),
         key=lambda t: (t.get("path") or "", t.get("line") or 0, t.get("level") or 0),
     )
+    _save_task_cache(cache_key, result)
+    return result
 
 
 def fetch_link_relations(path: str) -> dict[str, list[str]]:
@@ -1858,10 +2089,13 @@ def fetch_page_titles(paths: Iterable[str]) -> dict[str, str]:
 
 
 def set_active_vault(root: Optional[str]) -> None:
-    global _ACTIVE_CONN, _ACTIVE_ROOT
+    global _ACTIVE_CONN, _ACTIVE_ROOT, _TASKS_FTS_ENABLED
     if _ACTIVE_CONN:
         _ACTIVE_CONN.close()
         _ACTIVE_CONN = None
+    _TASKS_FTS_ENABLED = False
+    _invalidate_task_cache()
+    _invalidate_page_cache()
     if not root:
         _ACTIVE_ROOT = None
         return
@@ -1871,6 +2105,7 @@ def set_active_vault(root: Optional[str]) -> None:
     db_path = db_dir / "settings.db"
     _ACTIVE_CONN = sqlite3.connect(db_path)
     _ensure_schema(_ACTIVE_CONN)
+    _prime_page_cache()
 
 
 def has_active_vault() -> bool:
@@ -1907,6 +2142,109 @@ def _connect_to_vault_db() -> sqlite3.Connection:
     return sqlite3.connect(db_path, check_same_thread=False)
 
 
+def _invalidate_task_cache() -> None:
+    _TASK_FETCH_CACHE.clear()
+
+
+def _clone_cached_tasks(tasks: list[dict]) -> list[dict]:
+    return [
+        {
+            **task,
+            "tags": list(task.get("tags", [])),
+        }
+        for task in tasks
+    ]
+
+
+def _task_cache_key(
+    query: str,
+    tags: Sequence[str],
+    include_done: bool,
+    include_ancestors: bool,
+    actionable_only: bool,
+    non_actionable_tags: Sequence[str],
+) -> tuple:
+    normalized_query = (query or "").strip().lower()
+    normalized_tags = tuple(sorted({t.lower() for t in tags}))
+    normalized_non_actionable = tuple(sorted({t.lower() for t in non_actionable_tags}))
+    return (
+        normalized_query,
+        normalized_tags,
+        bool(include_done),
+        bool(include_ancestors),
+        bool(actionable_only),
+        normalized_non_actionable,
+    )
+
+
+def _save_task_cache(key: tuple, tasks: list[dict]) -> None:
+    if not tasks:
+        _TASK_FETCH_CACHE[key] = []
+    else:
+        _TASK_FETCH_CACHE[key] = _clone_cached_tasks(tasks)
+    _TASK_FETCH_CACHE.move_to_end(key)
+    while len(_TASK_FETCH_CACHE) > _TASK_FETCH_CACHE_SIZE:
+        _TASK_FETCH_CACHE.popitem(last=False)
+
+
+def _tasks_fts_exists(conn: sqlite3.Connection) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='tasks_fts'"
+        ).fetchone()
+        return bool(row)
+    except sqlite3.OperationalError:
+        return False
+
+
+def _maybe_backfill_tasks_fts(conn: sqlite3.Connection) -> None:
+    global _TASKS_FTS_ENABLED
+    if not _TASKS_FTS_ENABLED:
+        return
+    try:
+        cur = conn.execute("SELECT COUNT(*) FROM tasks_fts")
+        current = cur.fetchone()[0]
+        if current:
+            return
+        rows = [(task_id, text or "") for task_id, text in conn.execute("SELECT task_id, text FROM tasks").fetchall()]
+        if rows:
+            conn.executemany("INSERT INTO tasks_fts(task_id, text) VALUES(?, ?)", rows)
+            conn.commit()
+    except sqlite3.OperationalError:
+        _TASKS_FTS_ENABLED = False
+
+
+def _ensure_tasks_fts(conn: sqlite3.Connection) -> None:
+    global _TASKS_FTS_ENABLED
+    preexisting = _tasks_fts_exists(conn)
+    try:
+        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts USING fts5(task_id UNINDEXED, text)")
+        _TASKS_FTS_ENABLED = True
+        _maybe_backfill_tasks_fts(conn)
+    except sqlite3.OperationalError:
+        _TASKS_FTS_ENABLED = preexisting and _tasks_fts_exists(conn)
+
+
+def _should_use_task_fts(conn: sqlite3.Connection, total_tasks: Optional[int] = None) -> bool:
+    if not _TASKS_FTS_ENABLED:
+        return False
+    try:
+        count = total_tasks
+        if count is None:
+            count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        return (count or 0) >= _TASKS_FTS_THRESHOLD
+    except sqlite3.OperationalError:
+        return False
+
+
+def _normalize_fts_query(query: str) -> str:
+    tokens = [tok.strip() for tok in (query or "").split() if tok.strip()]
+    if not tokens:
+        return ""
+    # Prefix searches retain some similarity with the previous LIKE-based matching.
+    return " ".join(f"{tok}*" for tok in tokens)
+
+
 def _ensure_task_columns(conn: sqlite3.Connection) -> None:
     """Add newly introduced task columns for existing vault databases."""
     existing = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
@@ -1916,6 +2254,19 @@ def _ensure_task_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tasks ADD COLUMN level INTEGER")
     if "actionable" not in existing:
         conn.execute("ALTER TABLE tasks ADD COLUMN actionable INTEGER")
+
+
+def _ensure_task_indexes(conn: sqlite3.Connection) -> None:
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_actionable ON tasks(actionable)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_path ON tasks(path)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_tags_task_id_tag ON task_tags(task_id, tag)"
+        )
+    except sqlite3.OperationalError:
+        # Index creation is best-effort for partially upgraded schemas.
+        pass
 
 
 def _parent_folder_for_page(page_path: str) -> str:
@@ -1955,6 +2306,7 @@ def _ensure_page_columns(conn: sqlite3.Connection) -> None:
     """Add newly introduced page columns and backfill defaults."""
     existing = {row[1] for row in conn.execute("PRAGMA table_info(pages)").fetchall()}
     added = False
+    normalized_added = False
     if "parent_path" not in existing:
         conn.execute("ALTER TABLE pages ADD COLUMN parent_path TEXT")
         added = True
@@ -1964,6 +2316,12 @@ def _ensure_page_columns(conn: sqlite3.Connection) -> None:
     if "last_modified" not in existing:
         conn.execute("ALTER TABLE pages ADD COLUMN last_modified REAL")
         added = True
+    if "path_ci" not in existing:
+        conn.execute("ALTER TABLE pages ADD COLUMN path_ci TEXT")
+        normalized_added = True
+    if "title_ci" not in existing:
+        conn.execute("ALTER TABLE pages ADD COLUMN title_ci TEXT")
+        normalized_added = True
     if added:
         _backfill_page_hierarchy(conn)
         try:
@@ -1971,8 +2329,12 @@ def _ensure_page_columns(conn: sqlite3.Connection) -> None:
             conn.execute("UPDATE pages SET last_modified = COALESCE(last_modified, updated, ?) WHERE last_modified IS NULL", (now,))
         except Exception:
             pass
+    if normalized_added or ("path_ci" in existing and "title_ci" in existing):
+        _backfill_page_normalized_columns(conn)
     try:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_parent_order ON pages(parent_path, display_order)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_path_ci ON pages(path_ci)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_title_ci ON pages(title_ci)")
     except sqlite3.OperationalError:
         # Older SQLite versions or partial schemas might cause this to fail; safe to skip.
         pass
@@ -1998,6 +2360,15 @@ def _backfill_page_hierarchy(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def _backfill_page_normalized_columns(conn: sqlite3.Connection) -> None:
+    """Populate case-insensitive helper columns for existing rows."""
+    try:
+        conn.execute("UPDATE pages SET path_ci = lower(path) WHERE path_ci IS NULL OR path_ci = ''")
+        conn.execute("UPDATE pages SET title_ci = lower(COALESCE(title, '')) WHERE title_ci IS NULL")
+    except sqlite3.OperationalError:
+        pass
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -2015,7 +2386,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             updated REAL,
             last_modified REAL,
             parent_path TEXT,
-            display_order INTEGER
+            display_order INTEGER,
+            path_ci TEXT,
+            title_ci TEXT
         );
         CREATE TABLE IF NOT EXISTS page_tags (
             page TEXT,
@@ -2059,7 +2432,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
     _ensure_task_columns(conn)
+    _ensure_task_indexes(conn)
     _ensure_page_columns(conn)
+    _ensure_tasks_fts(conn)
     conn.commit()
 
 
