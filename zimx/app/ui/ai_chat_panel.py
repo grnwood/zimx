@@ -13,6 +13,7 @@ from pathlib import Path
 import html
 import re
 import traceback
+import threading
 from typing import Dict, List, Optional, Set, Tuple
 
 import httpx
@@ -1114,6 +1115,8 @@ class AIChatPanel(QtWidgets.QWidget):
         self._page_candidates: List[ContextCandidate] = []
         self._tree_candidates: List[ContextCandidate] = []
         self._attachment_candidates: List[ContextCandidate] = []
+        self._context_reload_in_progress: bool = False
+        self._context_reload_pending: bool = False
         self._context_overlay = ContextOverlay(self)
         self._context_overlay.selected.connect(self._handle_context_overlay_selected)
         self._context_popup = ContextListPopup(self)
@@ -2068,39 +2071,67 @@ class AIChatPanel(QtWidgets.QWidget):
         return candidate if candidate.exists() else None
 
     def _reload_context_index(self) -> None:
-        self._page_candidates = []
-        self._tree_candidates = []
-        self._attachment_candidates = []
         if not self.vault_root:
+            self._page_candidates = []
+            self._tree_candidates = []
+            self._attachment_candidates = []
+            self._context_reload_in_progress = False
+            self._context_reload_pending = False
             return
+        if self._context_reload_in_progress:
+            self._context_reload_pending = True
+            return
+        self._context_reload_in_progress = True
         root = Path(self.vault_root)
-        seen: set[str] = set()
-        for page_file in sorted(root.rglob("*.txt")):
-            if ".zimx" in page_file.parts:
-                continue
-            rel_page = "/" + page_file.relative_to(root).as_posix()
-            self._page_candidates.append(ContextCandidate(page_ref=rel_page, label=rel_page))
-            folder = page_file.parent
-            if folder == root:
-                folder_rel = "/"
-            else:
-                folder_rel = "/" + folder.relative_to(root).as_posix()
-            if folder_rel not in seen:
-                seen.add(folder_rel)
-                self._tree_candidates.append(ContextCandidate(page_ref=folder_rel, label=folder_rel))
-            for attachment in sorted(folder.iterdir()):
-                if not attachment.is_file():
+
+        def scan() -> tuple[list[ContextCandidate], list[ContextCandidate], list[ContextCandidate]]:
+            pages: list[ContextCandidate] = []
+            trees: list[ContextCandidate] = []
+            attachments: list[ContextCandidate] = []
+            seen: set[str] = set()
+            for page_file in sorted(root.rglob("*.txt")):
+                if ".zimx" in page_file.parts:
                     continue
-                if attachment.suffix.lower() == ".txt":
-                    continue
-                if attachment.name.startswith("."):
-                    continue
-                if ".zimx" in attachment.parts:
-                    continue
-                display = f"{rel_page} · {attachment.name}"
-                self._attachment_candidates.append(
-                    ContextCandidate(page_ref=rel_page, label=display, attachment_name=attachment.name)
-                )
+                rel_page = "/" + page_file.relative_to(root).as_posix()
+                pages.append(ContextCandidate(page_ref=rel_page, label=rel_page))
+                folder = page_file.parent
+                if folder == root:
+                    folder_rel = "/"
+                else:
+                    folder_rel = "/" + folder.relative_to(root).as_posix()
+                if folder_rel not in seen:
+                    seen.add(folder_rel)
+                    trees.append(ContextCandidate(page_ref=folder_rel, label=folder_rel))
+                for attachment in sorted(folder.iterdir()):
+                    if not attachment.is_file():
+                        continue
+                    if attachment.suffix.lower() == ".txt":
+                        continue
+                    if attachment.name.startswith("."):
+                        continue
+                    if ".zimx" in attachment.parts:
+                        continue
+                    display = f"{rel_page} · {attachment.name}"
+                    attachments.append(
+                        ContextCandidate(page_ref=rel_page, label=display, attachment_name=attachment.name)
+                    )
+            return pages, trees, attachments
+
+        def finish(result: tuple[list[ContextCandidate], list[ContextCandidate], list[ContextCandidate]]) -> None:
+            pages, trees, attachments = result
+            self._page_candidates = pages
+            self._tree_candidates = trees
+            self._attachment_candidates = attachments
+            self._context_reload_in_progress = False
+            if self._context_reload_pending:
+                self._context_reload_pending = False
+                self._reload_context_index()
+
+        def worker() -> None:
+            result = scan()
+            QtCore.QTimer.singleShot(0, lambda r=result: finish(r))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _is_plain_markdown(self, rendered_html: str) -> bool:
         """Heuristic: detect if the markdown output is just a <p> block without rich tags."""

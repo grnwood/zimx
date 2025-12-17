@@ -474,6 +474,8 @@ class MainWindow(QMainWindow):
         self._vi_insert_active: bool = False
         self._vi_initial_page_loaded: bool = False
         self._vi_enable_pending: bool = False
+        self._dirty_flag: bool = False
+        self._suspend_dirty_tracking: bool = False
         
         # Track virtual (unsaved) pages
         self.virtual_pages: set[str] = set()
@@ -933,7 +935,7 @@ class MainWindow(QMainWindow):
 
         # Keep dirty indicator in sync with edits
         try:
-            self.editor.document().modificationChanged.connect(lambda _: self._update_dirty_indicator())
+            self.editor.document().modificationChanged.connect(self._on_document_modified)
         except Exception:
             pass
         self._update_dirty_indicator()
@@ -1545,7 +1547,12 @@ class MainWindow(QMainWindow):
                 self.font_size = config.load_global_editor_font_size(self.font_size)
                 self.editor.set_font_point_size(self.font_size)
             self.editor.set_context(self.vault_root, None)
-            self.editor.set_markdown("")
+            self._suspend_dirty_tracking = True
+            try:
+                self.editor.set_markdown("")
+            finally:
+                self._suspend_dirty_tracking = False
+                self._dirty_flag = False
             self._vi_initial_page_loaded = False
             if self._vi_enabled:
                 self._vi_enable_pending = True
@@ -2564,9 +2571,11 @@ class MainWindow(QMainWindow):
         self.current_path = path
         self._suspend_autosave = True
         self._suspend_cursor_history = True
+        self._suspend_dirty_tracking = True
         try:
             self.editor.set_markdown(content)
         finally:
+            self._suspend_dirty_tracking = False
             self._suspend_autosave = False
         if tracer:
             tracer.mark("editor content applied")
@@ -2575,7 +2584,8 @@ class MainWindow(QMainWindow):
             self.editor.document().setModified(False)
         except Exception:
             pass
-        self._last_saved_content = self.editor.to_markdown()
+        self._dirty_flag = False
+        self._last_saved_content = content
         self._update_dirty_indicator()
         updated = indexer.index_page(path, content)
         if updated:
@@ -2756,6 +2766,7 @@ class MainWindow(QMainWindow):
             self.editor.document().setModified(False)
         except Exception:
             pass
+        self._dirty_flag = False
         self._update_dirty_indicator()
         
         # Mark page as saved (remove from virtual pages)
@@ -2782,8 +2793,7 @@ class MainWindow(QMainWindow):
         """Return True if the buffer differs from last saved content."""
         if not self.current_path:
             return False
-        current = self.editor.to_markdown()
-        return current != (self._last_saved_content or "")
+        return bool(getattr(self, "_dirty_flag", False))
 
     def _save_dirty_page(self) -> None:
         """Save the current page if there are unsaved edits."""
@@ -2793,6 +2803,10 @@ class MainWindow(QMainWindow):
             return
         if self._is_editor_dirty():
             self._save_current_file(auto=True)
+            return
+        # If Qt reports clean but we still think dirty, ensure badge reflects it
+        if getattr(self, "_dirty_flag", False):
+            self._update_dirty_indicator()
 
     def _open_journal_today(self) -> None:
         if not self.vault_root:
@@ -3923,8 +3937,13 @@ class MainWindow(QMainWindow):
         self.editor.set_context(self.vault_root, rel_path)
         self.current_path = rel_path
         self._suspend_autosave = True
-        self.editor.set_markdown(content)
-        self._suspend_autosave = False
+        self._suspend_dirty_tracking = True
+        try:
+            self.editor.set_markdown(content)
+        finally:
+            self._suspend_dirty_tracking = False
+            self._suspend_autosave = False
+        self._dirty_flag = True
         
         # Mark as virtual page and store original template content
         self.virtual_pages.add(rel_path)
@@ -5749,8 +5768,15 @@ class MainWindow(QMainWindow):
         except Exception:
             pos = None
         self._suspend_autosave = True
-        self.editor.set_markdown(new_content)
-        self._suspend_autosave = False
+        self._suspend_dirty_tracking = True
+        try:
+            self.editor.set_markdown(new_content)
+        finally:
+            self._suspend_dirty_tracking = False
+            self._suspend_autosave = False
+        # Mark dirty since content changed programmatically
+        self._dirty_flag = True
+        self._update_dirty_indicator()
         if pos is not None:
             try:
                 cursor = self.editor.textCursor()
@@ -6499,7 +6525,7 @@ class MainWindow(QMainWindow):
             )
             self._dirty_status_label.setToolTip("Read-only: changes cannot be saved in this window")
             return
-        dirty = self._is_editor_dirty()
+        dirty = bool(getattr(self, "_dirty_flag", False))
         if dirty:
             self._dirty_status_label.setText("●")
             self._dirty_status_label.setStyleSheet(
@@ -6512,6 +6538,15 @@ class MainWindow(QMainWindow):
                 self._badge_base_style + " background-color: #81c784; color: #000; margin-right: 6px;"
             )
             self._dirty_status_label.setToolTip("All changes saved")
+
+    def _on_document_modified(self, modified: bool) -> None:
+        """Lightweight dirty flag updater (avoid full markdown diff)."""
+        if getattr(self, "_suspend_dirty_tracking", False):
+            return
+        new_state = bool(modified)
+        if new_state != getattr(self, "_dirty_flag", False):
+            self._dirty_flag = new_state
+            self._update_dirty_indicator()
 
     def _apply_vi_preferences(self) -> None:
         self._vi_enabled = config.load_vi_mode_enabled()
