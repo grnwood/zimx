@@ -98,6 +98,10 @@ class DebugTaskTree(QTreeWidget):
             while parent and not hasattr(parent, 'taskActivated'):
                 parent = parent.parent()
             if parent and hasattr(parent, 'taskActivated'):
+                try:
+                    parent._mark_activation_source("mouse")
+                except Exception:
+                    pass
                 parent.taskActivated.emit(self._pending_task_data['path'], self._pending_task_data.get('line') or 1)
             self._pending_task_data = None
     
@@ -205,8 +209,8 @@ class TaskPanel(QWidget):
         self.task_tree.setHeaderLabels(["!", "Task", "Due", "Path"])
         self.task_tree.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.task_tree.setRootIsDecorated(True)
-        self.task_tree.itemActivated.connect(self._emit_task_activation)
-        self.task_tree.itemDoubleClicked.connect(lambda item, col: self._emit_task_activation(item))
+        self.task_tree.itemActivated.connect(self._on_task_activated)
+        self.task_tree.itemDoubleClicked.connect(self._on_task_double_clicked)
         self.task_tree.setSortingEnabled(True)
         self.sort_column = 0
         self.sort_order = Qt.AscendingOrder
@@ -304,6 +308,9 @@ class TaskPanel(QWidget):
         self._include_journal = True
         self._visible_tasks: list[dict] = []
         self._tag_source_tasks: list[dict] = []
+        self._last_keyboard_task_id: Optional[str] = None
+        self._last_keyboard_task_path: Optional[str] = None
+        self._last_keyboard_task_line: Optional[int] = None
         self._setup_focus_defaults()
         self._update_filter_indicator()
         self._apply_font_size()
@@ -533,11 +540,31 @@ class TaskPanel(QWidget):
                 self.search.text(), self.search.cursorPosition(), self._available_tags
             ):
                 return super().eventFilter(obj, event)
+            if obj is self.task_tree and event.text() == "@":
+                if self.task_tree.currentItem():
+                    # Reset other filters before jumping into tag search
+                    self.active_tags.clear()
+                    self.search.clear()
+                    self.search.setFocus(Qt.ShortcutFocusReason)
+                    cursor_pos = self.search.cursorPosition()
+                    if cursor_pos < 0:
+                        cursor_pos = len(self.search.text())
+                    self.search.setCursorPosition(cursor_pos)
+                    self.search.insert("@")
+                    event.accept()
+                    return True
             if self._handle_task_nav_key(event):
                 return True
         return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            current = self.task_tree.currentItem()
+            if current:
+                self._mark_activation_source("keyboard")
+                self._emit_task_activation(current)
+                event.accept()
+                return
         if self._handle_task_nav_key(event):
             return
         if event.key() == Qt.Key_Escape:
@@ -636,6 +663,9 @@ class TaskPanel(QWidget):
         self._nav_filter_prefix = None
         self._nav_filter_enabled = True
         self._include_journal = True
+        self._last_keyboard_task_id = None
+        self._last_keyboard_task_path = None
+        self._last_keyboard_task_line = None
         self._update_filter_indicator()
 
     def _refresh_tags(self) -> None:
@@ -694,13 +724,19 @@ class TaskPanel(QWidget):
         self.tag_list.blockSignals(False)
 
     def _refresh_tasks(self) -> None:
-        query = self.search.text().strip()
+        raw_text = self.search.text().strip()
+        query = raw_text
         query, found_tags, missing_tags = self._parse_search_tags(query)
         self._apply_search_tag_feedback(found_tags, missing_tags)
-        # If tags were supplied in the search, override active_tags and keep tag list in sync
-        if found_tags is not None:
+        # If tags were supplied in the search, override active_tags once tags are valid
+        if found_tags is not None and not missing_tags:
             if set(found_tags) != self.active_tags:
                 self.active_tags = set(found_tags)
+        # Avoid expensive refreshes while the user is mid-typing a tag (e.g., "@fo")
+        if not query:
+            active_token = _active_tag_token(raw_text, self.search.cursorPosition())
+            if active_token and (missing_tags or not found_tags):
+                return
         include_done = self.show_completed.isChecked()
         effective_tags = self.active_tags
         searching = bool(query) or bool(effective_tags)
@@ -799,6 +835,7 @@ class TaskPanel(QWidget):
         self._visible_tasks = visible_tasks
         self.task_tree.expandAll()
         self.task_tree.sortItems(self.sort_column, self.sort_order)
+        self._restore_last_keyboard_selection(items_by_id)
         self._refresh_tags()
 
     def _handle_header_click(self, column: int) -> None:
@@ -818,10 +855,10 @@ class TaskPanel(QWidget):
         normalized = self._normalize_task_path(prefix) if prefix else None
         self._nav_filter_prefix = normalized
         self._nav_filter_enabled = True
-        self._include_journal = True
         self._update_filter_indicator()
         if refresh:
             self._refresh_tasks()
+        self._last_activation_source: Optional[str] = None
 
     def _due_colors(self, task: dict) -> Optional[tuple[QColor | None, QColor | None]]:
         """Return (fg, bg) for due column with red/orange/yellow emphasis."""
@@ -864,9 +901,60 @@ class TaskPanel(QWidget):
             if os.getenv("ZIMX_DEBUG_TASKS", "0") not in ("0", "false", "False", ""):
                 print(f"[TASK_PANEL] _emit_task_activation: no task data on item")
             return
+        if self._last_activation_source == "keyboard":
+            self._remember_task_selection(task)
         if os.getenv("ZIMX_DEBUG_TASKS", "0") not in ("0", "false", "False", ""):
             print(f"[TASK_PANEL] _emit_task_activation: emitting signal for {task['path']}:{task.get('line') or 1}")
+        if not self._last_activation_source:
+            self._last_activation_source = "unknown"
         self.taskActivated.emit(task["path"], task.get("line") or 1)
+
+    def _on_task_double_clicked(self, item: QTreeWidgetItem, col: int) -> None:
+        self._mark_activation_source("mouse")
+        self._emit_task_activation(item)
+
+    def _on_task_activated(self, item: QTreeWidgetItem) -> None:
+        # itemActivated can fire for mouse or keyboard; default to unknown unless set elsewhere
+        if not self._last_activation_source:
+            self._last_activation_source = "unknown"
+        self._emit_task_activation(item)
+
+    def _mark_activation_source(self, source: str) -> None:
+        self._last_activation_source = source
+
+    def consume_activation_source(self) -> Optional[str]:
+        src = self._last_activation_source
+        self._last_activation_source = None
+        return src
+
+    def _remember_task_selection(self, task: dict) -> None:
+        """Keep track of the last keyboard-activated task for later restoration."""
+        self._last_keyboard_task_id = task.get("id")
+        self._last_keyboard_task_path = task.get("path")
+        line = task.get("line")
+        try:
+            self._last_keyboard_task_line = int(line) if line is not None else None
+        except Exception:
+            self._last_keyboard_task_line = None
+
+    def _restore_last_keyboard_selection(self, items_by_id: dict[str, QTreeWidgetItem]) -> None:
+        """Re-select the last keyboard-activated task if it is still visible."""
+        if not (self._last_keyboard_task_id or self._last_keyboard_task_path):
+            return
+        target = items_by_id.get(self._last_keyboard_task_id) if self._last_keyboard_task_id else None
+        if not target and self._last_keyboard_task_path:
+            desired_line = self._last_keyboard_task_line
+            for item in items_by_id.values():
+                task = item.data(0, Qt.UserRole) or {}
+                if task.get("path") != self._last_keyboard_task_path:
+                    continue
+                if desired_line and task.get("line") and task.get("line") != desired_line:
+                    continue
+                target = item
+                break
+        if target:
+            self.task_tree.setCurrentItem(target)
+            self.task_tree.scrollToItem(target)
 
     def _present_path(self, path: str) -> str:
         return path_to_colon(path)

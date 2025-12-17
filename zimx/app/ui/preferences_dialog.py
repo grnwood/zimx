@@ -384,6 +384,24 @@ class PreferencesDialog(QDialog):
             self.journal_template_combo.setCurrentText(current_journal_tpl)
         row_tpl_journal.addWidget(self.journal_template_combo, 1)
         tpl_layout.addLayout(row_tpl_journal)
+        
+        # Add template help text
+        help_label = QLabel(
+            "You can add any templates you want into your ~/.zimx/templates folder.\n\n"
+            "Supported Variables:\n"
+            "  {{PageName}}     - Name of the page being created\n"
+            "  {{DayDateYear}}  - Full date (e.g., Tuesday 29 April 2025)\n"
+            "  {{DOW}}          - Day of week (Monday, Tuesday, etc.)\n"
+            "  {{Month}}        - Full month name (January, February, etc.)\n"
+            "  {{YYYY}}         - 4-digit year\n"
+            "  {{MM}}           - 2-digit month (01-12)\n"
+            "  {{dd}}           - 2-digit day of month (01-31)\n"
+            "  {{QOTD}}         - Random quote of the day from quotationspage.com\n"
+            "  {{cursor}}       - Position for cursor after page creation (removed from final content)"
+        )
+        help_label.setStyleSheet("color: #666; font-size: 11px; margin-top: 10px;")
+        help_label.setWordWrap(True)
+        tpl_layout.addWidget(help_label)
         tpl_layout.addStretch(1)
 
         # Vault & Links
@@ -633,8 +651,19 @@ class PreferencesDialog(QDialog):
         config.save_vault_force_read_only(self.force_read_only_checkbox.isChecked())
         config.save_non_actionable_task_tags(self.non_actionable_tags_edit.text())
         try:
-            config.save_default_page_template(self.page_template_combo.currentText() or "Default")
-            config.save_default_journal_template(self.journal_template_combo.currentText() or "JournalDay")
+            # Template preferences are stored per vault. Warn if no vault is active.
+            if hasattr(config, "has_active_vault") and not config.has_active_vault():
+                QMessageBox.warning(
+                    self,
+                    "No Active Vault",
+                    (
+                        "Template preferences are saved per vault.\n\n"
+                        "Select a vault first (File → Open Vault), then reopen Preferences to save your default templates."
+                    ),
+                )
+            else:
+                config.save_default_page_template(self.page_template_combo.currentText() or "Default")
+                config.save_default_journal_template(self.journal_template_combo.currentText() or "JournalDay")
         except Exception:
             pass
         try:

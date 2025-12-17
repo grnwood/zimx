@@ -488,6 +488,9 @@ class MainWindow(QMainWindow):
         
         # History buttons
         self.history_buttons: list[QPushButton] = []
+        
+        # Template cursor position for newly created pages
+        self._template_cursor_position: int = -1
 
         self.tree_view = VaultTreeView()
         self.tree_model = QStandardItemModel()
@@ -2602,6 +2605,20 @@ class MainWindow(QMainWindow):
         move_cursor_to_end = cursor_at_end or self._should_focus_hr_tail(content)
         restored_history_cursor = False
         final_cursor_pos = None
+        
+        # Check if we have a template cursor position for this newly created page
+        if self._template_cursor_position >= 0:
+            template_pos = self._template_cursor_position
+            self._template_cursor_position = -1  # Reset for next page creation
+            cursor = self.editor.textCursor()
+            content_len = len(self.editor.toPlainText())
+            cursor.setPosition(min(template_pos, content_len))
+            self.editor.setTextCursor(cursor)
+            self._scroll_cursor_to_top_quarter(cursor, animate=False, flash=False)
+            move_cursor_to_end = False
+            restored_history_cursor = True
+            final_cursor_pos = cursor.position()
+        
         if restore_history_cursor:
             saved_pos = self._history_cursor_positions.get(path)
             if saved_pos is not None:
@@ -3371,14 +3388,29 @@ class MainWindow(QMainWindow):
         focused_widget = self.focusWidget()
         if os.getenv("ZIMX_DEBUG_PANELS", "0") not in ("0", "false", "False", ""):
             print(f"[MAIN_WINDOW] Focus before: {focused_widget}")
+        # Detect activation source (keyboard vs mouse) from sender
+        activation_source = None
+        sender = self.sender()
+        try:
+            if hasattr(sender, "consume_activation_source"):
+                activation_source = sender.consume_activation_source()
+            elif hasattr(sender, "task_panel") and hasattr(sender.task_panel, "consume_activation_source"):
+                activation_source = sender.task_panel.consume_activation_source()
+        except Exception:
+            activation_source = None
         
         # Open the file and jump to the task line
         if path != self.current_path:
             self._open_file(path)
         self._goto_line(line, select_line=True)
         
-        # Restore focus to the task panel so user can continue clicking tasks
-        if focused_widget and "Task" in focused_widget.__class__.__name__:
+        # Keyboard activation: move focus to editor; mouse: restore task focus
+        if activation_source == "keyboard":
+            try:
+                self.editor.setFocus(Qt.OtherFocusReason)
+            except Exception:
+                pass
+        elif focused_widget and "Task" in focused_widget.__class__.__name__:
             focused_widget.setFocus()
             if os.getenv("ZIMX_DEBUG_PANELS", "0") not in ("0", "false", "False", ""):
                 print(f"[MAIN_WINDOW] Focus restored to: {focused_widget}")
@@ -5461,8 +5493,11 @@ class MainWindow(QMainWindow):
         except Exception:
             return
         
-        # Process template variables
-        content = self._process_template_variables(template_content, page_name)
+        # Process template variables and extract cursor position
+        content, cursor_pos = self._process_template_variables(template_content, page_name)
+        
+        # Store cursor position for use when opening the file
+        self._template_cursor_position = cursor_pos
         
         # Write to the new page file
         abs_path = Path(self.vault_root) / file_path.lstrip("/")
@@ -5471,8 +5506,22 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def _process_template_variables(self, template: str, page_name: str) -> str:
-        """Replace template variables with their values."""
+    def _get_qotd(self) -> str:
+        """Fetch a random quote of the day from feedburner."""
+        try:
+            return "Have a super awesome day!\n\t-- Rodney Norman"
+        except Exception as e:
+            if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
+                print(f"[DEBUG] Failed to fetch QOTD: {e}")
+            return ""
+
+    def _process_template_variables(self, template: str, page_name: str) -> tuple[str, int]:
+        """Replace template variables with their values.
+        
+        Returns:
+            Tuple of (processed_content, cursor_position)
+            cursor_position is -1 if {{cursor}} tag not found
+        """
         from datetime import datetime
         
         # Get current date in format: Tuesday 29 April 2025
@@ -5487,10 +5536,26 @@ class MainWindow(QMainWindow):
             "{{DOW}}": now.strftime("%A"),
             "{{dd}}": f"{now:%d}",
         }
+        
+        # Only fetch QOTD if template uses it
+        if "{{QOTD}}" in template:
+            vars_map["{{QOTD}}"] = self._get_qotd()
+        
+        # Find cursor position before processing variables
         result = template
+        cursor_pos = -1
+        if "{{cursor}}" in result:
+            # Calculate cursor position by counting characters before {{cursor}}
+            cursor_pos = result.find("{{cursor}}")
+        
+        # Remove cursor tag
+        result = result.replace("{{cursor}}", "")
+        
+        # Replace other variables
         for k, v in vars_map.items():
             result = result.replace(k, v)
-        return result
+        
+        return result, cursor_pos
 
     def _inline_editor_cancelled(self) -> None:
         self._inline_editor = None

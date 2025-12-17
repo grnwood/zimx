@@ -4,6 +4,7 @@ import json
 import os
 import platform
 import sqlite3
+import re
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -2241,8 +2242,13 @@ def _normalize_fts_query(query: str) -> str:
     tokens = [tok.strip() for tok in (query or "").split() if tok.strip()]
     if not tokens:
         return ""
-    # Prefix searches retain some similarity with the previous LIKE-based matching.
-    return " ".join(f"{tok}*" for tok in tokens)
+    safe = []
+    for tok in tokens:
+        # FTS MATCH is picky; bail out to LIKE if the token has special chars (e.g., "@")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:+-]*", tok):
+            return ""
+        safe.append(f"{tok}*")
+    return " ".join(safe)
 
 
 def _ensure_task_columns(conn: sqlite3.Connection) -> None:

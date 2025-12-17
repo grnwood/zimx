@@ -5665,7 +5665,7 @@ class MarkdownEditor(QTextEdit):
             last_block = self.document().lastBlock()
             empty_trailing_blocks = 0
             check_block = last_block
-            max_trailing = 100  # Reasonable limit to prevent pathological cases
+            max_trailing = 3  # Preserve minimal trailing newlines to prevent file bloat
             while check_block.isValid() and check_block.text() == "" and empty_trailing_blocks < max_trailing:
                 empty_trailing_blocks += 1
                 check_block = check_block.previous()
