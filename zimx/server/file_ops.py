@@ -106,7 +106,8 @@ def delete_folder(root: Path, folder_path: str) -> dict:
     with _lock_paths([normalized]):
         shutil.rmtree(target)
         config.delete_tree_index(normalized)
-    return {"deleted": [normalized]}
+        version = config.bump_tree_version()
+    return {"deleted": [normalized], "version": version}
 
 
 def rename_folder(root: Path, from_path: str, to_path: str) -> dict:
@@ -156,11 +157,13 @@ def _move_folder(root: Path, from_path: str, to_path: str, *, set_new_parent_ord
             config.update_link_paths(moved.get("path_map") or {})
         except Exception:
             pass
+        version = config.bump_tree_version()
     return {
         "from": src_folder,
         "to": dest_folder,
         "page_map": moved.get("path_map", {}),
         "display_orders": moved.get("orders", {}),
+        "version": version,
     }
 
 
