@@ -18,6 +18,7 @@ except ImportError:
     pass
  # --- end fix ---
 
+import copy
 import os
 import shutil
 import traceback
@@ -53,6 +54,39 @@ _LOCAL_FILE_OPS_ENABLED = os.getenv("ATTACHMENTS_LOCAL_FILE_OPS", "0") not in (
 _LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
 _TASKS_CACHE: dict[tuple[str, tuple[str, ...], Optional[str]], list[dict]] = {}
 _TASK_CACHE_VERSION: int = -1
+
+_TREE_CACHE: dict[tuple[str, str, bool], dict[str, object]] = {}
+
+
+def _normalize_tree_path(path: str) -> str:
+    cleaned = (path or "/").strip().replace("\\", "/")
+    if not cleaned.startswith("/"):
+        cleaned = f"/{cleaned}"
+    if cleaned != "/":
+        cleaned = cleaned.rstrip("/") or "/"
+    return cleaned or "/"
+
+
+def _get_cached_tree(root: Path, path: str, recursive: bool, version: int) -> list[dict] | None:
+    key = (str(root), path, recursive)
+    cached = _TREE_CACHE.get(key)
+    if not cached:
+        return None
+    if cached.get("version") != version:
+        _TREE_CACHE.pop(key, None)
+        return None
+    try:
+        return copy.deepcopy(cached["tree"])
+    except Exception:
+        return None
+
+
+def _set_cached_tree(root: Path, path: str, recursive: bool, version: int, tree: list[dict]) -> None:
+    _TREE_CACHE[(str(root), path, recursive)] = {"version": version, "tree": copy.deepcopy(tree)}
+
+
+def _clear_tree_cache() -> None:
+    _TREE_CACHE.clear()
 
 
 def _should_use_local_file_ops(request: Request) -> bool:
@@ -238,6 +272,7 @@ def select_vault(payload: VaultSelectPayload) -> dict:
         root = vault_state.set_root(payload.path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _clear_tree_cache()
     try:
         config.set_active_vault(str(root))
     except Exception as exc:
@@ -249,11 +284,19 @@ def select_vault(payload: VaultSelectPayload) -> dict:
 @app.get("/api/vault/tree")
 def vault_tree(path: str = "/", recursive: bool = True) -> dict:
     root = vault_state.get_root()
-    tree = files.list_dir(root, subpath=path, recursive=recursive)
-    order_map = config.fetch_display_order_map()
-    _sort_tree_nodes(tree, order_map)
     version = config.get_tree_version()
-    print(f"{_ANSI_BLUE}[API] GET /api/vault/tree path={path} recursive={recursive} version={version}{_ANSI_RESET}")
+    normalized_path = _normalize_tree_path(path)
+    tree = _get_cached_tree(root, normalized_path, recursive, version)
+    cache_hit = tree is not None
+    if not cache_hit:
+        tree = files.list_dir(root, subpath=normalized_path, recursive=recursive)
+        order_map = config.fetch_display_order_map()
+        _sort_tree_nodes(tree, order_map)
+        _set_cached_tree(root, normalized_path, recursive, version, tree)
+    print(
+        f"{_ANSI_BLUE}[API] GET /api/vault/tree path={normalized_path} recursive={recursive} "
+        f"version={version} cached={cache_hit}{_ANSI_RESET}"
+    )
     return {"root": str(root), "tree": tree, "version": version}
 
 
@@ -351,6 +394,7 @@ async def api_chat(payload: ChatPayload) -> dict:
 def create_path(payload: CreatePathPayload) -> dict:
     root = vault_state.get_root()
     page_path: Optional[str] = None
+    version = config.get_tree_version()
     try:
         if payload.is_dir:
             files.create_directory(root, payload.path)
@@ -360,11 +404,12 @@ def create_path(payload: CreatePathPayload) -> dict:
             page_path = payload.path
         if page_path:
             config.ensure_page_entry(page_path)
+        version = config.bump_tree_version()
     except FileExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except FileAccessError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"ok": True}
+    return {"ok": True, "version": version}
 
 
 @app.post("/api/path/delete")
