@@ -5,6 +5,7 @@ import os
 import platform
 import sqlite3
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
@@ -14,6 +15,11 @@ GLOBAL_CONFIG = Path.home() / ".zimx_config.json"
 
 _ACTIVE_CONN: Optional[sqlite3.Connection] = None
 _ACTIVE_ROOT: Optional[Path] = None
+_TASK_FETCH_CACHE: OrderedDict[tuple, list[dict]] = OrderedDict()
+
+_TASK_FETCH_CACHE_SIZE = 32
+_TASKS_FTS_ENABLED = False
+_TASKS_FTS_THRESHOLD = 500
 
 
 def init_settings() -> None:
@@ -1254,6 +1260,7 @@ def update_page_index(
     conn = _get_conn()
     if not conn:
         return
+    _invalidate_task_cache()
     now = time.time()
     modified_ts = last_modified if last_modified is not None else now
     parent_path = _parent_folder_for_page(path)
@@ -1297,6 +1304,8 @@ def update_page_index(
         )
         conn.execute("DELETE FROM tasks WHERE path = ?", (path,))
         conn.execute("DELETE FROM task_tags WHERE task_id LIKE ?", (f"{path}:%",))
+        if _TASKS_FTS_ENABLED:
+            conn.execute("DELETE FROM tasks_fts WHERE task_id LIKE ?", (f"{path}:%",))
         conn.executemany(
             """
             INSERT INTO tasks(task_id, path, line, text, status, priority, due, starts, parent_id, level, actionable)
@@ -1327,6 +1336,11 @@ def update_page_index(
                 all_tags.append((task["id"], tag))
         if all_tags:
             conn.executemany("INSERT INTO task_tags(task_id, tag) VALUES(?, ?)", all_tags)
+        if _TASKS_FTS_ENABLED and tasks:
+            conn.executemany(
+                "INSERT INTO tasks_fts(task_id, text) VALUES(?, ?)",
+                ((task["id"], task.get("text") or "") for task in tasks),
+            )
 
 
 def delete_page_index(path: str) -> None:
@@ -1334,6 +1348,7 @@ def delete_page_index(path: str) -> None:
     conn = _get_conn()
     if not conn:
         return
+    _invalidate_task_cache()
     like = f"{path}:%"
     with conn:
         conn.execute("DELETE FROM pages WHERE path = ?", (path,))
@@ -1341,6 +1356,8 @@ def delete_page_index(path: str) -> None:
         conn.execute("DELETE FROM links WHERE from_path = ? OR to_path = ?", (path, path))
         conn.execute("DELETE FROM tasks WHERE path = ?", (path,))
         conn.execute("DELETE FROM task_tags WHERE task_id LIKE ?", (like,))
+        if _TASKS_FTS_ENABLED:
+            conn.execute("DELETE FROM tasks_fts WHERE task_id LIKE ?", (like,))
 
 
 def delete_folder_index(folder_path: str) -> None:
@@ -1378,6 +1395,7 @@ def _normalize_folder_prefix(folder_path: str) -> str:
 
 
 def _delete_index_for_prefix(conn: sqlite3.Connection, folder_prefix: str) -> None:
+    _invalidate_task_cache()
     like_pattern = f"{folder_prefix}/%"
     with conn:
         conn.execute("DELETE FROM pages WHERE path LIKE ?", (like_pattern,))
@@ -1385,6 +1403,8 @@ def _delete_index_for_prefix(conn: sqlite3.Connection, folder_prefix: str) -> No
         conn.execute("DELETE FROM links WHERE from_path LIKE ? OR to_path LIKE ?", (like_pattern, like_pattern))
         conn.execute("DELETE FROM tasks WHERE path LIKE ?", (like_pattern,))
         conn.execute("DELETE FROM task_tags WHERE task_id LIKE ?", (f"{folder_prefix}/%:%",))
+        if _TASKS_FTS_ENABLED:
+            conn.execute("DELETE FROM tasks_fts WHERE task_id LIKE ?", (f"{folder_prefix}/%:%",))
         conn.execute("DELETE FROM bookmarks WHERE path LIKE ?", (like_pattern,))
         conn.execute("DELETE FROM cursor_positions WHERE path LIKE ?", (like_pattern,))
         conn.execute("DELETE FROM attachments WHERE page_path LIKE ?", (like_pattern,))
@@ -1442,6 +1462,7 @@ def move_tree_index(old_folder_path: str, new_folder_path: str, root: Path, *, s
         ).fetchall()
         if not rows:
             return {"path_map": {}, "orders": {}}
+        _invalidate_task_cache()
         path_map: dict[str, str] = {}
         orders: dict[str, int] = {}
         old_parent = _parent_folder_for_page(old_page_path)
@@ -1494,6 +1515,11 @@ def move_tree_index(old_folder_path: str, new_folder_path: str, root: Path, *, s
                     "UPDATE task_tags SET task_id = REPLACE(task_id, ?, ?) WHERE task_id LIKE ?",
                     (f"{old_path}:", f"{new_path}:", f"{old_path}:%"),
                 )
+                if _TASKS_FTS_ENABLED:
+                    conn.execute(
+                        "UPDATE tasks_fts SET task_id = REPLACE(task_id, ?, ?) WHERE task_id LIKE ?",
+                        (f"{old_path}:", f"{new_path}:", f"{old_path}:%"),
+                    )
                 conn.execute("UPDATE bookmarks SET path = ? WHERE path = ?", (new_path, old_path))
                 conn.execute("UPDATE cursor_positions SET path = ? WHERE path = ?", (new_path, old_path))
                 conn.execute("UPDATE attachments SET page_path = ? WHERE page_path = ?", (new_path, old_path))
@@ -1695,8 +1721,20 @@ def fetch_tasks(
     conn = _get_conn()
     if not conn:
         return []
-
-    non_actionable_tags = set(load_non_actionable_task_tags_list())
+    non_actionable_tags_list = load_non_actionable_task_tags_list()
+    non_actionable_tags = set(non_actionable_tags_list)
+    cache_key = _task_cache_key(
+        query,
+        tags,
+        include_done,
+        include_ancestors,
+        actionable_only,
+        non_actionable_tags_list,
+    )
+    cached = _TASK_FETCH_CACHE.get(cache_key)
+    if cached is not None:
+        _TASK_FETCH_CACHE.move_to_end(cache_key)
+        return _clone_cached_tasks(cached)
     select_cols = """
         SELECT
             t.task_id,
@@ -1715,9 +1753,23 @@ def fetch_tasks(
     conditions = []
     params: list = []
     having_clause = ""
+    total_tasks = None
+    use_fts = False
     if query:
-        conditions.append("lower(t.text) LIKE ?")
-        params.append(f"%{query.lower()}%")
+        try:
+            total_tasks = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        except sqlite3.OperationalError:
+            total_tasks = None
+        fts_query = _normalize_fts_query(query)
+        use_fts = bool(fts_query) and _should_use_task_fts(conn, total_tasks)
+        if use_fts:
+            conditions.append(
+                "t.task_id IN (SELECT task_id FROM tasks_fts WHERE tasks_fts MATCH ?)"
+            )
+            params.append(fts_query)
+        else:
+            conditions.append("lower(t.text) LIKE ?")
+            params.append(f"%{query.lower()}%")
     if tags:
         placeholders = ",".join("?" for _ in tags)
         conditions.append(f"tt.tag IN ({placeholders})")
@@ -1819,10 +1871,12 @@ def fetch_tasks(
             keep_ids = actionable_ids
         tasks = {task_id: task for task_id, task in tasks.items() if task_id in keep_ids}
 
-    return sorted(
+    result = sorted(
         tasks.values(),
         key=lambda t: (t.get("path") or "", t.get("line") or 0, t.get("level") or 0),
     )
+    _save_task_cache(cache_key, result)
+    return result
 
 
 def fetch_link_relations(path: str) -> dict[str, list[str]]:
@@ -1858,10 +1912,12 @@ def fetch_page_titles(paths: Iterable[str]) -> dict[str, str]:
 
 
 def set_active_vault(root: Optional[str]) -> None:
-    global _ACTIVE_CONN, _ACTIVE_ROOT
+    global _ACTIVE_CONN, _ACTIVE_ROOT, _TASKS_FTS_ENABLED
     if _ACTIVE_CONN:
         _ACTIVE_CONN.close()
         _ACTIVE_CONN = None
+    _TASKS_FTS_ENABLED = False
+    _invalidate_task_cache()
     if not root:
         _ACTIVE_ROOT = None
         return
@@ -1907,6 +1963,109 @@ def _connect_to_vault_db() -> sqlite3.Connection:
     return sqlite3.connect(db_path, check_same_thread=False)
 
 
+def _invalidate_task_cache() -> None:
+    _TASK_FETCH_CACHE.clear()
+
+
+def _clone_cached_tasks(tasks: list[dict]) -> list[dict]:
+    return [
+        {
+            **task,
+            "tags": list(task.get("tags", [])),
+        }
+        for task in tasks
+    ]
+
+
+def _task_cache_key(
+    query: str,
+    tags: Sequence[str],
+    include_done: bool,
+    include_ancestors: bool,
+    actionable_only: bool,
+    non_actionable_tags: Sequence[str],
+) -> tuple:
+    normalized_query = (query or "").strip().lower()
+    normalized_tags = tuple(sorted({t.lower() for t in tags}))
+    normalized_non_actionable = tuple(sorted({t.lower() for t in non_actionable_tags}))
+    return (
+        normalized_query,
+        normalized_tags,
+        bool(include_done),
+        bool(include_ancestors),
+        bool(actionable_only),
+        normalized_non_actionable,
+    )
+
+
+def _save_task_cache(key: tuple, tasks: list[dict]) -> None:
+    if not tasks:
+        _TASK_FETCH_CACHE[key] = []
+    else:
+        _TASK_FETCH_CACHE[key] = _clone_cached_tasks(tasks)
+    _TASK_FETCH_CACHE.move_to_end(key)
+    while len(_TASK_FETCH_CACHE) > _TASK_FETCH_CACHE_SIZE:
+        _TASK_FETCH_CACHE.popitem(last=False)
+
+
+def _tasks_fts_exists(conn: sqlite3.Connection) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='tasks_fts'"
+        ).fetchone()
+        return bool(row)
+    except sqlite3.OperationalError:
+        return False
+
+
+def _maybe_backfill_tasks_fts(conn: sqlite3.Connection) -> None:
+    global _TASKS_FTS_ENABLED
+    if not _TASKS_FTS_ENABLED:
+        return
+    try:
+        cur = conn.execute("SELECT COUNT(*) FROM tasks_fts")
+        current = cur.fetchone()[0]
+        if current:
+            return
+        rows = [(task_id, text or "") for task_id, text in conn.execute("SELECT task_id, text FROM tasks").fetchall()]
+        if rows:
+            conn.executemany("INSERT INTO tasks_fts(task_id, text) VALUES(?, ?)", rows)
+            conn.commit()
+    except sqlite3.OperationalError:
+        _TASKS_FTS_ENABLED = False
+
+
+def _ensure_tasks_fts(conn: sqlite3.Connection) -> None:
+    global _TASKS_FTS_ENABLED
+    preexisting = _tasks_fts_exists(conn)
+    try:
+        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts USING fts5(task_id UNINDEXED, text)")
+        _TASKS_FTS_ENABLED = True
+        _maybe_backfill_tasks_fts(conn)
+    except sqlite3.OperationalError:
+        _TASKS_FTS_ENABLED = preexisting and _tasks_fts_exists(conn)
+
+
+def _should_use_task_fts(conn: sqlite3.Connection, total_tasks: Optional[int] = None) -> bool:
+    if not _TASKS_FTS_ENABLED:
+        return False
+    try:
+        count = total_tasks
+        if count is None:
+            count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        return (count or 0) >= _TASKS_FTS_THRESHOLD
+    except sqlite3.OperationalError:
+        return False
+
+
+def _normalize_fts_query(query: str) -> str:
+    tokens = [tok.strip() for tok in (query or "").split() if tok.strip()]
+    if not tokens:
+        return ""
+    # Prefix searches retain some similarity with the previous LIKE-based matching.
+    return " ".join(f"{tok}*" for tok in tokens)
+
+
 def _ensure_task_columns(conn: sqlite3.Connection) -> None:
     """Add newly introduced task columns for existing vault databases."""
     existing = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
@@ -1916,6 +2075,19 @@ def _ensure_task_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tasks ADD COLUMN level INTEGER")
     if "actionable" not in existing:
         conn.execute("ALTER TABLE tasks ADD COLUMN actionable INTEGER")
+
+
+def _ensure_task_indexes(conn: sqlite3.Connection) -> None:
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_actionable ON tasks(actionable)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_path ON tasks(path)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_tags_task_id_tag ON task_tags(task_id, tag)"
+        )
+    except sqlite3.OperationalError:
+        # Index creation is best-effort for partially upgraded schemas.
+        pass
 
 
 def _parent_folder_for_page(page_path: str) -> str:
@@ -2059,7 +2231,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
     _ensure_task_columns(conn)
+    _ensure_task_indexes(conn)
     _ensure_page_columns(conn)
+    _ensure_tasks_fts(conn)
     conn.commit()
 
 
