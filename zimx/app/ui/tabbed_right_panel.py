@@ -190,6 +190,13 @@ class TabbedRightPanel(QWidget):
         except Exception:
             pass
 
+    def set_calendar_font_size(self, size: int) -> None:
+        """Match calendar/journal/insights fonts to the editor."""
+        try:
+            self.calendar_panel.set_base_font_size(size)
+        except Exception:
+            pass
+
     def set_font_size(self, size: int) -> None:
         """Propagate font size changes to AI chat."""
         if self.ai_chat_panel:

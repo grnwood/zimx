@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QToolButton,
     QTextBrowser,
     QStyle,
+    QTabWidget,
 )
 from PySide6.QtCore import QSize
 from PySide6.QtSvg import QSvgRenderer
@@ -332,6 +333,15 @@ class CalendarPanel(QWidget):
         self.journal_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.journal_tree.customContextMenuRequested.connect(self._open_context_menu)
         self.ai_insights_panel: QWidget | None = self._build_ai_summary_panel() if self._ai_enabled else None
+        self.journal_tabs = QTabWidget()
+        self.journal_tabs.addTab(self.journal_tree, "Journal")
+        if self.ai_insights_panel:
+            self.journal_tabs.addTab(self.ai_insights_panel, "AI Insights")
+        if self.journal_tabs.count() == 1:
+            try:
+                self.journal_tabs.tabBar().setVisible(False)
+            except Exception:
+                pass
 
         # Wrap calendar with a top-aligned zoom row
         cal_container = QWidget()
@@ -357,10 +367,7 @@ class CalendarPanel(QWidget):
         # Vertical splitter for calendar + journal viewer
         self.right_splitter = QSplitter(Qt.Vertical)
         self.right_splitter.addWidget(cal_container)
-        if self.ai_insights_panel:
-            self.right_splitter.addWidget(self.ai_insights_panel)
-        else:
-            self.right_splitter.addWidget(self.journal_tree)
+        self.right_splitter.addWidget(self.journal_tabs)
         self.right_splitter.setStretchFactor(0, 0)
         self.right_splitter.setStretchFactor(1, 1)
 
@@ -469,6 +476,14 @@ class CalendarPanel(QWidget):
         """Public wrapper to allow parent containers to forward zoom shortcuts."""
         self._adjust_font_size(delta)
 
+    def set_base_font_size(self, size: int) -> None:
+        """Align calendar/journal/insights fonts to the editor font size."""
+        clamped = max(6, min(48, int(size or self._font_size)))
+        if clamped == self._font_size:
+            return
+        self._font_size = clamped
+        self._apply_font_size()
+
     def _apply_font_size(self) -> None:
         font = QFont(self.font())
         font.setPointSize(self._font_size)
@@ -497,9 +512,7 @@ class CalendarPanel(QWidget):
                 pass
         if getattr(self, "ai_markdown_view", None):
             try:
-                larger = QFont(font)
-                larger.setPointSizeF(max(6.0, larger.pointSizeF() * 1.15))
-                self.ai_markdown_view.setFont(larger)
+                self.ai_markdown_view.setFont(font)
             except Exception:
                 pass
 
@@ -599,13 +612,14 @@ class CalendarPanel(QWidget):
         try:
             cleaned = self._replace_emoji_with_fallback(markdown_text or "")
             html = render_markdown(cleaned, extensions=["extra", "sane_lists", "tables", "fenced_code"])
-            style = """
+            font_size = max(6, self._font_size)
+            style = f"""
             <style>
-            body { background:#1f1f1f; color:#f0f0f0; font-size: 13px;
+            body {{ background:#1f1f1f; color:#f0f0f0; font-size: {font_size}px;
                    font-family: 'Noto Sans', 'Segoe UI', 'Helvetica', 'Arial',
-                   'Noto Color Emoji', 'Segoe UI Emoji', 'Apple Color Emoji', sans-serif; }
-            h1,h2,h3,h4,h5,h6 { margin: 0.4em 0 0.2em 0; }
-            ul,ol { margin-top: 0.2em; margin-bottom: 0.2em; }
+                   'Noto Color Emoji', 'Segoe UI Emoji', 'Apple Color Emoji', sans-serif; }}
+            h1,h2,h3,h4,h5,h6 {{ margin: 0.4em 0 0.2em 0; }}
+            ul,ol {{ margin-top: 0.2em; margin-bottom: 0.2em; }}
             </style>
             """
             self.ai_markdown_view.setHtml(style + html)

@@ -2103,7 +2103,7 @@ def set_active_vault(root: Optional[str]) -> None:
     db_dir = _ACTIVE_ROOT / ".zimx"
     db_dir.mkdir(parents=True, exist_ok=True)
     db_path = db_dir / "settings.db"
-    _ACTIVE_CONN = sqlite3.connect(db_path)
+    _ACTIVE_CONN = sqlite3.connect(db_path, check_same_thread=False)
     _ensure_schema(_ACTIVE_CONN)
     _prime_page_cache()
 

@@ -508,7 +508,7 @@ class MainWindow(QMainWindow):
         self._tree_keyboard_nav = False
         self._suspend_cursor_history = False
         
-        # Create custom header widget with "Show Journal" checkbox
+        # Create custom header widget
         self.tree_header_widget = QWidget()
         tree_header_layout = QHBoxLayout()
         tree_header_layout.setContentsMargins(8, 4, 8, 4)
@@ -517,20 +517,9 @@ class MainWindow(QMainWindow):
         tree_header_label = QLabel("Vault")
         tree_header_label.setStyleSheet("font-weight: bold;")
         tree_header_layout.addWidget(tree_header_label)
-        
-        self.show_journal_button = QToolButton()
-        self.show_journal_button.setCheckable(True)
-        self.show_journal_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
-        self.show_journal_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
-        self.show_journal_button.setAutoRaise(True)
         pal = QApplication.instance().palette()
         tooltip_fg = pal.color(QPalette.ToolTipText).name()
         tooltip_bg = pal.color(QPalette.ToolTipBase).name()
-        self.show_journal_button.setToolTip(
-            f"<div style='color:{tooltip_fg}; background:{tooltip_bg}; padding:2px 4px;'>Toggle Journal in navigator</div>"
-        )
-        self.show_journal_button.toggled.connect(self._on_show_journal_toggled)
-        tree_header_layout.addWidget(self.show_journal_button)
 
         # Manual refresh button to reload tree data from the API
         self.refresh_tree_button = QToolButton()
@@ -701,6 +690,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             print(f"[MainWindow] Failed to connect PlantUML editor signal: {exc}")
         self.right_panel.set_page_text_provider(self._get_editor_text_for_path)
+        self.right_panel.set_calendar_font_size(self.font_size)
         try:
             self.right_panel.task_panel.focusGained.connect(self._suspend_vi_for_tasks)
         except Exception:
@@ -1554,9 +1544,6 @@ class MainWindow(QMainWindow):
                 # Respect globally persisted editor font size (not per-vault)
                 self.font_size = config.load_global_editor_font_size(self.font_size)
                 self.editor.set_font_point_size(self.font_size)
-                # Load show_journal setting
-                show_journal = config.load_show_journal()
-                self.show_journal_button.setChecked(show_journal)
             self.editor.set_context(self.vault_root, None)
             self.editor.set_markdown("")
             self._vi_initial_page_loaded = False
@@ -1606,12 +1593,6 @@ class MainWindow(QMainWindow):
         # Show feedback
         page_name = Path(self.current_path).stem
         self.statusBar().showMessage(f"Bookmarked: {page_name}", 3000)
-
-    def _on_show_journal_toggled(self, checked: bool) -> None:
-        """Handle Show Journal checkbox toggle."""
-        if config.has_active_vault():
-            config.save_show_journal(checked)
-        self._populate_vault_tree()
 
     def _refresh_tree(self) -> None:
         """Manual refresh of the vault tree from the API."""
@@ -1912,6 +1893,11 @@ class MainWindow(QMainWindow):
         if not path:
             return
         normalized = self._file_path_to_folder(path if path.startswith("/") else f"/{path}")
+        if normalized.startswith("/Journal"):
+            logNav(f"_set_nav_filter: ignoring Journal path {normalized}")
+            self._nav_filter_path = None
+            self._apply_nav_filter_style()
+            return
         self._nav_filter_path = normalized or "/"
         logNav(f"_set_nav_filter: filtered to {self._nav_filter_path}")
         try:
@@ -2182,7 +2168,8 @@ class MainWindow(QMainWindow):
             self._pending_tree_refresh = True
             return
         self._tree_refresh_in_progress = True
-        fetch_path = self._nav_filter_path or "/"
+        nav_root = self._nav_filter_path or "/"
+        fetch_path = "/" if nav_root.startswith("/Journal") else nav_root
         selection_model = self.tree_view.selectionModel()
         selection_blocker = QSignalBlocker(selection_model) if selection_model else None
         self.tree_view.setUpdatesEnabled(False)
@@ -2235,12 +2222,9 @@ class MainWindow(QMainWindow):
                 banner.setData(FILTER_BANNER, PATH_ROLE)
                 self.tree_model.invisibleRootItem().appendRow(banner)
     
-            # Check if Journal should be filtered
-            show_journal = self.show_journal_button.isChecked()
-    
             self._full_tree_data = data
             filtered_data = data
-            if self._nav_filter_path:
+            if self._nav_filter_path and not self._nav_filter_path.startswith("/Journal"):
                 filtered_data = self._filter_tree_data(data, self._nav_filter_path)
 
             for node in filtered_data:
@@ -2248,8 +2232,8 @@ class MainWindow(QMainWindow):
                 if node.get("path") == "/":
                     self._cache_children(node)
                     for child in node.get("children", []):
-                        # Filter out Journal folder if checkbox is unchecked
-                        if not show_journal and child.get("name") == "Journal":
+                        # Always hide Journal from navigator
+                        if child.get("name") == "Journal":
                             continue
                         parent_item = synthetic_root_item or self.tree_model.invisibleRootItem()
                         self._add_tree_node(parent_item, child, seen_paths)
@@ -2368,6 +2352,10 @@ class MainWindow(QMainWindow):
 
     def _load_children_for_path(self, item: QStandardItem, path: str) -> None:
         """Fetch children for a path (cached, then API) and populate the node."""
+        if path.startswith("/Journal"):
+            logNav(f"_load_children_for_path: skipping Journal path {path}")
+            item.removeRows(0, item.rowCount())
+            return
         norm_path = self._normalize_tree_path(path)
         children = self._tree_cache.get(norm_path)
         cached_ver = self._tree_path_version.get(norm_path)
@@ -3498,6 +3486,10 @@ class MainWindow(QMainWindow):
             http_client=self.http,
             api_base=self.api_base,
         )
+        try:
+            panel.set_base_font_size(self.font_size)
+        except Exception:
+            pass
         panel.set_vault_root(self.vault_root or "")
         panel.dateActivated.connect(self.right_panel.calendar_panel.dateActivated.emit)
         panel.pageActivated.connect(self._open_calendar_page)
@@ -4275,6 +4267,7 @@ class MainWindow(QMainWindow):
                 return
             self.font_size = new_size
             self.editor.set_font_point_size(self.font_size)
+            self.right_panel.set_calendar_font_size(self.font_size)
             config.save_global_editor_font_size(self.font_size)
 
     def _apply_navigation_focus(self, focus_target: str | None) -> None:

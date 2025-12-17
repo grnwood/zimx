@@ -89,6 +89,23 @@ def _clear_tree_cache() -> None:
     _TREE_CACHE.clear()
 
 
+def _filter_out_journal(tree: list[dict]) -> list[dict]:
+    """Remove Journal folder/page from the top-level navigation tree."""
+    filtered: list[dict] = []
+    for node in tree:
+        if node.get("name") == "Journal" or node.get("path") == "/Journal":
+            continue
+        if node.get("path") == "/":
+            children = []
+            for child in node.get("children") or []:
+                if child.get("name") == "Journal" or child.get("path") == "/Journal":
+                    continue
+                children.append(child)
+            node = {**node, "children": children}
+        filtered.append(node)
+    return filtered
+
+
 def _should_use_local_file_ops(request: Request) -> bool:
     if not _LOCAL_FILE_OPS_ENABLED:
         return False
@@ -290,6 +307,8 @@ def vault_tree(path: str = "/", recursive: bool = True) -> dict:
     cache_hit = tree is not None
     if not cache_hit:
         tree = files.list_dir(root, subpath=normalized_path, recursive=recursive)
+        if normalized_path in ("/", ""):
+            tree = _filter_out_journal(tree)
         order_map = config.fetch_display_order_map()
         _sort_tree_nodes(tree, order_map)
         _set_cached_tree(root, normalized_path, recursive, version, tree)
