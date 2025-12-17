@@ -6,6 +6,7 @@ import platform
 import sqlite3
 import time
 from pathlib import Path
+from threading import RLock
 from typing import Iterable, Optional, Sequence
 
 from zimx.server.adapters.files import PAGE_SUFFIX
@@ -14,6 +15,8 @@ GLOBAL_CONFIG = Path.home() / ".zimx_config.json"
 
 _ACTIVE_CONN: Optional[sqlite3.Connection] = None
 _ACTIVE_ROOT: Optional[Path] = None
+_TASK_INDEX_VERSION = 0
+_TASK_VERSION_LOCK = RLock()
 
 
 def init_settings() -> None:
@@ -1327,6 +1330,7 @@ def update_page_index(
                 all_tags.append((task["id"], tag))
         if all_tags:
             conn.executemany("INSERT INTO task_tags(task_id, tag) VALUES(?, ?)", all_tags)
+    bump_task_index_version()
 
 
 def delete_page_index(path: str) -> None:
@@ -1341,6 +1345,7 @@ def delete_page_index(path: str) -> None:
         conn.execute("DELETE FROM links WHERE from_path = ? OR to_path = ?", (path, path))
         conn.execute("DELETE FROM tasks WHERE path = ?", (path,))
         conn.execute("DELETE FROM task_tags WHERE task_id LIKE ?", (like,))
+    bump_task_index_version()
 
 
 def delete_folder_index(folder_path: str) -> None:
@@ -1390,6 +1395,7 @@ def _delete_index_for_prefix(conn: sqlite3.Connection, folder_prefix: str) -> No
         conn.execute("DELETE FROM attachments WHERE page_path LIKE ?", (like_pattern,))
         conn.execute("DELETE FROM attachments WHERE attachment_path LIKE ?", (like_pattern,))
         conn.execute("DELETE FROM kv WHERE key LIKE ?", (f"hash:{folder_prefix}/%",))
+    bump_task_index_version()
 
 
 def _rebase_page_path(page_path: str, old_folder: str, new_folder: str) -> str:
@@ -1683,6 +1689,20 @@ def fetch_task_tags() -> list[tuple[str, int]]:
         return []
     cur = conn.execute("SELECT tag, COUNT(DISTINCT task_id) FROM task_tags GROUP BY tag ORDER BY tag")
     return [(row[0], row[1]) for row in cur.fetchall()]
+
+
+def bump_task_index_version() -> int:
+    """Increment the in-memory task index version used for cache invalidation."""
+    global _TASK_INDEX_VERSION
+    with _TASK_VERSION_LOCK:
+        _TASK_INDEX_VERSION += 1
+        return _TASK_INDEX_VERSION
+
+
+def get_task_index_version() -> int:
+    """Return the current in-memory task index version."""
+    with _TASK_VERSION_LOCK:
+        return _TASK_INDEX_VERSION
 
 
 def fetch_tasks(
