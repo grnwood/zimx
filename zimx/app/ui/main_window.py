@@ -578,6 +578,9 @@ class MainWindow(QMainWindow):
         # Track original content of virtual pages to detect actual edits
         self.virtual_page_original_content: dict[str, str] = {}
         
+        # Track pending link path maps for backlink rewriting
+        self._pending_link_path_maps: list[dict[str, str]] = []
+        
         # Bookmarks
         self.bookmarks: list[str] = []
         self.bookmark_buttons: dict[str, QPushButton] = {}
@@ -2979,6 +2982,17 @@ class MainWindow(QMainWindow):
             finally:
                 self._suspend_dirty_tracking = False
                 self._suspend_autosave = False
+        
+        # Save cursor and scroll position before save operation (for auto-save restore)
+        saved_cursor_pos = None
+        saved_scroll_pos = None
+        if auto:
+            try:
+                saved_cursor_pos = self.editor.textCursor().position()
+                saved_scroll_pos = self.editor.verticalScrollBar().value()
+            except Exception:
+                pass
+        
         # Ensure the first non-empty line is a page title; if missing, inject one using leaf name
         payload = {"path": self.current_path, "content": payload_content}
         try:
@@ -2988,6 +3002,7 @@ class MainWindow(QMainWindow):
             if not auto:
                 self._alert_api_error(exc, f"Failed to save {self.current_path}")
             return
+        
         if config.has_active_vault():
             indexer.index_page(self.current_path, payload["content"])
             self.right_panel.refresh_tasks()
@@ -3025,6 +3040,17 @@ class MainWindow(QMainWindow):
                     win._load_content()
         except Exception:
             pass
+        
+        # Restore cursor and scroll position after auto-save (do this last)
+        if auto and saved_cursor_pos is not None:
+            try:
+                cursor = self.editor.textCursor()
+                cursor.setPosition(saved_cursor_pos)
+                self.editor.setTextCursor(cursor)
+                if saved_scroll_pos is not None:
+                    self.editor.verticalScrollBar().setValue(saved_scroll_pos)
+            except Exception:
+                pass
 
     def _append_text_to_page_from_editor(self, dest_path: str, markdown_text: str) -> bool:
         """Append text to the end of dest_path using the HTTP API.
