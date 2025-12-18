@@ -4,9 +4,11 @@ from pathlib import Path
 from typing import Optional, Callable
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import faulthandler
 import re
@@ -898,6 +900,12 @@ class MainWindow(QMainWindow):
         file_menu.addAction(rename_action)
 
         help_menu = self.menuBar().addMenu("Hel&p")
+        documentation_action = QAction("Documentation", self)
+        documentation_action.setShortcut(QKeySequence(Qt.Key_F1))
+        documentation_action.setShortcutContext(Qt.ApplicationShortcut)
+        documentation_action.setToolTip("Open the built-in ZimX documentation (F1)")
+        documentation_action.triggered.connect(self._open_help_documentation)
+        help_menu.addAction(documentation_action)
         about_action = QAction("About", self)
         about_action.triggered.connect(self._show_about_dialog)
         help_menu.addAction(about_action)
@@ -1282,6 +1290,65 @@ class MainWindow(QMainWindow):
         # Dev/venv: use the same interpreter to launch the module
         return [sys.executable, "-m", "zimx.app.main"]
 
+    def _find_help_vault_template(self) -> Optional[Path]:
+        """Return the bundled help-vault directory if present."""
+        candidates: list[Path] = []
+        base = getattr(sys, "_MEIPASS", None)
+        if base:
+            candidates.append(Path(base) / "zimx" / "help-vault")
+            candidates.append(Path(base) / "_internal" / "zimx" / "help-vault")
+        try:
+            exe_dir = Path(os.path.abspath(os.path.dirname(sys.argv[0])))
+            candidates.append(exe_dir / "zimx" / "help-vault")
+            candidates.append(exe_dir / "_internal" / "zimx" / "help-vault")
+        except Exception:
+            pass
+        pkg_root = Path(__file__).resolve().parents[2]  # .../zimx
+        candidates.append(pkg_root / "help-vault")
+
+        for cand in candidates:
+            try:
+                if (cand / "help-vault.txt").exists():
+                    return cand
+            except Exception:
+                continue
+        return None
+
+    def _ensure_user_help_vault(self) -> Path:
+        """Ensure a writable copy of the bundled help vault exists under ~/.zimx/help-vault."""
+        src = self._find_help_vault_template()
+        if src is None:
+            raise RuntimeError("Bundled help vault is missing.")
+
+        user_root = Path.home() / ".zimx" / "help-vault"
+        user_root.parent.mkdir(parents=True, exist_ok=True)
+
+        # Only seed when missing or effectively empty; do not overwrite user edits.
+        root_page = user_root / "help-vault.txt"
+        if root_page.exists():
+            return user_root
+
+        # Seed via a temp dir to avoid leaving a half-copied vault behind.
+        tmp_parent = user_root.parent
+        with tempfile.TemporaryDirectory(prefix="zimx-help-vault-", dir=str(tmp_parent)) as tmpdir:
+            staged = Path(tmpdir) / "help-vault"
+            shutil.copytree(
+                src,
+                staged,
+                dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns(".zimx", "*.db", "*.lock"),
+            )
+            shutil.copytree(staged, user_root, dirs_exist_ok=True)
+        return user_root
+
+    def _open_help_documentation(self) -> None:
+        """Open the built-in help vault in a new ZimX window."""
+        try:
+            vault_path = self._ensure_user_help_vault()
+            self._launch_vault_process(str(vault_path))
+        except Exception as exc:  # pragma: no cover - UI path
+            self._alert(f"Failed to open documentation: {exc}")
+
     def _create_vault(self) -> None:
         target_path = QFileDialog.getExistingDirectory(self, "Select Folder for Vault", str(Path.home()))
         if not target_path:
@@ -1349,6 +1416,7 @@ class MainWindow(QMainWindow):
         """Create a simple lockfile in the vault; prompt if locked or forced read-only."""
         self._read_only = False
         root = Path(directory)
+        is_help_vault = root.name == "help-vault"
         lock_path = root / ".zimx" / "zimx.lock"
         try:
             lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1368,17 +1436,19 @@ class MainWindow(QMainWindow):
                 active = self._is_pid_active(pid, host)
             owner_text = f"{host or '?'} (pid {pid})"
             if active:
-                msg = QMessageBox(self)
-                msg.setWindowTitle("Read-Only Vault")
-                msg.setIcon(QMessageBox.Warning)
-                info = f" (owner: {owner_text})"
-                msg.setText("Database is read only via settings or due to another instance" + info + ".\n\nOpen in read-only mode?")
-                readonly_btn = msg.addButton("Open Read-Only", QMessageBox.AcceptRole)
-                cancel_btn = msg.addButton(QMessageBox.Cancel)
-                msg.setDefaultButton(readonly_btn)
-                msg.exec()
-                if msg.clickedButton() is not readonly_btn:
-                    return False
+                # Skip warning dialog for help-vault
+                if not is_help_vault:
+                    msg = QMessageBox(self)
+                    msg.setWindowTitle("Read-Only Vault")
+                    msg.setIcon(QMessageBox.Warning)
+                    info = f" (owner: {owner_text})"
+                    msg.setText("Database is read only via settings or due to another instance" + info + ".\n\nOpen in read-only mode?")
+                    readonly_btn = msg.addButton("Open Read-Only", QMessageBox.AcceptRole)
+                    cancel_btn = msg.addButton(QMessageBox.Cancel)
+                    msg.setDefaultButton(readonly_btn)
+                    msg.exec()
+                    if msg.clickedButton() is not readonly_btn:
+                        return False
                 self._read_only = True
                 # Do not take over the lock file
                 self._vault_lock_path = None
@@ -1392,17 +1462,18 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
         if prefer_read_only:
-            # Show the same warning even when forced by settings
-            msg = QMessageBox(self)
-            msg.setWindowTitle("Read-Only Vault")
-            msg.setIcon(QMessageBox.Warning)
-            msg.setText("Database is read only via settings or due to another instance.\n\nOpen in read-only mode?")
-            readonly_btn = msg.addButton("Open Read-Only", QMessageBox.AcceptRole)
-            cancel_btn = msg.addButton(QMessageBox.Cancel)
-            msg.setDefaultButton(readonly_btn)
-            msg.exec()
-            if msg.clickedButton() is not readonly_btn:
-                return False
+            # Show the same warning even when forced by settings (skip for help-vault)
+            if not is_help_vault:
+                msg = QMessageBox(self)
+                msg.setWindowTitle("Read-Only Vault")
+                msg.setIcon(QMessageBox.Warning)
+                msg.setText("Database is read only via settings or due to another instance.\n\nOpen in read-only mode?")
+                readonly_btn = msg.addButton("Open Read-Only", QMessageBox.AcceptRole)
+                cancel_btn = msg.addButton(QMessageBox.Cancel)
+                msg.setDefaultButton(readonly_btn)
+                msg.exec()
+                if msg.clickedButton() is not readonly_btn:
+                    return False
             self._read_only = True
             self._vault_lock_path = None
             self._vault_lock_owner = None
