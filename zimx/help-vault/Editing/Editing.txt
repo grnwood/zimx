@@ -1,0 +1,80 @@
+# Editing
+
+ZimX edits plain Markdown, stored as `.txt` files in your vault.
+
+**Your notes remain readable anywhere.** Even without ZimX, your notes are just Markdown files. Open them in any editor, anytime.
+
+## Markdown Basics
+ZimX supports standard Markdown:
+
+- **Headings**: `#`, `##`, `###`, `####`, `#####`
+- **Bold**: `**bold text**` or use `Ctrl+B`
+- **Italic**: `*italic text*` or use `Ctrl+I`
+- **Lists**: `- item` or `1. numbered item`
+- **Checklists/tasks**: `- [ ] task` (see [:Tasks|Tasks])
+- **Links**: `[:Page_Name|Label]` (see [:Links_and_Backlinks|Links and Backlinks])
+- **Code blocks**:
+
+````markdown
+```python
+print("hello")
+```
+````
+
+- **Inline code**: `` `code` ``
+- **Blockquotes**: `> quote text`
+
+## Format Menu
+Use the `Format` menu to apply common Markdown styling using keyboard shortcuts:
+
+- **Ctrl+B**: Bold
+- **Ctrl+I**: Italic
+- **Ctrl+U**: Highlight (uses `==highlight==` syntax)
+- **Ctrl+T**: Verbatim/code (wraps in backticks)
+- **Ctrl+1 through Ctrl+5**: Apply heading level 1-5
+- **Ctrl+7**: Remove heading markers
+- **Ctrl+9**: Clear formatting (restore to plain text)
+
+### Lists
+- **Bullet List**: Convert selected lines to bullet list (keeps indenting)
+- **Dash List**: Convert to dash list
+- **Checkbox List**: Convert to checkboxes
+- **Clear List**: Remove list formatting
+
+## Saving
+**No lag. No bloat.** ZimX is designed to keep you moving: edits are tracked and written to disk as you work automatically. You don't need to explicitly save.
+
+If you ever want to validate "where the truth lives", open the page file in an external editor—it's the same content.
+
+## Editing As Thinking
+**Don't over-structure early.** Capture ideas in `Inbox` or a quick page, then refactor into clearer pages and links once the idea stabilizes.
+
+This is the "Starts simple, grows with you" philosophy in action. Use ZimX as a clean note app when capturing, then organize later when patterns emerge.
+
+## Vi Mode (Optional)
+ZimX supports vi-style editing commands for those who prefer modal editing:
+
+- Press `Escape` or `Ctrl+[` to enter command mode
+- Use `hjkl` for navigation
+- Use standard vi commands like `w`, `b`, `0`, `$`
+- Press `i`, `a`, `o` etc. to return to insert mode
+
+You can toggle vi mode on/off in preferences.
+
+## Templates
+Store frequently-used page structures in `~/.zimx/templates/`. When you create a new page, you can choose a template to pre-fill content.
+
+Access templates: `Vault → Open Template Folder`
+
+## Context Menu Actions
+Right-click in the editor for quick actions:
+- Cut, Copy, Paste
+- Select All
+- Insert Link (see [:Links_and_Backlinks|Links and Backlinks])
+- AI Actions (if configured, see [:AI|AI])
+
+## Next Steps
+- Link related pages: [:Links_and_Backlinks|Links and Backlinks]
+- Search inside and across notes: [:Search_and_Filtering|Search and Filtering]
+- Learn keyboard shortcuts: [:Keyboard_Shortcuts|Keyboard Shortcuts]
+- Use AI to enhance your writing: [:AI|AI]

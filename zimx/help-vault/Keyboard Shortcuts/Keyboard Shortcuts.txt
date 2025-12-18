@@ -1,0 +1,136 @@
+# Keyboard Shortcuts
+
+ZimX is designed to be keyboard-friendly. Here are the shortcuts you'll use most often.
+
+**Keyboard-first. Flow-friendly.** Stay in flow with powerful keyboard navigation and editing. No constant mouse hunting.
+
+## Help
+- **F1**: Open Documentation (this help vault in a new window)
+
+## Go Menu (Chorded)
+These use two-key sequences—press both keys in order:
+
+- **G,H**: Home (vault root page)
+- **G,T**: Tasks panel
+- **G,C**: Calendar panel
+- **G,M**: Attachments panel
+- **G,L**: Link Navigator panel
+- **G,A**: AI Chat panel
+
+**What's "chorded"?** Press `G`, release, then press the second key. Like vim or emacs.
+
+## File/Page Operations
+- **Ctrl+N**: New page
+- **Ctrl+S**: Save (though ZimX auto-saves)
+- **F2**: Rename selected page in tree
+
+## Formatting
+These apply Markdown formatting to selected text or current line:
+
+- **Ctrl+B**: Bold
+- **Ctrl+I**: Italic
+- **Ctrl+U**: Highlight (`==text==`)
+- **Ctrl+T**: Verbatim/inline code (`` `text` ``)
+- **Ctrl+1** through **Ctrl+5**: Apply heading level 1-5
+- **Ctrl+7**: Remove heading markers
+- **Ctrl+9**: Clear all formatting (restore to plain text)
+
+## Lists
+Available through the Format menu:
+- Convert lines to bullet list
+- Convert lines to dash list
+- Convert lines to checkbox list
+- Clear list formatting
+
+## Editing
+- **Ctrl+Z**: Undo
+- **Ctrl+Shift+Z** or **Ctrl+Y**: Redo
+- **Ctrl+C**: Copy
+- **Ctrl+X**: Cut
+- **Ctrl+V**: Paste
+- **Ctrl+A**: Select all
+- **Ctrl+F**: Find in page
+- **Ctrl+H**: Find and replace (if supported)
+
+## Navigation
+- **Alt+Left**: Back in history
+- **Alt+Right**: Forward in history
+- **Ctrl+Tab**: Switch between recent views (if supported)
+
+## Tree Navigation
+When the tree has focus:
+- **Arrow keys**: Navigate tree
+- **Enter**: Open selected page
+- **F2**: Rename selected page
+- **Delete**: Delete selected page (with confirmation)
+- **Type to search**: Filter tree by page name
+
+## Vi Mode (Optional)
+If you've enabled vi mode in preferences:
+
+### Command Mode
+- **Escape** or **Ctrl+[**: Enter command mode
+- **h,j,k,l**: Move left, down, up, right
+- **w**: Next word
+- **b**: Previous word
+- **0**: Start of line
+- **$**: End of line
+- **gg**: Top of document
+- **G**: Bottom of document
+- **t**: Show heading picker (jump to heading)
+
+### Insert Mode
+- **i**: Insert at cursor
+- **a**: Insert after cursor
+- **o**: Insert new line below
+- **O**: Insert new line above
+- **A**: Insert at end of line
+
+## Panels
+- **Escape**: Close most dialogs/popups
+- **Ctrl+W**: Close window/panel (context-dependent)
+
+## AI Actions (Optional)
+If AI is configured:
+- **Ctrl+Shift+A**: Open AI action overlay on selected text
+- Then choose action from list
+
+See [:AI|AI] for more.
+
+## Customizing Shortcuts
+Many shortcuts can be customized in ZimX preferences. Check the settings to modify key bindings to match your workflow.
+
+## Learning Shortcuts
+**Tips for building muscle memory**:
+
+1. **Start with the Go menu**—G,H, G,T, G,C are your workhorses
+2. **Learn formatting**—Ctrl+B, Ctrl+I, Ctrl+1-5 speed up editing
+3. **Use F1 often**—until you don't need to anymore
+4. **Practice vi mode gradually**—if interested, enable it but don't force it
+
+**Fast enough to stay out of your way.** Once you know 5-10 shortcuts, ZimX becomes dramatically faster.
+
+## Printable Cheat Sheet
+Consider creating your own cheat sheet page in your vault:
+
+```markdown
+# My ZimX Shortcuts
+
+## Daily Drivers
+- F1: Help
+- G,H: Home
+- G,T: Tasks
+- Ctrl+B: Bold
+- Ctrl+1: Heading
+
+## Advanced
+- G,A: AI Chat
+- t: Heading picker (vi mode)
+```
+
+Keep it simple—just the ones you actually use.
+
+## Next Steps
+- Learn navigation patterns: [:Navigation|Navigation]
+- Master editing features: [:Editing|Editing]
+- Understand the design philosophy: [:Design_Philosophy|Design Philosophy]

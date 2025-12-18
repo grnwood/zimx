@@ -1,0 +1,106 @@
+# Search and Filtering
+
+ZimX is built for "find it later" without needing a perfect folder structure.
+
+**Find anything instantly.** Powerful search, backlinks, filters, and AI context help you surface the right note at the right time—even years later.
+
+## Find In The Current Page
+Use `Ctrl+F` to search within the current page:
+- Highlights all matches
+- Navigate with `Enter` or arrow keys
+- Great for long notes or finding specific sections
+
+## Search Across The Vault
+**Global search** is for when you remember *what* you wrote but not *where* you put it.
+
+**How to use**:
+1. Open the search panel (usually visible on the right)
+2. Enter your search query
+3. Results show matching pages with context
+4. Click a result to open that page
+
+**Tips**:
+- Search for a distinctive phrase instead of a single common word
+- Use tags consistently (see below) so search results stay meaningful
+- Combine search with tree filtering for focused searches
+
+## Tags
+Tags are written directly in text using `@tag`:
+
+**Examples**:
+- `@work`, `@home`, `@idea`, `@reading`, `@wait`
+- `@high`, `@low` (priorities)
+- `@project-phoenix`, `@client-x`
+
+**Why tags work well**:
+- **No magic. No surprises.** They're not "metadata you might lose"—they're right in your note
+- Easy to search for: just search `@work` to find work-related items
+- Works with tasks (see [:Tasks|Tasks])
+- Visible when you read the file in any editor
+
+## Filtering the Tree
+Narrow your focus to a specific subtree:
+
+**How**:
+- Right-click a page in tree → "Filter to this subtree"
+- Or use a bookmark → "Filter nav from here"
+
+**Why**:
+- Reduces visual clutter when working on a specific project
+- Focuses search and navigation
+- Useful for large vaults with many areas
+
+**Clear filter**: Use the "Clear nav filter" action when done.
+
+## Link Navigator
+See connections between pages:
+- Open with `G,L`
+- Shows outgoing links (where this page points)
+- Shows incoming links/backlinks (where this page is referenced)
+
+This is search through relationships—often more useful than text search when you're trying to understand context.
+
+See [:Links_and_Backlinks|Links and Backlinks] for more.
+
+## AI-Assisted Search (Optional)
+If you have AI configured (see [:AI|AI]), you can use AI to find relevant pages:
+
+- Ask questions in AI chat
+- AI searches your vault and provides context-aware answers
+- Useful when you remember the concept but not the exact words
+
+**AI when you want it. Silent when you don't.** This feature is optional—ZimX works great without it.
+
+## Search Strategies
+
+### Strategy 1: Tag Everything That Matters
+Use consistent tags from the start:
+- Tag meeting notes with attendees: `@john @sarah`
+- Tag ideas with status: `@draft @in-progress @done`
+- Tag by project: `@project-name`
+
+### Strategy 2: Create Index Pages
+Build "hub" pages that link to related content:
+- Create a "Projects" page with links to all projects
+- Create an "Ideas" page with links to brainstorming notes
+- Use these as navigation shortcuts
+
+### Strategy 3: Use Dates
+Include dates in task and journal pages:
+- Tasks: `<2025-12-31` (due date)
+- Journal entries use date-based page names
+- Search by date range becomes easy
+
+### Strategy 4: Trust Search
+Don't obsess over perfect organization:
+- Capture quickly in Inbox or daily journal
+- Tag roughly while capturing
+- Trust search to find it later
+- Refine organization when patterns emerge
+
+**Starts simple, grows with you.** Don't over-organize early—let structure emerge naturally.
+
+## Next Steps
+- Learn task management: [:Tasks|Tasks]
+- Use links for navigation: [:Links_and_Backlinks|Links and Backlinks]
+- Set up AI search: [:AI|AI]
