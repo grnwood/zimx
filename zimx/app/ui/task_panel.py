@@ -616,15 +616,36 @@ class TaskPanel(QWidget):
         return items
 
     def _parse_search_tags(self, text: str) -> tuple[str, Optional[list[str]], list[str]]:
-        """Extract @tags from search text; return (query_without_tags, found_tags_or_None, missing_tags)."""
+        """Extract @tags from search text; return (query_without_tags, found_tags_or_None, missing_tags).
+        
+        Uses prefix matching: typing @cush matches @cush, @cushs, @cushea, @cushsap.
+        """
         tags = TAG_PATTERN.findall(text)
         if not tags:
+            # Check if user is just typing @ with nothing after it - treat as no filter
+            if "@" in text:
+                # Remove the bare @ from query
+                query = text.replace("@", "").strip()
+                return query, None, []
             return text, None, []
-        found = [t for t in tags if t in self._available_tags]
-        missing = [t for t in tags if t not in self._available_tags]
+        
+        found = []
+        missing = []
+        
+        for typed_tag in tags:
+            # Both typed_tag and available_tags are without @ prefix
+            # Check for prefix matches (including exact matches)
+            prefix_matches = [t for t in self._available_tags if t.startswith(typed_tag)]
+            if prefix_matches:
+                # Found tags that start with this prefix - include all of them
+                found.extend(prefix_matches)
+            else:
+                # No matches at all - mark as missing
+                missing.append(typed_tag)
+        
         # Remove tags from query
         query = TAG_PATTERN.sub("", text).strip()
-        return query, found, missing
+        return query, found if found else None, missing
 
     def _apply_search_tag_feedback(self, found: Optional[list[str]], missing: list[str]) -> None:
         """Color the search field based on tag validity."""

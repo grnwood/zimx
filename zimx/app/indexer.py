@@ -14,6 +14,8 @@ INDEX_SCHEMA_VERSION = "task-parse-v4"
 
 # Match @tags that are not part of email addresses or similar identifiers.
 TAG_PATTERN = re.compile(r"(?<![\w.+-])@([A-Za-z0-9_]+)")
+# Match URLs to exclude tags within them
+URL_PATTERN = re.compile(r"https?://[^\s<>\"'\]\)]+")
 # Markdown-style links: [label](target)
 MARKDOWN_LINK_PATTERN = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 # Wiki-style links used by the editor's storage format: [target|label]
@@ -39,6 +41,26 @@ def _indent_width(indent: str) -> int:
     return width
 
 
+def _extract_tags(text: str) -> list[str]:
+    """Extract @tags from text, excluding tags that appear within URLs.
+    
+    Example: "Check @issue http://example.com?@thread=123 @bug" returns ["issue", "bug"]
+    """
+    # Find all URL positions
+    url_ranges = [(m.start(), m.end()) for m in URL_PATTERN.finditer(text)]
+    
+    # Find all tag matches
+    all_tags = []
+    for match in TAG_PATTERN.finditer(text):
+        tag_pos = match.start()
+        # Check if this tag is inside a URL
+        in_url = any(start <= tag_pos < end for start, end in url_ranges)
+        if not in_url:
+            all_tags.append(match.group(1))
+    
+    return all_tags
+
+
 def index_page(path: str, content: str) -> bool:
     """Index page metadata into the per-vault database.
 
@@ -52,7 +74,7 @@ def index_page(path: str, content: str) -> bool:
     if prev == digest:
         return False
 
-    tags = sorted(set(TAG_PATTERN.findall(content)))
+    tags = sorted(set(_extract_tags(content)))
     link_targets = _extract_link_targets(content, path)
     # Automatically add a link from the parent page to this page if it is a child
     parent = Path(path).parent
@@ -196,7 +218,7 @@ def extract_tasks(path: str, content: str) -> List[dict]:
         body = match.group("body")
         state = match.group("state1") or match.group("state2") or ("x" if match.group("box") == "☑" else " ")
         # Inherit tags from parent, add own tags
-        own_tags = set(TAG_PATTERN.findall(body))
+        own_tags = set(_extract_tags(body))
         parent_tags = set(parent["tags"]) if parent else set()
         tags = sorted(parent_tags | own_tags)
         explicit_due = _first_match(DUE_PATTERN, body)

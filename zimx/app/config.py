@@ -2321,11 +2321,20 @@ def _ensure_tasks_fts(conn: sqlite3.Connection) -> None:
     global _TASKS_FTS_ENABLED
     preexisting = _tasks_fts_exists(conn)
     try:
+        # Try with UNINDEXED first (requires SQLite 3.35.0+)
         conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts USING fts5(task_id UNINDEXED, text)")
         _TASKS_FTS_ENABLED = True
         _maybe_backfill_tasks_fts(conn)
-    except sqlite3.OperationalError:
-        _TASKS_FTS_ENABLED = preexisting and _tasks_fts_exists(conn)
+    except sqlite3.OperationalError as e:
+        # If UNINDEXED fails, try without it (fallback for older SQLite)
+        try:
+            conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts USING fts5(task_id, text)")
+            _TASKS_FTS_ENABLED = True
+            _maybe_backfill_tasks_fts(conn)
+        except sqlite3.OperationalError as e2:
+            # FTS5 not available or other error - disable FTS
+            print(f"[Index] FTS5 not available: {e2}")
+            _TASKS_FTS_ENABLED = preexisting and _tasks_fts_exists(conn)
 
 
 def _should_use_task_fts(conn: sqlite3.Connection, total_tasks: Optional[int] = None) -> bool:
