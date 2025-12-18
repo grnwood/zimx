@@ -47,7 +47,10 @@ def _should_suspend_nav_for_tag(text: str, cursor: int, available_tags: set[str]
     if not token:
         return False
     tag = token.lstrip("@")
-    return tag not in available_tags
+    if not tag:
+        return False
+    # Treat any available tag that starts with the typed prefix as valid
+    return not any(candidate.startswith(tag) for candidate in available_tags)
 
 
 class DebugTaskTree(QTreeWidget):
@@ -254,7 +257,7 @@ class TaskPanel(QWidget):
         self.filter_checkbox.toggled.connect(self._on_filter_checkbox_toggled)
         tags_row.addWidget(self.filter_checkbox)
         self.journal_checkbox = QCheckBox("Journal?")
-        self.journal_checkbox.setChecked(False)
+        self.journal_checkbox.setChecked(True)
         self.journal_checkbox.setVisible(False)
         self.journal_checkbox.setToolTip("Include tasks from the Journal subtree while filtered.")
         self.journal_checkbox.toggled.connect(self._on_journal_checkbox_toggled)
@@ -307,7 +310,7 @@ class TaskPanel(QWidget):
         self._nav_filter_enabled = True
         self._include_journal = True
         self._visible_tasks: list[dict] = []
-        self._tag_source_tasks: list[dict] = []
+        self._tag_source_tasks: Optional[list[dict]] = None
         self._last_keyboard_task_id: Optional[str] = None
         self._last_keyboard_task_path: Optional[str] = None
         self._last_keyboard_task_line: Optional[int] = None
@@ -615,49 +618,60 @@ class TaskPanel(QWidget):
             iterator += 1
         return items
 
-    def _parse_search_tags(self, text: str) -> tuple[str, Optional[list[str]], list[str]]:
-        """Extract @tags from search text; return (query_without_tags, found_tags_or_None, missing_tags).
-        
-        Uses prefix matching: typing @cush matches @cush, @cushs, @cushea, @cushsap.
-        """
-        tags = TAG_PATTERN.findall(text)
-        if not tags:
-            # Check if user is just typing @ with nothing after it - treat as no filter
-            if "@" in text:
-                # Remove the bare @ from query
-                query = text.replace("@", "").strip()
-                return query, None, []
-            return text, None, []
-        
-        found = []
-        missing = []
-        
-        for typed_tag in tags:
-            # Both typed_tag and available_tags are without @ prefix
-            # Check for prefix matches (including exact matches)
-            prefix_matches = [t for t in self._available_tags if t.startswith(typed_tag)]
-            if prefix_matches:
-                # Found tags that start with this prefix - include all of them
-                found.extend(prefix_matches)
-            else:
-                # No matches at all - mark as missing
-                missing.append(typed_tag)
-        
-        # Remove tags from query
-        query = TAG_PATTERN.sub("", text).strip()
-        return query, found if found else None, missing
+    def _parse_search_tags(self, text: str) -> tuple[str, list[str]]:
+        """Extract @tags (including the active partial tag) and return (query_without_tags, tokens)."""
+        tokens = TAG_PATTERN.findall(text)
+        active_token = _active_tag_token(text, self.search.cursorPosition())
+        if active_token:
+            stripped = active_token.lstrip("@")
+            if stripped and stripped not in tokens:
+                tokens.append(stripped)
+        # Remove tags from the free-text portion
+        query = TAG_PATTERN.sub(" ", text)
+        if active_token:
+            query = query.replace(active_token, " ")
+        query = re.sub(r"\s{2,}", " ", query).strip()
+        return query, tokens
 
-    def _apply_search_tag_feedback(self, found: Optional[list[str]], missing: list[str]) -> None:
-        """Color the search field based on tag validity."""
-        if found is None:
-            # No tags in search: reset color
+    def _resolve_tag_groups(self, tokens: list[str]) -> tuple[list[set[str]], set[str], set[str]]:
+        """Return (tag_groups, matched_tags_flat, missing_tokens) from the provided tag tokens.
+
+        Each token becomes a group of matching tags. Exact matches produce a single-tag group (AND);
+        prefix-only matches produce an OR group of all tags with that prefix.
+        """
+        groups: list[set[str]] = []
+        matched: set[str] = set()
+        missing: set[str] = set()
+        seen: set[str] = set()
+        for token in tokens:
+            token = token.strip()
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            matches = {tag for tag in self._available_tags if tag.startswith(token)}
+            if not matches:
+                missing.add(token)
+                continue
+            has_broader_matches = any(tag != token for tag in matches)
+            if token in self._available_tags and not has_broader_matches:
+                group = {token}
+            else:
+                group = matches
+            groups.append(group)
+            matched.update(group)
+        return groups, matched, missing
+
+    def _apply_search_tag_feedback(self, tokens_present: bool, has_matches: bool, has_missing: bool) -> None:
+        """Color the search field based on tag validity or presence."""
+        if not tokens_present:
             self.search.setStyleSheet("")
             return
-        if missing:
-            self.search.setStyleSheet("color: #c62828;")  # red for missing tags
+        if has_matches:
+            self.search.setStyleSheet("color: #00b33c;")
+        elif has_missing:
+            self.search.setStyleSheet("color: #c62828;")  # red when nothing matches
         else:
-            # At least one tag present and all valid
-            self.search.setStyleSheet("color: #00b33c;")  # brighter green for valid tags
+            self.search.setStyleSheet("")
 
     def _toggle_tag_selection(self, item: QListWidgetItem) -> None:
         tag = item.data(Qt.UserRole)
@@ -680,7 +694,7 @@ class TaskPanel(QWidget):
         self.tag_list.clear()
         self.task_tree.clear()
         self._visible_tasks = []
-        self._tag_source_tasks = []
+        self._tag_source_tasks = None
         self._nav_filter_prefix = None
         self._nav_filter_enabled = True
         self._include_journal = True
@@ -707,7 +721,7 @@ class TaskPanel(QWidget):
                     counts[tag] = counts.get(tag, 0) + 1
             return sorted(counts.items())
 
-        if self._tag_source_tasks:
+        if self._tag_source_tasks is not None:
             tag_items = _count_tags(self._tag_source_tasks)
         elif self._nav_filter_prefix and self._nav_filter_enabled:
             tag_items = _count_tags(self._visible_tasks)
@@ -746,49 +760,66 @@ class TaskPanel(QWidget):
 
     def _refresh_tasks(self) -> None:
         raw_text = self.search.text().strip()
-        query = raw_text
-        query, found_tags, missing_tags = self._parse_search_tags(query)
-        self._apply_search_tag_feedback(found_tags, missing_tags)
-        # If tags were supplied in the search, override active_tags once tags are valid
-        if found_tags is not None and not missing_tags:
-            if set(found_tags) != self.active_tags:
-                self.active_tags = set(found_tags)
-        # Avoid expensive refreshes while the user is mid-typing a tag (e.g., "@fo")
-        if not query:
-            active_token = _active_tag_token(raw_text, self.search.cursorPosition())
-            if active_token and (missing_tags or not found_tags):
-                return
+        query, tokens = self._parse_search_tags(raw_text)
+        self._tag_source_tasks = None
+        tag_groups, matched_tags, missing_tokens = self._resolve_tag_groups(tokens)
+        tokens_present = bool(tokens)
+        has_matches = bool(tag_groups)
+        self._apply_search_tag_feedback(tokens_present, has_matches, bool(missing_tokens))
+        # If the search explicitly specifies tags, let those drive the active set
+        if tokens_present:
+            self.active_tags = set(matched_tags)
+        effective_tag_groups: list[set[str]] = []
+        if tokens_present:
+            effective_tag_groups = tag_groups or ([set()] if missing_tokens else [])
+        elif self.active_tags:
+            effective_tag_groups = [{tag} for tag in sorted(self.active_tags)]
         include_done = self.show_completed.isChecked()
-        effective_tags = self.active_tags
-        searching = bool(query) or bool(effective_tags)
+        searching = bool(query) or bool(effective_tag_groups) or tokens_present
         actionable_toggle = self.show_actionable.isChecked()
-        tasks = config.fetch_tasks(
-            query,
-            sorted(effective_tags),
-            include_done=include_done,
-            include_ancestors=True,
-            # Force actionable-only when toggled, otherwise keep the default active view
-            # unless the user is explicitly filtering/searching.
-            actionable_only=actionable_toggle or (not include_done and not searching),
-        )
-        tasks = self._apply_nav_filter(tasks)
+        use_sql_tags = bool(effective_tag_groups) and all(len(group) == 1 for group in effective_tag_groups)
+        sql_tags = sorted(next(iter(group)) for group in effective_tag_groups) if use_sql_tags else []
+        impossible_tag_filter = any(len(group) == 0 for group in effective_tag_groups)
+        if impossible_tag_filter:
+            tasks = []
+        else:
+            tasks = config.fetch_tasks(
+                query,
+                sql_tags,
+                include_done=include_done,
+                include_ancestors=True,
+                # Force actionable-only when toggled, otherwise keep the default active view
+                # unless the user is explicitly filtering/searching.
+                actionable_only=actionable_toggle or (not include_done and not searching),
+            )
+            tasks = self._apply_nav_filter(tasks)
+            if effective_tag_groups and not use_sql_tags:
+                tasks = self._filter_tasks_to_tag_groups(tasks, effective_tag_groups)
 
         if include_done:
             self._tag_source_tasks = list(tasks)
         else:
-            extra_tasks = config.fetch_tasks(
-                query,
-                sorted(effective_tags),
-                include_done=True,
-                include_ancestors=True,
-                actionable_only=False,
-            )
-            if self._nav_filter_prefix and self._nav_filter_enabled:
-                extra_tasks = self._apply_nav_filter(extra_tasks)
-            tag_source_map = {task.get("id") or task.get("path"): task for task in extra_tasks}
-            for task in tasks:
-                tag_source_map.setdefault(task.get("id") or task.get("path"), task)
-            self._tag_source_tasks = list(tag_source_map.values())
+            if impossible_tag_filter:
+                self._tag_source_tasks = []
+                extra_tasks = []
+            else:
+                extra_tasks = config.fetch_tasks(
+                    query,
+                    sql_tags,
+                    include_done=True,
+                    include_ancestors=True,
+                    actionable_only=False,
+                )
+                if self._nav_filter_prefix and self._nav_filter_enabled:
+                    extra_tasks = self._apply_nav_filter(extra_tasks)
+                if effective_tag_groups and not use_sql_tags:
+                    extra_tasks = self._filter_tasks_to_tag_groups(extra_tasks, effective_tag_groups)
+                self._tag_source_tasks = []
+            if not self._tag_source_tasks:
+                tag_source_map = {task.get("id") or task.get("path"): task for task in extra_tasks}
+                for task in tasks:
+                    tag_source_map.setdefault(task.get("id") or task.get("path"), task)
+                self._tag_source_tasks = list(tag_source_map.values())
 
         self.task_tree.clear()
         self._visible_tasks = []
@@ -859,6 +890,28 @@ class TaskPanel(QWidget):
         self._restore_last_keyboard_selection(items_by_id)
         self._refresh_tags()
 
+    def _filter_tasks_to_tag_groups(self, tasks: list[dict], tag_groups: list[set[str]]) -> list[dict]:
+        """Apply tag filtering for OR-within-prefix semantics."""
+        if not tasks or not tag_groups:
+            return tasks
+        tasks_by_id = {task.get("id"): task for task in tasks if task.get("id")}
+        matching_ids: set[str] = set()
+        for task in tasks:
+            tag_set = set(task.get("tags") or [])
+            if all(any(tag in tag_set for tag in group) for group in tag_groups):
+                task_id = task.get("id")
+                if task_id:
+                    matching_ids.add(task_id)
+        if not matching_ids:
+            return []
+        keep_ids = set(matching_ids)
+        for task_id in list(matching_ids):
+            current = tasks_by_id.get(task_id, {}).get("parent")
+            while current and current not in keep_ids:
+                keep_ids.add(current)
+                current = tasks_by_id.get(current, {}).get("parent")
+        return [task for task in tasks if task.get("id") in keep_ids]
+
     def _handle_header_click(self, column: int) -> None:
         if column == self.sort_column:
             self.sort_order = Qt.DescendingOrder if self.sort_order == Qt.AscendingOrder else Qt.AscendingOrder
@@ -873,14 +926,14 @@ class TaskPanel(QWidget):
         self._refresh_tasks()
 
     def set_navigation_filter(self, prefix: Optional[str], refresh: bool = True) -> None:
-        prev_prefix = self._nav_filter_prefix
         normalized = self._normalize_task_path(prefix) if prefix else None
+        # Default to excluding Journal when a new navigation filter is applied
+        if normalized and normalized != self._nav_filter_prefix:
+            self._include_journal = False
+        if not normalized:
+            self._include_journal = True
         self._nav_filter_prefix = normalized
         self._nav_filter_enabled = True
-        # When entering filter mode, default to excluding Journal tasks unless the user
-        # explicitly opted in during this filtered session.
-        if prev_prefix is None and normalized is not None:
-            self._include_journal = False
         self._update_filter_indicator()
         if refresh:
             self._refresh_tasks()
