@@ -148,7 +148,7 @@ def _move_folder(root: Path, from_path: str, to_path: str, *, set_new_parent_ord
                 old_page.rename(new_page)
             except Exception:
                 pass
-        _rewrite_heading_if_matches(new_page if new_page.exists() else old_page, old_leaf, new_leaf)
+        # Note: We do NOT rewrite the heading when moving pages - users control their own titles
         try:
             moved = config.move_tree_index(src_folder, dest_folder, root, set_new_parent_order=set_new_parent_order)
         except RuntimeError as exc:
@@ -252,6 +252,13 @@ def update_links_on_disk(root: Path, path_map: dict[str, str]) -> list[str]:
         if old_colon and new_colon and (old_colon, new_colon) not in seen_pairs:
             replacements.append((old_colon, new_colon))
             seen_pairs.add((old_colon, new_colon))
+            # For root-level pages (no colons in old path), also add :PageName format
+            if ":" not in old_colon:
+                old_with_colon = f":{old_colon}"
+                new_with_colon = f":{new_colon}"
+                if (old_with_colon, new_with_colon) not in seen_pairs:
+                    replacements.append((old_with_colon, new_with_colon))
+                    seen_pairs.add((old_with_colon, new_with_colon))
     if not replacements:
         return []
     touched: list[str] = []
@@ -283,11 +290,23 @@ def update_links_on_disk(root: Path, path_map: dict[str, str]) -> list[str]:
                 return f"[{new}|{new_label}]"
 
             updated = wiki_pattern.sub(_replace, updated)
-            if old in new:
-                # Avoid recursive growth when new contains old
-                continue
-            if old in updated:
-                updated = updated.replace(old, new)
+            # For colon-style links, use word boundaries to avoid partial matches
+            if old.startswith(":") and ":" in old[1:]:
+                # Multi-level colon link like :Foo:Bar - use word boundaries
+                pattern = re.compile(r'\b' + re.escape(old) + r'\b')
+                updated = pattern.sub(new, updated)
+            elif old.startswith(":"):
+                # Root-level colon link like :RootPage
+                # Match only when followed by non-colon or end of word
+                pattern = re.compile(re.escape(old) + r'(?![:\w])')
+                updated = pattern.sub(new, updated)
+            else:
+                # Regular path replacement - use the old logic
+                if old in new:
+                    # Avoid recursive growth when new contains old
+                    continue
+                if old in updated:
+                    updated = updated.replace(old, new)
         if updated != content:
             try:
                 txt_file.write_text(updated, encoding="utf-8")

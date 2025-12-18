@@ -266,37 +266,18 @@ def load_minimal_font_scan_enabled() -> bool:
     return bool(val)
 
 
-def load_link_update_mode() -> str:
-    """Return link update handling preference: none | lazy | reindex."""
+def load_rewrite_backlinks_on_move() -> bool:
+    """Return whether to rewrite backlinks immediately when a page is moved (default: True)."""
     payload = _read_global_config()
-    mode = payload.get("link_update_mode")
-    if isinstance(mode, str):
-        mode_lower = mode.strip().lower()
-        if mode_lower in {"none", "lazy", "reindex"}:
-            return mode_lower
-    return "reindex"
-
-
-def save_link_update_mode(mode: str) -> None:
-    """Persist link update handling preference."""
-    normalized = (mode or "").strip().lower()
-    if normalized not in {"none", "lazy", "reindex"}:
-        normalized = "reindex"
-    _update_global_config({"link_update_mode": normalized})
-
-
-def load_update_links_on_index() -> bool:
-    """Return whether indexer should rewrite page links during reindex (default: True)."""
-    payload = _read_global_config()
-    val = payload.get("update_links_on_index")
+    val = payload.get("rewrite_backlinks_on_move")
     if val is None:
         return True
     return bool(val)
 
 
-def save_update_links_on_index(enabled: bool) -> None:
-    """Persist preference to rewrite page links during reindex."""
-    _update_global_config({"update_links_on_index": bool(enabled)})
+def save_rewrite_backlinks_on_move(enabled: bool) -> None:
+    """Persist preference to rewrite backlinks on page moves."""
+    _update_global_config({"rewrite_backlinks_on_move": bool(enabled)})
 
 
 def save_minimal_font_scan_enabled(enabled: bool) -> None:
@@ -1812,6 +1793,64 @@ def fetch_display_order_map() -> dict[str, int]:
         return {}
     finally:
         conn.close()
+
+
+def count_folders() -> int:
+    """Count the total number of folder pages in the vault.
+    
+    A folder is identified by having a .txt file with the same name as its directory.
+    Example: /Joe/Joe.txt is a folder, /Joe/SubPage.txt is not.
+    """
+    try:
+        conn = _connect_to_vault_db()
+    except Exception:
+        return 0
+    try:
+        cur = conn.execute("SELECT path FROM pages")
+        paths = [row[0] for row in cur.fetchall()]
+        
+        # Count paths where filename matches parent folder name
+        folder_count = 0
+        for path in paths:
+            # Extract folder name and filename
+            # /Joe/Joe.txt -> folder=Joe, filename=Joe.txt
+            # /Joe/SubPage.txt -> folder=Joe, filename=SubPage.txt
+            parts = path.split('/')
+            if len(parts) >= 2:
+                filename = parts[-1].replace('.txt', '')
+                parent_folder = parts[-2]
+                if filename == parent_folder:
+                    folder_count += 1
+        
+        return folder_count
+    except sqlite3.OperationalError:
+        return 0
+    finally:
+        conn.close()
+
+
+def reorder_pages(parent_path: str, page_order: list[str]) -> None:
+    """Update display_order for pages under a parent to match the given order.
+    
+    Args:
+        parent_path: The parent folder path (or "/" for root)
+        page_order: List of page paths in desired display order
+    """
+    conn = _get_conn()
+    if not conn:
+        return
+    
+    print(f"[DB] Reordering {len(page_order)} pages under {parent_path}")
+    with conn:
+        # Update display_order for each page to match its position in the list
+        for idx, page_path in enumerate(page_order):
+            print(f"[DB]   {idx}: {page_path}")
+            conn.execute(
+                "UPDATE pages SET display_order = ? WHERE path = ?",
+                (idx, page_path)
+            )
+    conn.commit()
+    print(f"[DB] Reorder committed")
 
 
 def search_pages(term: str, limit: int = 50) -> list[dict]:

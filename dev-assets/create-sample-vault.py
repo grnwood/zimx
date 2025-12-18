@@ -384,11 +384,14 @@ def _headered_paragraph(header_level: int, extra_note: str | None = None) -> str
 
 def _write_page(root: Path, root_name: str, parts: list[str], content: str) -> None:
     if not parts:
-        # Root page lives directly under the vault root
-        file_path = root / f"{root_name}{PAGE_SUFFIX}"
+        # Root page lives in a folder with the same name: /vault-sample/vault-sample.txt
+        folder = root / root_name
+        folder.mkdir(parents=True, exist_ok=True)
+        file_path = folder / f"{root_name}{PAGE_SUFFIX}"
         file_path.write_text(content, encoding="utf-8")
         return
 
+    # All pages follow the pattern: /Folder/Folder.txt or /Parent/Child/Child.txt
     folder = root.joinpath(*parts)
     folder.mkdir(parents=True, exist_ok=True)
     file_path = folder / f"{parts[-1]}{PAGE_SUFFIX}"

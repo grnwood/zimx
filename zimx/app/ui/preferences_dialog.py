@@ -420,27 +420,12 @@ class PreferencesDialog(QDialog):
         self.rebuild_button.clicked.connect(self._on_rebuild_clicked)
         vault_layout.addWidget(self.rebuild_button)
 
-        vault_layout.addWidget(QLabel("Link Update Handling:"))
-        row_link = QHBoxLayout()
-        self.link_update_combo = QComboBox()
-        self.link_update_combo.addItems(
-            [
-                "None (do nothing)",
-                "Lazy (rewrite on open/save)",
-                "Reindex (background)",
-            ]
-        )
-        mode = config.load_link_update_mode()
-        mode_to_index = {"none": 0, "lazy": 1, "reindex": 2}
-        self.link_update_combo.setCurrentIndex(mode_to_index.get(mode, 2))
-        row_link.addWidget(self.link_update_combo, 1)
-        vault_layout.addLayout(row_link)
-        self.update_links_on_index_checkbox = QCheckBox("Update vault page links on reindex")
+        self.rewrite_backlinks_checkbox = QCheckBox("Rewrite backlinks on page move")
         try:
-            self.update_links_on_index_checkbox.setChecked(config.load_update_links_on_index())
+            self.rewrite_backlinks_checkbox.setChecked(config.load_rewrite_backlinks_on_move())
         except Exception:
-            self.update_links_on_index_checkbox.setChecked(True)
-        vault_layout.addWidget(self.update_links_on_index_checkbox)
+            self.rewrite_backlinks_checkbox.setChecked(True)
+        vault_layout.addWidget(self.rewrite_backlinks_checkbox)
         vault_layout.addStretch(1)
 
     def _open_manage_server_dialog(self):
@@ -678,12 +663,7 @@ class PreferencesDialog(QDialog):
         except Exception:
             pass
         try:
-            index_to_mode = {0: "none", 1: "lazy", 2: "reindex"}
-            config.save_link_update_mode(index_to_mode.get(self.link_update_combo.currentIndex(), "reindex"))
-        except Exception:
-            pass
-        try:
-            config.save_update_links_on_index(self.update_links_on_index_checkbox.isChecked())
+            config.save_rewrite_backlinks_on_move(self.rewrite_backlinks_checkbox.isChecked())
         except Exception:
             pass
         super().accept()

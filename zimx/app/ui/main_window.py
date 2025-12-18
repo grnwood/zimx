@@ -213,6 +213,7 @@ PATH_ROLE = int(Qt.ItemDataRole.UserRole)
 TYPE_ROLE = PATH_ROLE + 1
 OPEN_ROLE = TYPE_ROLE + 1
 FILTER_BANNER = "__NAV_FILTER_BANNER__"
+TREE_LAZY_LOAD_THRESHOLD = 500  # Load full tree if vault has fewer than 500 folders
 _DETAILED_LOGGING = os.getenv("ZIMX_DETAILED_LOGGING", "0") not in ("0", "false", "False", "", None)
 _ANSI_BLUE = "\033[94m"
 _ANSI_RESET = "\033[0m"
@@ -249,11 +250,14 @@ class VaultTreeView(QTreeView):
     dragStarted = Signal()
     dragFinished = Signal()
     moveRequested = Signal(str, str)  # from_path, to_path
+    reorderRequested = Signal(str, list)  # parent_path, ordered_page_paths
+    dragStatusChanged = Signal(str)  # status message for status bar
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._press_pos: QPoint | None = None
         self._dragging: bool = False
+        self._drag_src_index: QModelIndex | None = None
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
@@ -322,6 +326,8 @@ class VaultTreeView(QTreeView):
         if event.button() == Qt.LeftButton:
             self._press_pos = event.pos()
             self._dragging = False
+            # Store the source index for potential reorder operation
+            self._drag_src_index = self.indexAt(event.pos())
         self.setFocus(Qt.MouseFocusReason)
         super().mousePressEvent(event)
 
@@ -334,6 +340,7 @@ class VaultTreeView(QTreeView):
             if not self._dragging:
                 self._dragging = True
                 self.dragStarted.emit()
+                self.dragStatusChanged.emit("Reorder item in the tree...")
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):  # type: ignore[override]
@@ -343,8 +350,10 @@ class VaultTreeView(QTreeView):
                 self.rowClicked.emit(idx)
         if self._dragging:
             self.dragFinished.emit()
+            # Don't clear status here - let dropEvent or handlers clear it
         self._dragging = False
         self._press_pos = None
+        self._drag_src_index = None
         super().mouseReleaseEvent(event)
 
     def is_dragging(self) -> bool:
@@ -354,15 +363,30 @@ class VaultTreeView(QTreeView):
         src_indexes = self.selectedIndexes()
         if not src_indexes:
             event.ignore()
+            self.dragStatusChanged.emit("")  # Clear status on failed drop
             return
         src_index = src_indexes[0]
         src_path = src_index.data(PATH_ROLE)
         if not src_path:
             event.ignore()
+            self.dragStatusChanged.emit("")  # Clear status on failed drop
             return
         pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
         target_index = self.indexAt(pos)
         drop_pos = self.dropIndicatorPosition()
+        
+        # Determine the parent of the source and target
+        src_parent_index = src_index.parent()
+        target_parent_index = target_index.parent() if target_index.isValid() else QModelIndex()
+        
+        # Check if we're reordering within the same parent
+        if drop_pos in (QAbstractItemView.AboveItem, QAbstractItemView.BelowItem) and src_parent_index == target_parent_index:
+            # This is a reorder operation within the same folder
+            event.acceptProposedAction()
+            self._handle_reorder_drop(src_index, target_index, drop_pos)
+            return
+        
+        # Otherwise, this is a move operation to a different folder
         target_path = target_index.data(PATH_ROLE) if target_index.isValid() else "/"
         dest_parent: str
         if drop_pos == QAbstractItemView.OnItem:
@@ -379,6 +403,75 @@ class VaultTreeView(QTreeView):
         dest_path = f"{dest_parent_clean}/{leaf}" if dest_parent_clean not in ("", "/") else f"/{leaf}"
         event.acceptProposedAction()
         self.moveRequested.emit(src_path, dest_path)
+    
+    def _handle_reorder_drop(self, src_index: QModelIndex, target_index: QModelIndex, drop_pos) -> None:
+        """Handle reordering items within the same parent."""
+        if not src_index.isValid() or not target_index.isValid():
+            return
+        
+        parent_index = src_index.parent()
+        model = self.model()
+        if not model:
+            return
+        
+        # Get parent path for the API call
+        if parent_index.isValid():
+            parent_path = parent_index.data(PATH_ROLE) or "/"
+        else:
+            parent_path = "/"
+        
+        # Collect all children of the parent in their current order
+        row_count = model.rowCount(parent_index)
+        children: list[tuple[int, str]] = []
+        for row in range(row_count):
+            child_index = model.index(row, 0, parent_index)
+            # Use OPEN_ROLE to get the actual page path (.txt file), not the folder path
+            child_path = child_index.data(OPEN_ROLE) or child_index.data(PATH_ROLE)
+            if child_path:
+                children.append((row, child_path))
+        
+        if not children:
+            return
+        
+        # Find source and target positions
+        src_row = src_index.row()
+        target_row = target_index.row()
+        
+        # Remove source from list
+        src_path = None
+        for i, (row, path) in enumerate(children):
+            if row == src_row:
+                src_path = path
+                children.pop(i)
+                break
+        
+        if not src_path:
+            return
+        
+        # Determine insertion position based on drop indicator
+        insert_pos = target_row
+        if drop_pos == QAbstractItemView.BelowItem:
+            insert_pos = target_row + 1
+        
+        # Adjust insertion position if we removed an item before it
+        if src_row < target_row:
+            insert_pos -= 1
+        
+        # Insert at new position
+        children.insert(insert_pos, (insert_pos, src_path))
+        
+        # Extract ordered paths
+        ordered_paths = [path for _, path in children]
+        
+        # Store info for visual update after successful reorder
+        self._pending_reorder = {
+            "parent_index": parent_index,
+            "src_row": src_row,
+            "dest_row": insert_pos
+        }
+        
+        # Emit reorder signal
+        self.reorderRequested.emit(parent_path, ordered_paths)
 
     def startDrag(self, supportedActions):  # type: ignore[override]
         """Start drag with path text so editor drops can create links."""
@@ -399,6 +492,8 @@ class VaultTreeView(QTreeView):
             pass
         drag = QDrag(self)
         drag.setMimeData(mime)
+        # Execute the drag - this is required for drop events to fire
+        drag.exec(Qt.MoveAction)
 
 
 def logNav(message: str) -> None:
@@ -450,10 +545,8 @@ class MainWindow(QMainWindow):
         self._pending_tree_refresh: bool = False
         self._tree_cache: dict[str, list[dict]] = {}
         self._expanded_paths: set[str] = set()
-        self._pending_link_path_maps: list[dict[str, str]] = []
-        self.link_update_mode: str = config.load_link_update_mode()
-        self._pending_reindex_trigger: bool = False
-        self.update_links_on_index: bool = True
+        self._use_lazy_loading: bool = True  # Will be updated on tree load
+        self.rewrite_backlinks_on_move: bool = config.load_rewrite_backlinks_on_move()
         try:
             self._main_soft_scroll_enabled = config.load_enable_main_soft_scroll()
         except Exception:
@@ -508,7 +601,10 @@ class MainWindow(QMainWindow):
         self.tree_view.escapePressed.connect(self._clear_nav_filter)
         self.tree_view.rowClicked.connect(self._on_tree_row_clicked)
         self.tree_view.moveRequested.connect(self._on_tree_move_requested)
+        self.tree_view.reorderRequested.connect(self._on_tree_reorder_requested)
+        self.tree_view.dragStatusChanged.connect(self._on_drag_status_changed)
         self.tree_view.expanded.connect(self._on_tree_expanded)
+        self.tree_view.collapsed.connect(self._on_tree_collapsed)
         self.dir_icon = self.style().standardIcon(QStyle.SP_DirIcon)
         self.file_icon = self.style().standardIcon(QStyle.SP_FileIcon)
         self._tree_arrow_focus_pending = False
@@ -2217,32 +2313,61 @@ class MainWindow(QMainWindow):
         logNav(f"_save_expanded_state: saved {len(self._expanded_paths)} paths (was {before_count})")
 
     def _restore_expanded_state(self) -> None:
-        """Restore previously expanded tree paths."""
+        """Restore previously expanded tree paths, expanding parents before children."""
         if not self._expanded_paths:
-            logNav("_restore_expanded_state: no paths to restore")
             return
         
         model = self.tree_model
         if not model:
             return
         
-        restored_count = 0
+        # Build a map of all items by path
+        path_to_index = {}
         
-        def walk_tree(parent_index: QModelIndex) -> None:
-            nonlocal restored_count
+        def build_map(parent_index: QModelIndex) -> None:
             rows = model.rowCount(parent_index)
             for row in range(rows):
                 idx = model.index(row, 0, parent_index)
                 item = model.itemFromIndex(idx)
                 if item:
                     path = self._normalize_tree_path(item.data(PATH_ROLE))
-                    if path and path in self._expanded_paths:
-                        self.tree_view.expand(idx)
-                        restored_count += 1
-                walk_tree(idx)
+                    if path:
+                        path_to_index[path] = idx
+                build_map(idx)
         
-        walk_tree(QModelIndex())
-        logNav(f"_restore_expanded_state: restored {restored_count} of {len(self._expanded_paths)} paths")
+        build_map(QModelIndex())
+        
+        # Sort paths by depth (parent folders before children) to ensure proper expansion order
+        sorted_paths = sorted(self._expanded_paths, key=lambda p: p.count('/'))
+        
+        # Block signals during restore to prevent flicker and cascading events
+        blocker = QSignalBlocker(self.tree_view)
+        restored_count = 0
+        
+        for path in sorted_paths:
+            idx = path_to_index.get(path)
+            if idx and idx.isValid():
+                if not self.tree_view.isExpanded(idx):
+                    self.tree_view.expand(idx)
+                    restored_count += 1
+        
+        del blocker
+        
+        if restored_count > 0:
+            logNav(f"_restore_expanded_state: restored {restored_count} of {len(self._expanded_paths)} paths")
+
+    def _count_folders_in_vault(self) -> int:
+        """Count total number of folders in vault for lazy loading decision."""
+        try:
+            resp = self.http.get("/api/vault/stats")
+            resp.raise_for_status()
+            data = resp.json()
+            count = data.get("folder_count", 0)
+            print(f"{_ANSI_BLUE}[TREE] Folder count: {count}{_ANSI_RESET}")
+            return count
+        except Exception as exc:
+            print(f"{_ANSI_BLUE}[TREE] Failed to get folder count: {exc}{_ANSI_RESET}")
+            return 0
 
     def _populate_vault_tree(self) -> None:
         self._cancel_inline_editor()
@@ -2253,6 +2378,12 @@ class MainWindow(QMainWindow):
             self._pending_tree_refresh = True
             return
         self._tree_refresh_in_progress = True
+        
+        # Decide lazy vs full loading based on vault size
+        folder_count = self._count_folders_in_vault()
+        self._use_lazy_loading = folder_count >= TREE_LAZY_LOAD_THRESHOLD
+        print(f"{_ANSI_BLUE}[TREE] Vault has {folder_count} folders, using {'LAZY' if self._use_lazy_loading else 'FULL'} loading{_ANSI_RESET}")
+        
         nav_root = self._nav_filter_path or "/"
         fetch_path = "/" if nav_root.startswith("/Journal") else nav_root
         selection_model = self.tree_view.selectionModel()
@@ -2260,7 +2391,10 @@ class MainWindow(QMainWindow):
         self.tree_view.setUpdatesEnabled(False)
         try:
             try:
-                resp = self.http.get("/api/vault/tree", params={"path": fetch_path, "recursive": "false"})
+                # Use recursive loading for small vaults, lazy for large
+                recursive_param = "false" if self._use_lazy_loading else "true"
+                print(f"{_ANSI_BLUE}[TREE] Fetching tree with recursive={recursive_param}{_ANSI_RESET}")
+                resp = self.http.get("/api/vault/tree", params={"path": fetch_path, "recursive": recursive_param})
                 resp.raise_for_status()
             except httpx.HTTPError as exc:
                 self._alert_api_error(exc, "Failed to load vault tree")
@@ -2285,18 +2419,8 @@ class MainWindow(QMainWindow):
             self.tree_model.setHorizontalHeaderLabels(["Vault"])
             seen_paths: set[str] = set()
 
-            # Add synthetic vault root node (fixed at top, opens vault home page) and nest tree under it
-            synthetic_root_item = None
-            add_synthetic_root = self.vault_root_name and not self._nav_filter_path
-            if add_synthetic_root:
-                synthetic_root = {
-                    "name": self.vault_root_name,
-                    "path": "/",  # use root path so delete isn't offered
-                    "open_path": f"/{self.vault_root_name}{PAGE_SUFFIX}",
-                    "children": [],
-                }
-                synthetic_root_item = self._add_tree_node(self.tree_model.invisibleRootItem(), synthetic_root, seen_paths)
-            elif self._nav_filter_path:
+            # No synthetic root - just show actual folders directly
+            if self._nav_filter_path:
                 banner = QStandardItem("Filtered (Remove)")
                 font = banner.font()
                 font.setBold(True)
@@ -2313,19 +2437,17 @@ class MainWindow(QMainWindow):
                 filtered_data = self._filter_tree_data(data, self._nav_filter_path)
 
             for node in filtered_data:
-                # Hide the root vault node (path == "/") and render only its children under synthetic root
+                # Show actual folders directly at root level
                 if node.get("path") == "/":
                     self._cache_children(node)
                     for child in node.get("children", []):
                         # Always hide Journal from navigator
                         if child.get("name") == "Journal":
                             continue
-                        parent_item = synthetic_root_item or self.tree_model.invisibleRootItem()
-                        self._add_tree_node(parent_item, child, seen_paths)
+                        self._add_tree_node(self.tree_model.invisibleRootItem(), child, seen_paths)
                 else:
                     self._cache_children(node)
-                    parent_item = synthetic_root_item or self.tree_model.invisibleRootItem()
-                    self._add_tree_node(parent_item, node, seen_paths)
+                    self._add_tree_node(self.tree_model.invisibleRootItem(), node, seen_paths)
         finally:
             self._tree_refresh_in_progress = False
             if self._pending_tree_refresh:
@@ -2428,15 +2550,35 @@ class MainWindow(QMainWindow):
         path = self._normalize_tree_path(item.data(PATH_ROLE))
         if not path:
             return
-        # If already populated and not just a placeholder, skip
+        # Save expansion state
+        if path:
+            self._expanded_paths.add(path)
+            self._debug(f"[EXPAND] Added to expanded paths: {path} (total: {len(self._expanded_paths)})")
+        
+        # If already populated and not just a placeholder, skip child loading
         if path in self._tree_cache and item.rowCount() > 0 and not (
             item.rowCount() == 1 and not item.child(0).isEnabled()
         ):
             return
         self._load_children_for_path(item, path)
 
+    def _on_tree_collapsed(self, index: QModelIndex) -> None:
+        """Remove collapsed paths from expansion state."""
+        item = self.tree_model.itemFromIndex(index)
+        if not item:
+            return
+        path = self._normalize_tree_path(item.data(PATH_ROLE))
+        if path:
+            self._expanded_paths.discard(path)
+            self._debug(f"[COLLAPSE] Removed from expanded paths: {path} (total: {len(self._expanded_paths)})")
+
     def _load_children_for_path(self, item: QStandardItem, path: str) -> None:
         """Fetch children for a path (cached, then API) and populate the node."""
+        # Skip lazy loading if full tree was loaded
+        if not self._use_lazy_loading:
+            print(f"{_ANSI_BLUE}[TREE] _load_children_for_path: skipping (full tree already loaded){_ANSI_RESET}")
+            return
+            
         if path.startswith("/Journal"):
             logNav(f"_load_children_for_path: skipping Journal path {path}")
             item.removeRows(0, item.rowCount())
@@ -2557,6 +2699,11 @@ class MainWindow(QMainWindow):
         if open_target == FILTER_BANNER:
             self._clear_nav_filter()
             return
+        # Skip selection changes for folders - let rowClicked handle page opening
+        is_folder = current.data(TYPE_ROLE)
+        if is_folder:
+            self._debug("Tree selection skipped: folder expand/collapse only.")
+            return
         self._debug(f"Tree selection target resolved to: {open_target!r}")
         if not open_target:
             self._debug("Tree selection skipped: no open target.")
@@ -2628,10 +2775,6 @@ class MainWindow(QMainWindow):
         content = resp.json().get("content", "")
         if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
             print(f"[DEBUG load] Loaded from API: {len(content)} chars, ends_with_newline={content.endswith('\\n')}, last_20_chars={repr(content[-20:])}")
-        if self.link_update_mode == "lazy":
-            content, rewritten = self._rewrite_links(content)
-            if rewritten:
-                self.statusBar().showMessage("Updated links to reflect recent moves", 3000)
         if tracer:
             try:
                 content_len = len(content.encode("utf-8"))
@@ -2828,13 +2971,15 @@ class MainWindow(QMainWindow):
         title_content = self._ensure_page_title(payload_content, self.current_path)
         if title_content != payload_content:
             payload_content = title_content
-            self._apply_rewritten_editor_content(payload_content)
+            # Update editor with injected title
+            self._suspend_autosave = True
+            self._suspend_dirty_tracking = True
+            try:
+                self.editor.set_markdown(payload_content)
+            finally:
+                self._suspend_dirty_tracking = False
+                self._suspend_autosave = False
         # Ensure the first non-empty line is a page title; if missing, inject one using leaf name
-        if self.link_update_mode == "lazy":
-            rewritten, changed = self._rewrite_links(payload_content)
-            if changed:
-                payload_content = rewritten
-                self._apply_rewritten_editor_content(payload_content)
         payload = {"path": self.current_path, "content": payload_content}
         try:
             resp = self.http.post("/api/file/write", json=payload)
@@ -5473,6 +5618,63 @@ class MainWindow(QMainWindow):
             self._alert_api_error(exc, f"Failed to move {from_path}")
             return
         self._handle_move_response(dest_path, resp.json())
+    
+    def _on_tree_reorder_requested(self, parent_path: str, page_order: list) -> None:
+        """Handle reordering pages within the same parent."""
+        if not self._ensure_writable("reorder pages"):
+            self.statusBar().clearMessage()
+            return
+        try:
+            resp = self.http.post("/api/tree/reorder", json={"parent_path": parent_path, "page_order": page_order})
+            resp.raise_for_status()
+            data = resp.json()
+            # Update tree version if returned
+            if "version" in data:
+                # Clear tree cache so next refresh will fetch updated order
+                self._tree_cache.clear()
+                # Move the row in the model directly instead of full refresh
+                if hasattr(self.tree_view, "_pending_reorder"):
+                    pending = self.tree_view._pending_reorder
+                    parent_index = pending["parent_index"]
+                    src_row = pending["src_row"]
+                    dest_row = pending["dest_row"]
+                    
+                    # Get the parent item
+                    if parent_index.isValid():
+                        parent_item = self.tree_model.itemFromIndex(parent_index)
+                    else:
+                        parent_item = self.tree_model.invisibleRootItem()
+                    
+                    if parent_item and src_row != dest_row:
+                        # Take the row from source position
+                        row_items = parent_item.takeRow(src_row)
+                        if row_items:
+                            # Insert at destination position
+                            parent_item.insertRow(dest_row, row_items)
+                            # Select the moved item
+                            new_index = self.tree_model.index(dest_row, 0, parent_index)
+                            self.tree_view.setCurrentIndex(new_index)
+                    
+                    # Clean up
+                    delattr(self.tree_view, "_pending_reorder")
+            
+            self.statusBar().showMessage("Items reordered", 2000)
+        except httpx.HTTPError as exc:
+            self._alert_api_error(exc, "Failed to reorder items")
+            self.statusBar().clearMessage()
+            # Clean up on error
+            if hasattr(self.tree_view, "_pending_reorder"):
+                delattr(self.tree_view, "_pending_reorder")
+    
+    def _on_drag_status_changed(self, message: str) -> None:
+        """Update status bar during drag operations."""
+        if message:
+            self.statusBar().showMessage(message)
+        else:
+            # Clear status message after drag
+            if self.current_path:
+                display_path = path_to_colon(self.current_path) or self.current_path
+                self.statusBar().showMessage(f"Editing {display_path}")
 
     # --- Zim import --------------------------------------------------
 
@@ -5614,8 +5816,14 @@ class MainWindow(QMainWindow):
         )
 
     def _handle_move_response(self, dest_path: str, data: dict) -> None:
-        self._apply_path_map(data.get("page_map") or {})
-        self._register_link_path_map(data.get("page_map") or {})
+        path_map = data.get("page_map") or {}
+        self._apply_path_map(path_map)
+        # Immediately rewrite backlinks if enabled
+        if self.rewrite_backlinks_on_move and path_map:
+            try:
+                self._rewrite_links_on_disk_immediate(path_map)
+            except Exception as exc:
+                print(f"[UI] Failed to rewrite backlinks: {exc}")
         new_open_path = self._folder_to_file_path(dest_path)
         # If we were filtered to a subtree and the item moved outside it, clear the filter so it stays visible
         if self._nav_filter_path and dest_path and not dest_path.startswith(self._nav_filter_path):
@@ -5944,76 +6152,20 @@ class MainWindow(QMainWindow):
         print("[UI] Reindex requested (link update mode=reindex)")
         self._reindex_vault(show_progress=False)
 
-    def _rewrite_links(self, content: str) -> tuple[str, bool]:
-        """Rewrite links in markdown content using pending path maps (lazy mode)."""
-        if not content or not self._pending_link_path_maps:
-            return content, False
-        updated = content
-        changed = False
-        for mapping in list(self._pending_link_path_maps):
-            for old_path, new_path in mapping.items():
-                try:
-                    old_colon = path_to_colon(old_path)
-                    new_colon = path_to_colon(new_path)
-                except Exception:
-                    old_colon = ""
-                    new_colon = ""
-                replacements = []
-                if old_path and new_path:
-                    replacements.append((old_path, new_path))
-                if old_colon and new_colon:
-                    replacements.append((old_colon, new_colon))
-                for old, new in replacements:
-                    if old and old in updated:
-                        updated = updated.replace(old, new)
-                        changed = True
-        return updated, changed
-
-    def _rewrite_links_on_disk(self) -> None:
-        """Rewrite page links across the vault using pending path maps."""
-        if not self.vault_root or not self._pending_link_path_maps:
-            return
-        merged: dict[str, str] = {}
-        for mapping in self._pending_link_path_maps:
-            merged.update(mapping)
-        if not merged:
+    def _rewrite_links_on_disk_immediate(self, path_map: dict[str, str]) -> None:
+        """Rewrite page links across the vault immediately after a move."""
+        if not self.vault_root or not path_map:
             return
         try:
-            resp = self.http.post("/api/vault/update-links", json={"path_map": merged})
+            resp = self.http.post("/api/vault/update-links", json={"path_map": path_map})
             resp.raise_for_status()
             data = resp.json()
             touched = data.get("touched") or []
-            for path in touched:
-                print(f"[API] Link rewrite file: {path}")
+            if touched:
+                print(f"[UI] Rewrote backlinks in {len(touched)} file(s)")
+                self.statusBar().showMessage(f"Updated backlinks in {len(touched)} file(s)", 3000)
         except httpx.HTTPError as exc:
-            self._alert_api_error(exc, "Failed to rewrite links via API")
-
-    def _apply_rewritten_editor_content(self, new_content: str) -> None:
-        """Update editor text after a lazy link rewrite while attempting to preserve cursor."""
-        if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
-            print(f"[DEBUG _apply_rewritten_editor_content] called, cursor will be reset")
-        try:
-            cursor = self.editor.textCursor()
-            pos = cursor.position()
-        except Exception:
-            pos = None
-        self._suspend_autosave = True
-        self._suspend_dirty_tracking = True
-        try:
-            self.editor.set_markdown(new_content)
-        finally:
-            self._suspend_dirty_tracking = False
-            self._suspend_autosave = False
-        # Mark dirty since content changed programmatically
-        self._dirty_flag = True
-        self._update_dirty_indicator()
-        if pos is not None:
-            try:
-                cursor = self.editor.textCursor()
-                cursor.setPosition(min(pos, len(new_content)))
-                self.editor.setTextCursor(cursor)
-            except Exception:
-                pass
+            print(f"[UI] Failed to rewrite backlinks: {exc}")
 
     def _ensure_page_title(self, content: str, path: Optional[str]) -> str:
         """Ensure first non-empty line is a heading matching the leaf name if missing."""
@@ -6655,14 +6807,6 @@ class MainWindow(QMainWindow):
         if not self._ensure_writable("reindex the vault"):
             return
         print("[UI] Reindex start")
-        # Optionally rewrite page links on disk before reindexing using pending path maps
-        if self.update_links_on_index and self._pending_link_path_maps:
-            try:
-                self._rewrite_links_on_disk()
-            except Exception as exc:
-                print(f"[UI] Link rewrite during reindex failed: {exc}")
-        # Clear pending maps after optional rewrite to avoid repeated work
-        self._pending_link_path_maps.clear()
         
         root = Path(self.vault_root)
         txt_files = sorted(root.rglob(f"*{PAGE_SUFFIX}"))

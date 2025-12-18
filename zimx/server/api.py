@@ -230,6 +230,11 @@ class UpdateLinksPayload(BaseModel):
     path_map: dict[str, str]
 
 
+class ReorderPayload(BaseModel):
+    parent_path: str
+    page_order: List[str]
+
+
 class ModifiedRangePayload(BaseModel):
     start_date: str
     end_date: str
@@ -310,13 +315,26 @@ def vault_tree(path: str = "/", recursive: bool = True) -> dict:
         if normalized_path in ("/", ""):
             tree = _filter_out_journal(tree)
         order_map = config.fetch_display_order_map()
+        if normalized_path == "/":
+            print(f"{_ANSI_BLUE}[API] Root order_map sample: {list(order_map.items())[:5]}{_ANSI_RESET}")
         _sort_tree_nodes(tree, order_map)
+        if normalized_path == "/" and tree:
+            print(f"{_ANSI_BLUE}[API] Root tree order after sort: {[n.get('name') for n in tree[:5]]}{_ANSI_RESET}")
         _set_cached_tree(root, normalized_path, recursive, version, tree)
     print(
         f"{_ANSI_BLUE}[API] GET /api/vault/tree path={normalized_path} recursive={recursive} "
         f"version={version} cached={cache_hit}{_ANSI_RESET}"
     )
     return {"root": str(root), "tree": tree, "version": version}
+
+
+@app.get("/api/vault/stats")
+def vault_stats() -> dict:
+    """Get vault statistics including folder count for lazy loading decisions."""
+    root = vault_state.get_root()
+    folder_count = config.count_folders()
+    print(f"{_ANSI_BLUE}[API] GET /api/vault/stats folder_count={folder_count}{_ANSI_RESET}")
+    return {"folder_count": folder_count}
 
 
 @app.post("/api/file/read")
@@ -497,6 +515,22 @@ def file_delete(payload: FileDeletePayload) -> dict:
     except FileAccessError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True, **result}
+
+
+@app.post("/api/tree/reorder")
+def tree_reorder(payload: ReorderPayload) -> dict:
+    """Reorder pages within a parent folder without moving files."""
+    _get_vault_root()
+    print(f"{_ANSI_BLUE}[API] POST /api/tree/reorder parent={payload.parent_path} count={len(payload.page_order)}{_ANSI_RESET}")
+    try:
+        config.reorder_pages(payload.parent_path, payload.page_order)
+        version = config.bump_tree_version()
+        _clear_tree_cache()
+        print(f"{_ANSI_BLUE}[API] Reordered {len(payload.page_order)} items, new version={version}{_ANSI_RESET}")
+    except Exception as exc:
+        print(f"{_ANSI_BLUE}[API] Reorder failed: {exc}{_ANSI_RESET}")
+        raise HTTPException(status_code=500, detail=f"Failed to reorder: {exc}") from exc
+    return {"ok": True, "version": version}
 
 
 @app.post("/api/vault/update-links")
