@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional, Callable
+import errno
 import json
 import os
 import shutil
@@ -1495,12 +1496,19 @@ class MainWindow(QMainWindow):
 
     def _is_pid_active(self, pid: int, host: str) -> bool:
         """Best-effort check if a PID is alive on this host."""
-        if host != socket.gethostname():
+        try:
+            local_host = socket.gethostname()
+        except Exception:
+            local_host = ""
+        if host and local_host and host.lower() != local_host.lower():
             return False
         try:
             os.kill(pid, 0)  # Does not terminate; raises if not permitted or missing
             return True
-        except OSError:
+        except OSError as exc:
+            # EPERM/EACCES mean the process likely exists but we lack permission (common on Windows)
+            if exc.errno in (errno.EPERM, errno.EACCES):
+                return True
             return False
 
     def _ensure_writable(self, action: str, *, interactive: bool = True) -> bool:

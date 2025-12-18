@@ -8,6 +8,7 @@ import threading
 import time
 import traceback
 import shutil
+import tempfile
 from pathlib import Path
 
 import uvicorn
@@ -314,10 +315,35 @@ def _diag(msg: str) -> None:
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"[ZimxDiag {timestamp}] {msg}", file=sys.stderr)
 
+_FAULTHANDLER_FILE = None
+
+
+def _enable_faulthandler_log() -> None:
+    """Enable faulthandler to capture native/Python crashes to a temp log."""
+    global _FAULTHANDLER_FILE
+    if os.getenv("ZIMX_DISABLE_FAULTHANDLER", "0") not in ("0", "false", "False", ""):
+        return
+    try:
+        import faulthandler
+    except Exception:
+        return
+    try:
+        log_path = Path(tempfile.gettempdir()) / "zimx-faulthandler.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        _FAULTHANDLER_FILE = open(log_path, "a", buffering=1)
+        faulthandler.enable(_FAULTHANDLER_FILE)
+        _diag(f"Faulthandler logging to {log_path}")
+    except Exception as exc:
+        try:
+            _diag(f"Failed to enable faulthandler log: {exc}")
+        except Exception:
+            pass
+
 
 def main() -> None:
     args = _parse_args(sys.argv[1:])
     start_ts = time.time()
+    _enable_faulthandler_log()
     _diag("Application starting.")
     config.init_settings()
     _maybe_use_minimal_fonts()
