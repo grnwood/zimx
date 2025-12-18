@@ -152,23 +152,22 @@ class JumpToPageDialog(QDialog):
             QApplication.sendEvent(self.list_widget, event)
             if previous_focus is not self.list_widget:
                 previous_focus.setFocus()
+            event.accept()
             return
         # Handle Shift+J (down) and Shift+K (up) as arrow key equivalents
         elif event.key() == Qt.Key_J and (event.modifiers() & Qt.ShiftModifier):
-            previous_focus = self.focusWidget()
-            # Create a synthetic Down arrow key event
-            down_event = event.__class__(event.type(), Qt.Key_Down, Qt.NoModifier)
-            QApplication.sendEvent(self.list_widget, down_event)
-            if previous_focus is not self.list_widget:
-                previous_focus.setFocus()
+            # Directly manipulate list selection instead of sending synthetic events
+            current_row = self.list_widget.currentRow()
+            if current_row < self.list_widget.count() - 1:
+                self.list_widget.setCurrentRow(current_row + 1)
+            event.accept()
             return
         elif event.key() == Qt.Key_K and (event.modifiers() & Qt.ShiftModifier):
-            previous_focus = self.focusWidget()
-            # Create a synthetic Up arrow key event
-            up_event = event.__class__(event.type(), Qt.Key_Up, Qt.NoModifier)
-            QApplication.sendEvent(self.list_widget, up_event)
-            if previous_focus is not self.list_widget:
-                previous_focus.setFocus()
+            # Directly manipulate list selection instead of sending synthetic events
+            current_row = self.list_widget.currentRow()
+            if current_row > 0:
+                self.list_widget.setCurrentRow(current_row - 1)
+            event.accept()
             return
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
             if self._activate_current():
