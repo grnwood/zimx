@@ -5786,14 +5786,14 @@ class MarkdownEditor(QTextEdit):
         sb.setValue(sb.value() + step)
 
     def _doc_to_markdown(self) -> str:
-        """Convert document to markdown, preserving trailing newlines.
-        
-        Qt's toPlainText() STRIPS trailing newlines, so we must check for empty
-        trailing blocks to preserve them when saving.
+        """Convert document to markdown.
+
+        Uses QTextDocument blocks/fragments so inline images can be round-tripped
+        back into markdown. Trailing newlines are normalized to avoid file bloat
+        from accidental or repeated saves.
         """
         parts: list[str] = []
         block = self.document().begin()
-        block_count = 0
         while block.isValid():
             it = block.begin()
             while not it.atEnd():
@@ -5807,32 +5807,18 @@ class MarkdownEditor(QTextEdit):
                 else:
                     parts.append(fragment.text())
                 it += 1
-            block_count += 1
             block = block.next()
             if block.isValid():
                 parts.append("\n")
         
         result = "".join(parts)
-        
-        # Qt's toPlainText() strips trailing newlines, so we need to check for
-        # empty blocks at the end to restore them
-        # Count empty trailing blocks (these represent the newlines toPlainText stripped)
-        # Cap at 100 to prevent performance issues with files that have thousands of trailing newlines
-        if block_count > 0:
-            last_block = self.document().lastBlock()
-            empty_trailing_blocks = 0
-            check_block = last_block
-            max_trailing = 3  # Preserve minimal trailing newlines to prevent file bloat
-            while check_block.isValid() and check_block.text() == "" and empty_trailing_blocks < max_trailing:
-                empty_trailing_blocks += 1
-                check_block = check_block.previous()
-            
-            # Each empty trailing block represents a newline that was typed but toPlainText stripped
-            if empty_trailing_blocks > 0:
-                if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
-                    print(f"[DEBUG _doc_to_markdown] Found {empty_trailing_blocks} empty trailing blocks, adding newlines")
-                # Add newlines for the empty blocks
-                result += "\n" * empty_trailing_blocks
+
+        # Limit trailing newlines to keep saves stable and prevent runaway growth.
+        max_trailing = 3
+        stripped = result.rstrip("\n")
+        trailing = len(result) - len(stripped)
+        if trailing > max_trailing:
+            result = stripped + ("\n" * max_trailing)
         
         return result
 
