@@ -254,7 +254,7 @@ class TaskPanel(QWidget):
         self.filter_checkbox.toggled.connect(self._on_filter_checkbox_toggled)
         tags_row.addWidget(self.filter_checkbox)
         self.journal_checkbox = QCheckBox("Journal?")
-        self.journal_checkbox.setChecked(True)
+        self.journal_checkbox.setChecked(False)
         self.journal_checkbox.setVisible(False)
         self.journal_checkbox.setToolTip("Include tasks from the Journal subtree while filtered.")
         self.journal_checkbox.toggled.connect(self._on_journal_checkbox_toggled)
@@ -852,9 +852,14 @@ class TaskPanel(QWidget):
         self._refresh_tasks()
 
     def set_navigation_filter(self, prefix: Optional[str], refresh: bool = True) -> None:
+        prev_prefix = self._nav_filter_prefix
         normalized = self._normalize_task_path(prefix) if prefix else None
         self._nav_filter_prefix = normalized
         self._nav_filter_enabled = True
+        # When entering filter mode, default to excluding Journal tasks unless the user
+        # explicitly opted in during this filtered session.
+        if prev_prefix is None and normalized is not None:
+            self._include_journal = False
         self._update_filter_indicator()
         if refresh:
             self._refresh_tasks()

@@ -57,6 +57,8 @@ class CalendarPanel(QWidget):
     pageActivated = Signal(str)  # relative path to a page
     taskActivated = Signal(str, int)  # path, line number
     openInWindowRequested = Signal(str)
+    pageAboutToBeDeleted = Signal(str)  # emitted BEFORE page deletion (for editor unload)
+    pageDeleted = Signal(str)  # emitted AFTER page is deleted
 
     def __init__(
         self,
@@ -453,13 +455,15 @@ class CalendarPanel(QWidget):
         except ValueError:
             return
         self.set_calendar_date(y, m, d)
-        # If subpage, try selecting it
+        # If subpage, defer selection slightly to ensure tree is populated
         if len(parts) > idx + 4:
             # Handle both folder-based and flat subpages
             sub_name = Path(parts[-1]).stem
             if len(parts) > idx + 5:
                 sub_name = parts[idx + 4]
-            self._select_subpage_item(y, m, d, sub_name, rel_path)
+            # Defer selection to ensure day listing is populated
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(10, lambda: self._select_subpage_item(y, m, d, sub_name, rel_path))
         # Update insights list selection
         self._update_insights_for_selection(rel_path)
 
@@ -510,6 +514,24 @@ class CalendarPanel(QWidget):
                 widget.setFont(font)
             except Exception:
                 pass
+        
+        # Apply font to calendar's internal table view for date cells
+        if self.calendar_view:
+            try:
+                self.calendar_view.setFont(font)
+            except Exception:
+                pass
+        
+        # Apply font to all calendar child widgets (buttons, headers, etc.)
+        try:
+            for child in self.calendar.findChildren(QWidget):
+                try:
+                    child.setFont(font)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        
         if getattr(self, "ai_markdown_view", None):
             try:
                 self.ai_markdown_view.setFont(font)
@@ -2037,32 +2059,58 @@ class CalendarPanel(QWidget):
         abs_path = Path(self.vault_root) / rel_path.lstrip("/")
         if not abs_path.exists() or not abs_path.is_file():
             return
-        confirm = QMessageBox.question(
-            self,
-            "Delete Page",
-            f"Delete page:\n{path_to_colon(rel_path)}?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if confirm != QMessageBox.Yes:
-            return
+        
+        # Suppress focus border updates during deletion to prevent crashes
+        main_window = self.window()
+        if hasattr(main_window, '_suppress_focus_borders'):
+            main_window._suppress_focus_borders = True
+        
         try:
-            abs_path.unlink()
-        except Exception:
-            QMessageBox.warning(self, "Delete Page", "Failed to delete the page.")
-            return
-        # Clean up empty parent folders up to Journal
-        try:
-            parent = abs_path.parent
-            journal_root = Path(self.vault_root) / "Journal"
-            while parent != journal_root and parent.is_dir():
-                if any(parent.iterdir()):
-                    break
-                parent.rmdir()
-                parent = parent.parent
-        except Exception:
-            pass
-        self.refresh()
+            confirm = QMessageBox.question(
+                self,
+                "Delete Page",
+                f"Delete page:\n{path_to_colon(rel_path)}?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if confirm != QMessageBox.Yes:
+                return
+            
+            # Emit signal BEFORE deletion so main window can unload editor
+            # Use QTimer to defer and avoid focus change issues during signal processing
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(0, lambda: self.pageAboutToBeDeleted.emit(rel_path))
+            
+            # Give the signal handler time to process
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents()
+            
+            try:
+                abs_path.unlink()
+            except Exception:
+                QMessageBox.warning(self, "Delete Page", "Failed to delete the page.")
+                return
+            
+            # Emit signal to notify that page was deleted
+            self.pageDeleted.emit(rel_path)
+            
+            # Clean up empty parent folders up to Journal
+            try:
+                parent = abs_path.parent
+                journal_root = Path(self.vault_root) / "Journal"
+                while parent != journal_root and parent.is_dir():
+                    if any(parent.iterdir()):
+                        break
+                    parent.rmdir()
+                    parent = parent.parent
+            except Exception:
+                pass
+            
+            self.refresh()
+        finally:
+            # Restore focus border updates
+            if hasattr(main_window, '_suppress_focus_borders'):
+                main_window._suppress_focus_borders = False
 
     def _open_context_menu(self, pos) -> None:
         item = self.journal_tree.itemAt(pos)

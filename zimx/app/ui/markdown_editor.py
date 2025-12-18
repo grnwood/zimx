@@ -47,6 +47,7 @@ from .path_utils import path_to_colon, colon_to_path, ensure_root_colon_link
 from .heading_utils import heading_slug
 from .page_load_logger import PageLoadLogger
 from .ai_actions_data import AI_ACTION_GROUPS
+from .jump_dialog import JumpToPageDialog
 from zimx.app import config
 
 
@@ -1203,6 +1204,14 @@ class MarkdownEditor(QTextEdit):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._current_path: Optional[str] = None
+        self._last_context_menu_global_pos: Optional[QPoint] = None
+        self._context_menu_selection: Optional[tuple[int, int]] = None
+        # Context menus temporarily take focus (QMenu is a popup widget). That can trigger
+        # focusOutEvent and upstream autosave handlers; suppress that specific focus-loss.
+        self._suppress_focus_lost_once: bool = False
+        # General-purpose focus loss suppression used by popup overlays/dialogs that
+        # should not trigger autosave writes (e.g., one-shot prompt overlay).
+        self._focus_lost_suppression_depth: int = 0
         self._vault_root: Optional[Path] = None
         self._vi_mode_active: bool = False
         self._vi_block_cursor_enabled: bool = True  # default on, controlled by preferences
@@ -1226,6 +1235,7 @@ class MarkdownEditor(QTextEdit):
         self._page_load_logger: Optional[PageLoadLogger] = None
         self._open_in_window_callback: Optional[Callable[[str], None]] = None
         self._filter_nav_callback: Optional[Callable[[str], None]] = None
+        self._move_text_callback: Optional[Callable[[str, str], bool]] = None
         self._suppress_link_scan: bool = False
         self._suppress_vi_cursor: bool = False
         self._overlay_transition: bool = False  # True while a mode overlay is spinning up/down
@@ -1547,6 +1557,60 @@ class MarkdownEditor(QTextEdit):
     def set_filter_nav_callback(self, callback: Optional[Callable[[str], None]]) -> None:
         """Provide a handler to filter the navigation tree by the current page's subtree."""
         self._filter_nav_callback = callback
+
+    def set_move_text_callback(self, callback: Optional[Callable[[str, str], bool]]) -> None:
+        """Provide a handler that appends markdown text to a target page path."""
+        self._move_text_callback = callback
+
+    def _selected_display_text(self) -> str:
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            return ""
+        return cursor.selectedText().replace("\u2029", "\n")
+
+    def _move_selected_text_to_page(self, dest_page_path: str) -> bool:
+        """Append selection to dest page (via callback) and replace selection with a link."""
+        if not dest_page_path:
+            return False
+        if self._current_path and dest_page_path == self._current_path:
+            return False
+        if not self._move_text_callback:
+            return False
+        display_text = self._selected_display_text()
+        if not display_text.strip():
+            return False
+        markdown_text = self._from_display(display_text)
+        try:
+            ok = bool(self._move_text_callback(dest_page_path, markdown_text))
+        except Exception:
+            ok = False
+        if not ok:
+            return False
+        colon = path_to_colon(dest_page_path) or ""
+        if not colon:
+            return False
+        self.insert_link(colon)
+        return True
+
+    def _move_text_via_jump_dialog(self) -> None:
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            return
+        anchor = self._last_context_menu_global_pos
+        dialog = JumpToPageDialog(self, compact=True, geometry_key=None, anchor_global_pos=anchor)
+        # Opening a modal dialog steals focus from the editor; suppress focusLost so
+        # upstream autosave handlers don't write just for showing the dialog.
+        self._suppress_focus_lost_once = True
+        try:
+            result = dialog.exec()
+        finally:
+            self._suppress_focus_lost_once = False
+        if result != QDialog.Accepted:
+            return
+        dest = dialog.selected_path()
+        if not dest:
+            return
+        self._move_selected_text_to_page(dest)
 
     def _mark_page_load(self, label: str) -> None:
         if self._page_load_logger:
@@ -2487,7 +2551,16 @@ class MarkdownEditor(QTextEdit):
 
     def focusOutEvent(self, event):  # type: ignore[override]
         super().focusOutEvent(event)
+        if self._suppress_focus_lost_once or self._focus_lost_suppression_depth > 0:
+            self._suppress_focus_lost_once = False
+            return
         self.focusLost.emit()
+
+    def push_focus_lost_suppression(self) -> None:
+        self._focus_lost_suppression_depth += 1
+
+    def pop_focus_lost_suppression(self) -> None:
+        self._focus_lost_suppression_depth = max(0, self._focus_lost_suppression_depth - 1)
 
     def _handle_read_only_keypress(self, event: QKeyEvent) -> bool:
         """Allow navigation/copy but block mutations when read-only."""
@@ -2774,8 +2847,16 @@ class MarkdownEditor(QTextEdit):
                     self._finalize_heading_block(block)
 
     def contextMenuEvent(self, event):  # type: ignore[override]
-        menu = None
-        # Check if right-clicking on an image
+        self._last_context_menu_global_pos = event.globalPos()
+        if self._context_menu_selection:
+            try:
+                sel_start, sel_end = self._context_menu_selection
+                restore = QTextCursor(self.document())
+                restore.setPosition(sel_start)
+                restore.setPosition(sel_end, QTextCursor.MoveMode.KeepAnchor)
+                self.setTextCursor(restore)
+            except Exception:
+                pass
         if _DETAILED_LOGGING:
             print(
                 f"[AI Menu Debug] contextMenuEvent path={self._current_path!r} "
@@ -2783,54 +2864,106 @@ class MarkdownEditor(QTextEdit):
                 f"ai_chat_available={self._ai_chat_available} "
                 f"text_len={len(self.toPlainText())}"
             )
+
         image_hit = self._image_at_position(event.pos())
         if image_hit:
-            cursor, fmt = image_hit
-            # Store the image name as unique identifier instead of position
+            _, fmt = image_hit
             image_name = fmt.name()
             menu = QMenu(self)
-            self._add_ai_actions_entry(menu)
+            self._add_ai_actions_entry(menu, as_submenu=True)
             for width in (300, 600, 900):
                 action = menu.addAction(f"{width}px")
-                action.triggered.connect(lambda checked=False, w=width, name=image_name: self._resize_image_by_name(name, w))
+                action.triggered.connect(
+                    lambda checked=False, w=width, name=image_name: self._resize_image_by_name(name, w)
+                )
             menu.addSeparator()
             reset_action = menu.addAction("Original Size")
-            reset_action.triggered.connect(lambda checked=False, name=image_name: self._resize_image_by_name(name, None))
+            reset_action.triggered.connect(
+                lambda checked=False, name=image_name: self._resize_image_by_name(name, None)
+            )
             menu.addSeparator()
             custom_action = menu.addAction("Custom…")
-            custom_action.triggered.connect(lambda checked=False, name=image_name: self._prompt_image_width_by_name(name))
+            custom_action.triggered.connect(
+                lambda checked=False, name=image_name: self._prompt_image_width_by_name(name)
+            )
+            self._suppress_focus_lost_once = True
             menu.exec(event.globalPos())
+            self._suppress_focus_lost_once = False
+            self._context_menu_selection = None
             return
-        
-        # Check if right-clicking on a link
+
         click_cursor = self.cursorForPosition(event.pos())
         md_link = self._markdown_link_at_cursor(click_cursor)
         plain_link = self._link_under_cursor(click_cursor)
         if md_link or plain_link:
             menu = QMenu(self)
-            self._add_ai_actions_entry(menu)
-            # Edit Link option
-            edit_action = menu.addAction("Edit Link…")
+            self._add_ai_actions_entry(menu, as_submenu=True)
+
+            base_menu = self.createStandardContextMenu()
+            try:
+                self._install_copy_actions(base_menu)
+            except Exception:
+                pass
+            edit_sub = menu.addMenu("Edit")
+            for act in base_menu.actions():
+                edit_sub.addAction(act)
+
+            link_sub = menu.addMenu("Link")
+            edit_action = link_sub.addAction("Edit Link…")
             edit_action.triggered.connect(lambda: self._edit_link_at_cursor(click_cursor))
-            menu.addSeparator()
-            # Remove Link option
-            remove_action = menu.addAction("Remove Link")
+            remove_action = link_sub.addAction("Remove Link")
             remove_action.triggered.connect(lambda: self._remove_link_at_cursor(click_cursor))
-            
-            # Copy Link to Location option (copy the linked page's path)
-            menu.addSeparator()
-            copy_action = menu.addAction("Copy Link to Location")
+            link_sub.addSeparator()
             link_for_copy = md_link[3] if md_link else plain_link
+            copy_action = link_sub.addAction("Copy Link Target")
             copy_action.triggered.connect(lambda: self._copy_link_to_location(link_for_copy))
-            insert_date_action = menu.addAction("Insert Date…")
-            insert_date_action.triggered.connect(self.insertDateRequested)
-            if self._filter_nav_callback and self._current_path:
-                filter_action = menu.addAction("Filter navigator to this subtree")
-                filter_action.triggered.connect(lambda: self._filter_nav_callback(self._current_path or ""))
+
+            if self._current_path:
+                page_sub = menu.addMenu("Page")
+                copy_page_action = page_sub.addAction("Copy link to this Page")
+                copy_page_action.triggered.connect(
+                    lambda: self._copy_link_to_location(link_text=None, anchor_text=None)
+                )
+                edit_src_action = page_sub.addAction("Edit Page Source")
+                edit_src_action.triggered.connect(
+                    lambda: self.editPageSourceRequested.emit(self._current_path or "")
+                )
+                open_loc_action = page_sub.addAction("Open Page Location")
+                open_loc_action.triggered.connect(
+                    lambda: self.openFileLocationRequested.emit(self._current_path or "")
+                )
+                open_popup_action = page_sub.addAction("Open Page in New Editor")
+                open_popup_action.setEnabled(bool(self._open_in_window_callback))
+                if self._open_in_window_callback:
+                    open_popup_action.triggered.connect(
+                        lambda: self._open_in_window_callback(self._current_path or "")
+                    )
+
+                nav_sub = menu.addMenu("Navigate")
+                filter_action = nav_sub.addAction("Filter Nav From Here")
+                filter_action.setEnabled(bool(self._filter_nav_callback))
+                if self._filter_nav_callback:
+                    filter_action.triggered.connect(
+                        lambda: self._filter_nav_callback(self._current_path or "")
+                    )
+                locate_tree_action = nav_sub.addAction("Locate in Page Tree")
+                locate_tree_action.triggered.connect(
+                    lambda: self.locateInNavigatorRequested.emit(self._current_path or "")
+                )
+                backlinks_action = nav_sub.addAction("Link Graph / Navigator")
+                backlinks_action.triggered.connect(
+                    lambda: self.backlinksRequested.emit(self._current_path or "")
+                )
+
+                move_action = menu.addAction("Move Text…")
+                move_action.setEnabled(self.textCursor().hasSelection())
+                move_action.triggered.connect(self._move_text_via_jump_dialog)
+            self._suppress_focus_lost_once = True
             menu.exec(event.globalPos())
+            self._suppress_focus_lost_once = False
+            self._context_menu_selection = None
             return
-        
-        # Check if right-clicking anywhere in the editor (for Copy Link to Location)
+
         if self._current_path:
             base_menu = self.createStandardContextMenu()
             try:
@@ -2839,59 +2972,54 @@ class MarkdownEditor(QTextEdit):
                 pass
             menu = QMenu(self)
             self._add_ai_actions_entry(menu, as_submenu=True)
+
             edit_sub = menu.addMenu("Edit")
             for act in base_menu.actions():
                 edit_sub.addAction(act)
-            copy_sub = menu.addMenu("Copy / Share")
-            
-            # Add "Copy as HTML" option if text is selected
-            cursor = self.textCursor()
-            if cursor.hasSelection():
-                copy_html_action = copy_sub.addAction("Copy as HTML")
-                copy_html_action.triggered.connect(self._copy_selection_as_html)
-                copy_sub.addSeparator()
-            # Get heading text if right-click is on a heading line
-            click_cursor = self.cursorForPosition(event.pos())
-            line_no = click_cursor.blockNumber() + 1
-            heading_text = None
-            for entry in self._heading_outline:
-                if int(entry.get("line", 0)) == line_no:
-                    heading_text = entry.get("title", "") or None
-                    break
-            copy_label = "Copy Link to this heading" if heading_text else "Copy Link to this Page"
-            copy_action = copy_sub.addAction(copy_label)
-            copy_action.triggered.connect(
-                lambda: self._copy_link_to_location(link_text=None, anchor_text=heading_text)
-            )
 
             page_sub = menu.addMenu("Page")
-            insert_date_action = page_sub.addAction("Insert Date…")
-            insert_date_action.triggered.connect(self.insertDateRequested)
+            copy_page_action = page_sub.addAction("Copy link to this Page")
+            copy_page_action.triggered.connect(
+                lambda: self._copy_link_to_location(link_text=None, anchor_text=None)
+            )
             edit_src_action = page_sub.addAction("Edit Page Source")
-            edit_src_action.triggered.connect(lambda: self.editPageSourceRequested.emit(self._current_path))
-            open_loc_action = page_sub.addAction("Open File Location")
-            open_loc_action.triggered.connect(lambda: self.openFileLocationRequested.emit(self._current_path))
+            edit_src_action.triggered.connect(
+                lambda: self.editPageSourceRequested.emit(self._current_path or "")
+            )
+            open_loc_action = page_sub.addAction("Open Page Location")
+            open_loc_action.triggered.connect(
+                lambda: self.openFileLocationRequested.emit(self._current_path or "")
+            )
+            open_popup_action = page_sub.addAction("Open Page in New Editor")
+            open_popup_action.setEnabled(bool(self._open_in_window_callback))
+            if self._open_in_window_callback:
+                open_popup_action.triggered.connect(
+                    lambda: self._open_in_window_callback(self._current_path or "")
+                )
 
             nav_sub = menu.addMenu("Navigate")
-            locate_nav_action = nav_sub.addAction("Locate Page in Navigator")
-            locate_nav_action.triggered.connect(lambda: self.locateInNavigatorRequested.emit(self._current_path or ""))
-            if self._open_in_window_callback:
-                open_popup_action = nav_sub.addAction("Open in New Editor")
-                open_popup_action.triggered.connect(lambda: self._open_in_window_callback(self._current_path or ""))
-            backlinks_action = nav_sub.addAction("Locate Backlinks/Link Navigator")
-            backlinks_action.triggered.connect(
-                lambda: self.backlinksRequested.emit(self._current_path or "")
-            )
+            filter_action = nav_sub.addAction("Filter Nav From Here")
+            filter_action.setEnabled(bool(self._filter_nav_callback))
+            if self._filter_nav_callback:
+                filter_action.triggered.connect(lambda: self._filter_nav_callback(self._current_path or ""))
             locate_tree_action = nav_sub.addAction("Locate in Page Tree")
             locate_tree_action.triggered.connect(
                 lambda: self.locateInNavigatorRequested.emit(self._current_path or "")
             )
-            if self._filter_nav_callback and self._current_path:
-                filter_action = nav_sub.addAction("Filter Page Tree From Here")
-                filter_action.triggered.connect(lambda: self._filter_nav_callback(self._current_path or ""))
+            backlinks_action = nav_sub.addAction("Link Graph / Navigator")
+            backlinks_action.triggered.connect(lambda: self.backlinksRequested.emit(self._current_path or ""))
+
+            move_action = menu.addAction("Move Text…")
+            move_action.setEnabled(self.textCursor().hasSelection())
+            move_action.triggered.connect(self._move_text_via_jump_dialog)
+
+            self._suppress_focus_lost_once = True
             menu.exec(event.globalPos())
+            self._suppress_focus_lost_once = False
+            self._context_menu_selection = None
             return
        
+        self._context_menu_selection = None
         super().contextMenuEvent(event)
 
     def _ai_chat_payload_text(self) -> str:
@@ -3035,6 +3163,9 @@ class MarkdownEditor(QTextEdit):
     ) -> None:
         if not self._ai_actions_enabled or not config.load_enable_ai_chats():
             return
+        # Showing the overlay steals focus from the editor (Qt.Popup). Upstream focusLost
+        # handlers may autosave; suppress that focus-loss for this interaction.
+        self._suppress_focus_lost_once = True
         cursor = QTextCursor(self.textCursor())
         if cursor.hasSelection():
             sel_start = cursor.selectionStart()
@@ -3043,6 +3174,7 @@ class MarkdownEditor(QTextEdit):
             sel_start = sel_end = cursor.position()
         text = text_override if text_override is not None else self._ai_chat_payload_text()
         if not text:
+            self._suppress_focus_lost_once = False
             return
         self._suspend_vi_for_overlay()
         self._ai_action_overlay.open(
@@ -3051,6 +3183,7 @@ class MarkdownEditor(QTextEdit):
             chat_active=getattr(self, "_ai_chat_active", False) if chat_active is None else chat_active,
             anchor=anchor,
         )
+        self._suppress_focus_lost_once = False
         try:
             restore = QTextCursor(self.document())
             restore.setPosition(sel_start)
@@ -3082,23 +3215,26 @@ class MarkdownEditor(QTextEdit):
         self.set_vi_mode(self._overlay_vi_mode_before)
         self._overlay_vi_mode_before = None
 
-    def _add_ai_actions_entry(self, menu: QMenu, *, as_submenu: bool = False) -> Optional[QMenu]:
-        """Insert AI actions; optionally tuck them inside a submenu."""
+    def _add_ai_actions_entry(self, menu: QMenu, *, as_submenu: bool = False) -> None:
+        """Insert a single AI Actions entry that opens the AI actions panel.
+
+        `as_submenu` is ignored (kept for call-site compatibility).
+        """
         if not (self._ai_actions_enabled and config.load_enable_ai_chats()):
             return None
-        target = menu.addMenu("AI") if as_submenu else menu
-        one_shot = QAction("One-Shot Prompt Selection", self)
-        one_shot.triggered.connect(self._emit_one_shot_selection)
-        ai_action = QAction("AI Actions...\tCtrl+Shift+P", self)
-        ai_action.triggered.connect(self._show_ai_action_overlay)
-        if as_submenu:
-            target.addAction(one_shot)
-            target.addAction(ai_action)
+        ai_action = QAction("AI Actions...", self)
+        ai_action.triggered.connect(
+            lambda checked=False: self._show_ai_action_overlay(anchor=self._last_context_menu_global_pos)
+        )
+        existing = menu.actions()
+        if existing:
+            first = existing[0]
+            menu.insertAction(first, ai_action)
+            menu.insertSeparator(first)
         else:
-            first = target.actions()[0] if target.actions() else None
-            target.insertAction(first, ai_action)
-            target.insertAction(ai_action, one_shot)
-        return target
+            menu.addAction(ai_action)
+            menu.addSeparator()
+        return None
     
     def dragEnterEvent(self, event):  # type: ignore[override]
         """Accept drag events with file URLs."""
@@ -3208,6 +3344,15 @@ class MarkdownEditor(QTextEdit):
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event):  # type: ignore[override]
+        # Preserve selection on right-click (opening context menu should not unselect buffer).
+        if event.button() == Qt.RightButton:
+            cursor = self.textCursor()
+            if cursor.hasSelection():
+                self._context_menu_selection = (cursor.selectionStart(), cursor.selectionEnd())
+                event.accept()
+                return
+            self._context_menu_selection = None
+
         # Single click on links to activate them
         if event.button() == Qt.LeftButton:
             cursor = self.cursorForPosition(event.pos())
@@ -3749,7 +3894,12 @@ class MarkdownEditor(QTextEdit):
         dlg.search.setFocus()
         self.begin_dialog_block()
         try:
-            if dlg.exec() == QDialog.Accepted:
+            self._suppress_focus_lost_once = True
+            try:
+                result = dlg.exec()
+            finally:
+                self._suppress_focus_lost_once = False
+            if result == QDialog.Accepted:
                 new_to = dlg.selected_colon_path() or link_val
                 raw_label = dlg.selected_link_name() or ""
                 if new_to and new_to.startswith(("http://", "https://")):
@@ -4969,7 +5119,14 @@ class MarkdownEditor(QTextEdit):
         if not block or not block.isValid():
             return
         fm = self.fontMetrics()
-        left_margin = fm.horizontalAdvance(indent + marker)
+        # Calculate tab width properly for hanging indent
+        # Replace tabs with equivalent spaces for consistent rendering
+        tab_width = self.tabStopDistance()
+        char_width = fm.horizontalAdvance(" ")
+        spaces_per_tab = int(tab_width / char_width) if char_width > 0 else 4
+        indent_visual = indent.replace("\t", " " * spaces_per_tab)
+        
+        left_margin = fm.horizontalAdvance(indent_visual + marker)
         text_indent = -fm.horizontalAdvance(marker)
         fmt = block.blockFormat()
         if fmt.leftMargin() == left_margin and fmt.textIndent() == text_indent:

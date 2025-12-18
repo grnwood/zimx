@@ -476,6 +476,7 @@ class MainWindow(QMainWindow):
         self._vi_enable_pending: bool = False
         self._dirty_flag: bool = False
         self._suspend_dirty_tracking: bool = False
+        self._suppress_focus_borders: bool = False
         
         # Track virtual (unsaved) pages
         self.virtual_pages: set[str] = set()
@@ -595,6 +596,7 @@ class MainWindow(QMainWindow):
         self.editor.linkActivated.connect(self._open_link_in_context)
         self.editor.set_open_in_window_callback(self._open_page_editor_window)
         self.editor.set_filter_nav_callback(self._set_nav_filter)
+        self.editor.set_move_text_callback(self._append_text_to_page_from_editor)
         self.editor.findBarRequested.connect(self._on_editor_find_requested)
         self.find_bar = FindReplaceBar(self)
         self.find_bar.findNextRequested.connect(self._on_find_next_requested)
@@ -684,6 +686,8 @@ class MainWindow(QMainWindow):
         )
         self.right_panel.aiOverlayRequested.connect(self._on_ai_overlay_requested)
         self.right_panel.openInWindowRequested.connect(self._open_page_editor_window)
+        self.right_panel.pageAboutToBeDeleted.connect(self._handle_page_about_to_be_deleted)
+        self.right_panel.pageDeleted.connect(self._remove_deleted_paths_from_history)
         self.right_panel.openTaskWindowRequested.connect(self._open_task_panel_window)
         self.right_panel.openCalendarWindowRequested.connect(self._open_calendar_panel_window)
         self.right_panel.openLinkWindowRequested.connect(self._open_link_panel_window)
@@ -2806,6 +2810,59 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _append_text_to_page_from_editor(self, dest_path: str, markdown_text: str) -> bool:
+        """Append text to the end of dest_path using the HTTP API.
+
+        Returns True on success so the editor can replace the selection with a link.
+        """
+        if not dest_path or not markdown_text:
+            return False
+        if self._read_only:
+            self._alert("Read-only mode: cannot move text.")
+            return False
+        if not self._ensure_writable("move text", interactive=True):
+            return False
+        if self.current_path and dest_path == self.current_path:
+            self._alert("Destination page is the current page.")
+            return False
+        try:
+            resp = self.http.post("/api/file/read", json={"path": dest_path})
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            self._alert_api_error(exc, f"Failed to read {dest_path}")
+            return False
+        content = resp.json().get("content", "")
+
+        snippet = markdown_text.replace("\u2029", "\n").rstrip("\n")
+        if content:
+            if not content.endswith("\n"):
+                content += "\n"
+            if not content.endswith("\n\n"):
+                content += "\n"
+            new_content = content + snippet + "\n"
+        else:
+            new_content = snippet + "\n"
+
+        try:
+            write_resp = self.http.post("/api/file/write", json={"path": dest_path, "content": new_content})
+            write_resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            self._alert_api_error(exc, f"Failed to write {dest_path}")
+            return False
+
+        if config.has_active_vault():
+            try:
+                indexer.index_page(dest_path, new_content)
+            except Exception:
+                pass
+            try:
+                self.right_panel.refresh_tasks()
+                self.right_panel.refresh_links(dest_path)
+                self._refresh_detached_link_panels(dest_path)
+            except Exception:
+                pass
+        return True
+
     def _is_editor_dirty(self) -> bool:
         """Return True if the buffer differs from last saved content."""
         if not self.current_path:
@@ -2997,6 +3054,14 @@ class MainWindow(QMainWindow):
         # Check where focus is going
         from PySide6.QtWidgets import QApplication
         new_focus = QApplication.focusWidget()
+        # Skip autosave when focus is moving into the one-shot overlay.
+        try:
+            overlay = getattr(self, "_one_shot_overlay", None)
+            if overlay and overlay.isVisible() and (new_focus is overlay or overlay.isAncestorOf(new_focus)):
+                self._remember_history_cursor()
+                return
+        except Exception:
+            pass
         # Only skip save if focus is moving to the right panel
         if new_focus and (new_focus is self.right_panel or self.right_panel.isAncestorOf(new_focus)):
             # Focus is staying in the right panel, just remember cursor
@@ -4126,6 +4191,12 @@ class MainWindow(QMainWindow):
         if date_tuple:
             year, month, day = date_tuple
             self.right_panel.set_calendar_date(year, month, day)
+            # Also sync the journal tree navigation
+            try:
+                if hasattr(self.right_panel, 'calendar_panel') and self.right_panel.calendar_panel:
+                    self.right_panel.calendar_panel.set_current_page(path)
+            except Exception:
+                pass
 
     def _on_link_hovered(self, link: str) -> None:
         """Update status bar when hovering over a link."""
@@ -4508,6 +4579,8 @@ class MainWindow(QMainWindow):
         return None
 
     def _on_focus_changed(self, widget: Optional[QWidget]) -> None:
+        if getattr(self, '_suppress_focus_borders', False):
+            return
         target = self._focus_target_for_widget(widget)
         if target:
             if target in self._focus_recent:
@@ -4518,6 +4591,8 @@ class MainWindow(QMainWindow):
 
     def _apply_focus_borders(self) -> None:
         """Apply a subtle border around the widget that currently has focus."""
+        if getattr(self, '_suppress_focus_borders', False):
+            return
         focused = self.focusWidget()
         editor_has = focused is self.editor or (self.editor and self.editor.isAncestorOf(focused))
         tree_has = focused is self.tree_view or self.tree_view.isAncestorOf(focused)
@@ -4531,12 +4606,21 @@ class MainWindow(QMainWindow):
         )
         right_style = "QTabWidget::pane { border: 1px solid #4A90E2; border-radius:3px; }" if right_has else ""
         # Preserve existing styles by appending (simple approach)
-        self.editor.setStyleSheet(editor_style)
-        self.tree_view.setStyleSheet(tree_style)
-        if right_style:
-            self.right_panel.tabs.setStyleSheet(right_style)
-        else:
-            self.right_panel.tabs.setStyleSheet("")
+        try:
+            self.editor.setStyleSheet(editor_style)
+        except RuntimeError:
+            pass  # Widget may have been deleted
+        try:
+            self.tree_view.setStyleSheet(tree_style)
+        except RuntimeError:
+            pass  # Widget may have been deleted
+        try:
+            if right_style:
+                self.right_panel.tabs.setStyleSheet(right_style)
+            else:
+                self.right_panel.tabs.setStyleSheet("")
+        except RuntimeError:
+            pass  # Widget may have been deleted
 
     def _goto_line(self, line: int, select_line: bool = False) -> None:
         # Convert line number (1-indexed) to block number (0-indexed)
@@ -4836,9 +4920,7 @@ class MainWindow(QMainWindow):
         self.right_panel.focus_ai_chat_input()
 
     def _perform_one_shot_prompt(self, text: str) -> None:
-        """Send selected text as a one-shot user message to the configured server/model
-        using a lightweight system prompt, then replace the selected text with the LLM reply.
-        """
+        """Run the One-Shot prompt in an overlay and insert on Accept."""
         if not text or not text.strip():
             self.statusBar().showMessage("Select text to run One-Shot Prompt on.", 4000)
             return
@@ -4851,12 +4933,15 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("AI Chat panel not available; enable AI Chats.", 4000)
             return
 
-        # Prefer the system default server/model from Preferences. Fall back
-        # to the AI chat panel's current server/model if no system default is set.
         try:
-            from .ai_chat_panel import ApiWorker, ServerManager
+            from .ai_chat_panel import ServerManager
         except Exception:
-            self.statusBar().showMessage("API worker unavailable.", 4000)
+            self.statusBar().showMessage("AI worker unavailable.", 4000)
+            return
+        try:
+            from .one_shot_overlay import OneShotPromptOverlay
+        except Exception:
+            self.statusBar().showMessage("One-Shot overlay unavailable.", 4000)
             return
 
         server_config: dict = {}
@@ -4873,7 +4958,6 @@ class MainWindow(QMainWindow):
         except Exception:
             server_config = {}
 
-        # If no system default, fall back to panel's current server
         if not server_config:
             server_config = getattr(panel, "current_server", None) or {}
 
@@ -4881,72 +4965,78 @@ class MainWindow(QMainWindow):
             default_model_name = config.load_default_ai_model()
         except Exception:
             default_model_name = None
-
         if default_model_name:
             model = default_model_name
         else:
-            # prefer server default, then panel model combo
             model = (server_config.get("default_model") if server_config else None) or (
                 getattr(panel, "model_combo", None).currentText() if getattr(panel, "model_combo", None) else None
             ) or "gpt-3.5-turbo"
-        # Build messages: fixed system prompt, then user content
-        system_prompt = _load_one_shot_prompt()
-        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": text}]
-        # ApiWorker already imported above with ServerManager
-        editor = self.editor
-        cursor = editor.textCursor()
-        doc = editor.document()
+
+        doc = self.editor.document()
         start_pos = cursor.selectionStart()
         end_pos = cursor.selectionEnd()
-        original_text = cursor.selectedText().replace("\u2029", "\n")
 
-        # Change mouse cursor to wait state
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-
-        # Replace selection with header + empty body + footer to stream into
-        header = "\n\n"
-        footer = "\n\n"
-        try:
-            replace_cursor = QTextCursor(doc)
-            replace_cursor.setPosition(start_pos)
-            replace_cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
-            replace_cursor.beginEditBlock()
-            replace_cursor.removeSelectedText()
-            replace_cursor.insertText(header + footer)
-            replace_cursor.endEditBlock()
-        except Exception:
-            self.statusBar().showMessage("Failed to prepare one-shot buffer.", 3000)
-            return
-        body_start = start_pos + len(header)
-        self._one_shot_footer_pos = body_start
-        self._one_shot_footer_len = len(footer)
-        self._one_shot_range = (start_pos, body_start + len(footer), original_text)
-        self._one_shot_stream_used = False
-
-        # Keep reference so worker doesn't get GC'd
-        self._one_shot_worker = ApiWorker(server_config, messages, model, stream=True)
-
-        def _cleanup_cursor_and_worker() -> None:
+        def _accept_insert(assistant_text: str) -> None:
             try:
-                QApplication.restoreOverrideCursor()
+                replace_cursor = QTextCursor(doc)
+                replace_cursor.setPosition(start_pos)
+                replace_cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
+                replace_cursor.beginEditBlock()
+                replace_cursor.removeSelectedText()
+                replace_cursor.insertText(assistant_text)
+                replace_cursor.endEditBlock()
+                self.editor.setFocus()
             except Exception:
                 pass
-            self._one_shot_worker = None
-            for attr in (
-                "_one_shot_range",
-                "_one_shot_footer_pos",
-                "_one_shot_footer_len",
-                "_one_shot_stream_used",
-            ):
-                try:
-                    delattr(self, attr)
-                except Exception:
-                    pass
 
-        self._one_shot_worker.chunk.connect(lambda chunk: self._append_one_shot_chunk(doc, chunk))
-        self._one_shot_worker.finished.connect(lambda full: self._finalize_one_shot(doc, full))
-        self._one_shot_worker.failed.connect(lambda err: self._one_shot_failed(err))
-        self._one_shot_worker.start()
+        system_prompt = _load_one_shot_prompt()
+        overlay = OneShotPromptOverlay(
+            parent=self,
+            server_config=server_config,
+            model=model,
+            system_prompt=system_prompt,
+            on_accept=_accept_insert,
+        )
+        try:
+            self._one_shot_overlay = overlay
+        except Exception:
+            pass
+        try:
+            self.editor.push_focus_lost_suppression()
+        except Exception:
+            try:
+                setattr(self.editor, "_suppress_focus_lost_once", True)
+            except Exception:
+                pass
+        # Disable autosave while the one-shot overlay is open (focus shifts / timers
+        # should not write the file during this workflow).
+        prev_suspend_autosave = bool(getattr(self, "_suspend_autosave", False))
+        self._suspend_autosave = True
+
+        def _overlay_cleanup() -> None:
+            try:
+                self.editor.pop_focus_lost_suppression()
+            except Exception:
+                pass
+            try:
+                self._suspend_autosave = prev_suspend_autosave
+            except Exception:
+                pass
+            try:
+                setattr(self, "_one_shot_overlay", None)
+            except Exception:
+                pass
+
+        try:
+            overlay.finished.connect(lambda *_: _overlay_cleanup())
+        except Exception:
+            pass
+        try:
+            geo = self.geometry()
+            overlay.move(geo.center() - overlay.rect().center())
+        except Exception:
+            pass
+        overlay.open_with_selection(text)
 
     def _append_one_shot_chunk(self, doc: QTextDocument, chunk: str) -> None:
         """Append streamed chunk into the one-shot buffer just before the footer."""
@@ -5628,6 +5718,10 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 self._alert(f"Failed to delete {folder_path}: {exc}")
                 return
+            
+            # Remove deleted paths from history buffer
+            self._remove_deleted_paths_from_history(folder_path)
+            
             if store:
                 try:
                     store.delete_chats_under(target_folder)  # type: ignore[attr-defined]
@@ -5980,6 +6074,52 @@ class MainWindow(QMainWindow):
         return last_line.strip() == "---"
 
     # --- History persistence & popup ---------------------------------
+
+    def _handle_page_about_to_be_deleted(self, rel_path: str) -> None:
+        """Handle page about to be deleted - unload editor if it's the current page."""
+        if not self.current_path or not rel_path:
+            return
+        
+        # Check if the page being deleted is currently open
+        if self.current_path == rel_path or self.current_path.endswith(rel_path):
+            try:
+                self.editor.unload_for_delete()
+            except Exception:
+                pass
+            self.current_path = None
+
+    def _remove_deleted_paths_from_history(self, deleted_folder_path: str) -> None:
+        """Remove deleted page(s) from history buffer and persist."""
+        # Normalize the deleted path
+        if deleted_folder_path.lower().endswith(str(PAGE_SUFFIX)):
+            deleted_folder_path = self._file_path_to_folder(deleted_folder_path)
+        
+        # Filter out any history entries that match or are subpaths of the deleted folder
+        original_len = len(self.page_history)
+        self.page_history = [
+            path for path in self.page_history
+            if not (path == deleted_folder_path or 
+                    path.lower().endswith(str(PAGE_SUFFIX)) and self._file_path_to_folder(path) == deleted_folder_path or
+                    path.startswith(deleted_folder_path + "/") or
+                    (path.lower().endswith(str(PAGE_SUFFIX)) and self._file_path_to_folder(path).startswith(deleted_folder_path + "/")))
+        ]
+        
+        # Remove cursor positions for deleted paths
+        deleted_paths = [k for k in self._history_cursor_positions.keys() 
+                        if k not in self.page_history]
+        for path in deleted_paths:
+            self._history_cursor_positions.pop(path, None)
+        
+        # Adjust history index if needed
+        if self.history_index >= len(self.page_history):
+            self.history_index = len(self.page_history) - 1
+        if self.history_index < 0 and self.page_history:
+            self.history_index = 0
+        
+        # Persist updated history if anything was removed
+        if len(self.page_history) != original_len:
+            self._persist_recent_history()
+            self._refresh_history_buttons()
 
     def _persist_recent_history(self) -> None:
         """Persist recent history to the vault DB."""

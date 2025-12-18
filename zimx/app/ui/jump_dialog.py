@@ -73,6 +73,10 @@ class JumpToPageDialog(QDialog):
         filter_prefix: str | None = None,
         filter_label: str | None = None,
         clear_filter_cb=None,
+        *,
+        compact: bool = False,
+        geometry_key: str | None = "jump_dialog",
+        anchor_global_pos=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Jump to page")
@@ -80,6 +84,9 @@ class JumpToPageDialog(QDialog):
         self._filter_prefix = filter_prefix
         self._filter_label = filter_label
         self._clear_filter_cb = clear_filter_cb
+        self._compact = bool(compact)
+        self._geometry_key = geometry_key
+        self._anchor_global_pos = anchor_global_pos
         
         # Set up geometry save timer (debounced)
         self.geometry_save_timer = QTimer(self)
@@ -88,7 +95,7 @@ class JumpToPageDialog(QDialog):
         self.geometry_save_timer.timeout.connect(self._save_geometry)
         
         # Make dialog same size as insert link dialog
-        self.resize(640, 360)
+        self.resize(520, 280) if self._compact else self.resize(640, 360)
         layout = QVBoxLayout()
 
         if self._filter_prefix:
@@ -126,7 +133,10 @@ class JumpToPageDialog(QDialog):
         self.setLayout(layout)
         
         # Restore saved geometry after layout is set up
-        self._restore_geometry()
+        if self._geometry_key:
+            self._restore_geometry()
+        elif self._anchor_global_pos is not None:
+            self._position_near_anchor()
         
         self.search.setFocus()
         self._refresh()
@@ -203,7 +213,9 @@ class JumpToPageDialog(QDialog):
     
     def _restore_geometry(self) -> None:
         """Restore saved dialog geometry."""
-        saved_geometry = config.load_dialog_geometry("jump_dialog")
+        if not self._geometry_key:
+            return
+        saved_geometry = config.load_dialog_geometry(self._geometry_key)
         if saved_geometry:
             try:
                 print(f"[Dialog] Restoring jump dialog geometry: {len(saved_geometry)} chars")
@@ -214,13 +226,40 @@ class JumpToPageDialog(QDialog):
                 print(f"[Dialog] Failed to restore jump dialog geometry: {e}")
         else:
             print("[Dialog] No saved jump dialog geometry found")
+
+    def _position_near_anchor(self) -> None:
+        """Position dialog near a global cursor point, clamped to the visible screen."""
+        try:
+            from PySide6.QtGui import QGuiApplication
+        except Exception:
+            return
+        anchor = self._anchor_global_pos
+        if anchor is None:
+            return
+        try:
+            screen = QGuiApplication.screenAt(anchor) or QGuiApplication.primaryScreen()
+            if not screen:
+                return
+            avail = screen.availableGeometry()
+            # Prefer below-right of the cursor, with a small offset.
+            x = anchor.x() + 12
+            y = anchor.y() + 12
+            w = self.width()
+            h = self.height()
+            x = max(avail.left(), min(x, avail.right() - w))
+            y = max(avail.top(), min(y, avail.bottom() - h))
+            self.move(x, y)
+        except Exception:
+            return
     
     def _save_geometry(self) -> None:
         """Save current dialog geometry."""
+        if not self._geometry_key:
+            return
         try:
             geometry_bytes = self.saveGeometry()
             geometry_b64 = geometry_bytes.toBase64().data().decode('ascii')
-            config.save_dialog_geometry("jump_dialog", geometry_b64)
+            config.save_dialog_geometry(self._geometry_key, geometry_b64)
             print(f"[Dialog] Saved jump dialog geometry: {len(geometry_b64)} chars")
         except Exception as e:
             print(f"[Dialog] Failed to save jump dialog geometry: {e}")

@@ -1818,11 +1818,73 @@ def search_pages(term: str, limit: int = 50) -> list[dict]:
     conn = _get_conn()
     if not conn:
         return []
+    # Navigation dialogs can be overwhelmed by auto-generated Journal day pages.
+    # Filter out bare day pages that have no subpages (e.g. :Journal:2026:01:14),
+    # while keeping day pages that *do* have subpages (and keeping the subpages).
+    def is_bare_journal_day_page(page_path: str) -> bool:
+        try:
+            cleaned = (page_path or "").strip()
+            if not cleaned.startswith("/"):
+                return False
+            parts = Path(cleaned.lstrip("/")).parts
+            if len(parts) != 5:
+                return False
+            if parts[0].lower() != "journal":
+                return False
+            year, month, day, filename = parts[1], parts[2], parts[3], parts[4]
+            if not (year.isdigit() and len(year) == 4):
+                return False
+            if not (month.isdigit() and 1 <= len(month) <= 2):
+                return False
+            if not (day.isdigit() and 1 <= len(day) <= 2):
+                return False
+            if not filename.endswith(PAGE_SUFFIX):
+                return False
+            return Path(filename).stem == day
+        except Exception:
+            return False
+
+    def filter_bare_journal_days_without_children(rows: list[dict]) -> list[dict]:
+        day_folders_by_path: dict[str, str] = {}
+        for row in rows:
+            page_path = row.get("path") if isinstance(row, dict) else None
+            if not isinstance(page_path, str) or not is_bare_journal_day_page(page_path):
+                continue
+            day_folders_by_path[page_path] = _folder_path_for_page(page_path)
+        if not day_folders_by_path:
+            return rows
+
+        # A "subpage" may be nested at any depth under the day folder (e.g.
+        # /Journal/YYYY/MM/DD/Topic/Topic.txt). Detect descendants by path prefix,
+        # not just direct children.
+        folders_with_children: set[str] = set()
+        try:
+            for day_page_path, folder in day_folders_by_path.items():
+                prefix = (folder.rstrip("/") + "/") if folder != "/" else "/"
+                cur = conn.execute(
+                    "SELECT 1 FROM pages WHERE path LIKE ? AND path <> ? LIMIT 1",
+                    (prefix + "%", day_page_path),
+                )
+                if cur.fetchone():
+                    folders_with_children.add(folder)
+        except sqlite3.OperationalError:
+            return rows
+
+        filtered: list[dict] = []
+        for row in rows:
+            page_path = row.get("path") if isinstance(row, dict) else None
+            if isinstance(page_path, str) and page_path in day_folders_by_path:
+                if day_folders_by_path[page_path] not in folders_with_children:
+                    continue
+            filtered.append(row)
+        return filtered
+
     term_lower = term.lower()
+    prefetch_limit = max(limit, min(limit * 5, 250))
     _ensure_page_cache_loaded()
-    cached = _search_cached_pages(term_lower, limit)
+    cached = _search_cached_pages(term_lower, prefetch_limit)
     if cached is not None:
-        return cached
+        return filter_bare_journal_days_without_children(cached)[:limit]
     like = f"%{term_lower}%"
     exact_path = f"/{term_lower}"
     starts_path = f"{exact_path}/%"
@@ -1842,7 +1904,7 @@ def search_pages(term: str, limit: int = 50) -> list[dict]:
             updated DESC
         LIMIT ?
         """,
-        (like, like, exact_path, starts_path, term_lower, like, limit),
+        (like, like, exact_path, starts_path, term_lower, like, prefetch_limit),
     )
     rows = cur.fetchall()
     results = [
@@ -1855,8 +1917,9 @@ def search_pages(term: str, limit: int = 50) -> list[dict]:
         }
         for row in rows
     ]
+    results = filter_bare_journal_days_without_children(results)
     _remember_page_search_result(term_lower, results)
-    return [{"path": row[0], "title": row[1]} for row in rows]
+    return [{"path": row["path"], "title": row.get("title")} for row in results[:limit]]
 
 
 def fetch_tag_summary() -> list[tuple[str, int]]:

@@ -37,6 +37,8 @@ class TabbedRightPanel(QWidget):
     openAiWindowRequested = Signal()
     openCalendarWindowRequested = Signal()
     filterClearRequested = Signal()
+    pageAboutToBeDeleted = Signal(str)  # page about to be deleted (for editor unload)
+    pageDeleted = Signal(str)  # page path deleted from calendar panel
     
     def __init__(
         self,
@@ -99,6 +101,8 @@ class TabbedRightPanel(QWidget):
         self.calendar_panel.pageActivated.connect(self.calendarPageActivated)
         self.calendar_panel.taskActivated.connect(self.calendarTaskActivated)
         self.calendar_panel.openInWindowRequested.connect(self.openInWindowRequested)
+        self.calendar_panel.pageAboutToBeDeleted.connect(self.pageAboutToBeDeleted)
+        self.calendar_panel.pageDeleted.connect(self.pageDeleted)
         self.link_panel.pageActivated.connect(self.linkActivated)
         self.link_panel.openInWindowRequested.connect(self.openInWindowRequested)
         

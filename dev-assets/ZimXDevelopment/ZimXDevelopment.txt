@@ -14,6 +14,7 @@ Logbook of all the development efforts on zim. yes!
 
 ### Calendar
 ---
+( )  not sure i really like the calendar panel, maybe need to rethink this. @cal
 (x)  I'm seeing some blue dates on a fresh calendar, i only have the 24th defined?  @cal
 		 	
 (x)  Add Calendar panel  @cal
@@ -27,7 +28,6 @@ Logbook of all the development efforts on zim. yes!
 	(this is great for clicking around on a filtered view or either review or context on next steps).
 (x)  add a 'today' button on the calendar widget @cal
 (x)  add a recept pages edited search on api, tie it into the calendar feature @cal
-( )  Journal now showing in file nav (after nav fixes), leave it or kill it? @cal
 
 
 ---
@@ -44,15 +44,18 @@ Logbook of all the development efforts on zim. yes!
 ### Edit
 ---
 	[:FullTextSearch|FullTextSearch]
-( )  right click menus still suck, fix. also right click is losing selected buffer @edit
+(x)  right click menus still suck, fix. also right click is losing selected buffer @edit
+	[:RightClickDesign|RightClickDesign]
+	
 ( )  there is something wrong with my ctrl-tab history switcher... needs to be MRU.. @edit
+
 ( )  when i paste a link i copied from a header or toc bar and paste into page it doesnt create the link in link navigator @edit
 	Ai is really not handling this well, I'm going to have to debug / fix this one myself.
 ( )  i added redo along with undo.  there is still something funky here but its mostly all usable, so leaving alone for now.  @edit
 ( )  there is a c++/dump issue sometimes messing around in the jump to or link view, need to investigate. @edit
-( )  tags need to be smarter about emails @edit
+(x)  tags need to be smarter about emails @edit
 		Username: joe.greenwood@capgemini.com
-( )  maybe ctrl-enter to get out of vi mode?  moving off home keys to esc is disrupting to flow. @edit
+(x)  maybe ctrl-enter to get out of vi mode?  moving off home keys to esc is disrupting to flow. @edit
 (x)  slight oddity with the dirty/save buffer on open as window (win32 only?) since vi edit mode maybe? @edit
 (x)  opened window (at least on calendar) not treated as a first class window in the os tab switcher maybe win32 only? @edit
 (x)  when i alt-tab back to docs editor should always load (and scroll if need be) to last cursor position @edit
