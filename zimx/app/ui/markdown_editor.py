@@ -1253,6 +1253,7 @@ class MarkdownEditor(QTextEdit):
         self._cursor_signals_connected = True
         self.cursorPositionChanged.connect(self._ensure_cursor_margin)
         self._display_guard = False
+        self._hanging_indent_guard = False
         self.textChanged.connect(self._enforce_display_symbols)
         self.viewport().installEventFilter(self)
         self._heading_timer = QTimer(self)
@@ -5120,7 +5121,7 @@ class MarkdownEditor(QTextEdit):
             return
         # Prevent recursion - setBlockFormat can trigger events on Windows
         # that may call back into formatting code
-        if self._display_guard:
+        if self._display_guard or self._hanging_indent_guard:
             return
         fm = self.fontMetrics()
         # Calculate tab width properly for hanging indent
@@ -5137,19 +5138,27 @@ class MarkdownEditor(QTextEdit):
             return
         fmt.setLeftMargin(left_margin)
         fmt.setTextIndent(text_indent)
-        cursor = QTextCursor(block)
-        cursor.setBlockFormat(fmt)
+        self._hanging_indent_guard = True
+        try:
+            cursor = QTextCursor(block)
+            cursor.setBlockFormat(fmt)
+        finally:
+            self._hanging_indent_guard = False
 
     def _clear_hanging_indent(self, block) -> None:
-        if not block or not block.isValid():
-            return
-        # Prevent recursion - setBlockFormat can trigger events on Windows
-        # that may call back into formatting code
-        if self._display_guard:
+        if not block or not bl or self._hanging_indent_guard:
             return
         fmt = block.blockFormat()
         if fmt.leftMargin() == 0 and fmt.textIndent() == 0:
             return
+        fmt.setLeftMargin(0)
+        fmt.setTextIndent(0)
+        self._hanging_indent_guard = True
+        try:
+            cursor = QTextCursor(block)
+            cursor.setBlockFormat(fmt)
+        finally:
+            self._hanging_indent_guard = False
         fmt.setLeftMargin(0)
         fmt.setTextIndent(0)
         cursor = QTextCursor(block)
