@@ -5146,7 +5146,11 @@ class MarkdownEditor(QTextEdit):
             self._hanging_indent_guard = False
 
     def _clear_hanging_indent(self, block) -> None:
-        if not block or not bl or self._hanging_indent_guard:
+        if not block or not block.isValid():
+            return
+        # Prevent recursion - setBlockFormat can trigger events on Windows
+        # that may call back into formatting code
+        if self._display_guard or self._hanging_indent_guard:
             return
         fmt = block.blockFormat()
         if fmt.leftMargin() == 0 and fmt.textIndent() == 0:
@@ -5159,10 +5163,6 @@ class MarkdownEditor(QTextEdit):
             cursor.setBlockFormat(fmt)
         finally:
             self._hanging_indent_guard = False
-        fmt.setLeftMargin(0)
-        fmt.setTextIndent(0)
-        cursor = QTextCursor(block)
-        cursor.setBlockFormat(fmt)
 
     def _finalize_heading_block(self, block) -> None:
         """Render a plain '# ' heading line into display form once editing is done."""
