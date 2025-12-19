@@ -8,6 +8,7 @@ The server should:
 - Keep the filesystem as the source of truth for page content.
 - Maintain a small SQLite "sidecar" DB that mirrors pages for search.
 - Provide a `GET /search?q=...` endpoint that searches full text across all pages and returns ranked results with snippets.
+- Optionally (in the UI) allow to search a subtree only (`?subtree=/Path/To/SubTree`)...
 
 --------------------------------
 CONTEXT / ASSUMPTIONS
@@ -21,13 +22,10 @@ CONTEXT / ASSUMPTIONS
 - There is already some SQLite usage in the app, OR we can add a dedicated SQLite file for search, e.g. `search_index.db`.
 - Use SQLite FTS5.
 
-If the project already has a DB helper / dependency, reuse it. Otherwise, create a minimal one for this feature.
-[:FullTextSearch:CamelCase|CamelCase]
-
 --------------------------------
 TASK 1 – Create SQLite FTS schema
 --------------------------------
-		![paste_image_003](./paste_image_003.png)INTEGER PRIMARY KEY
+INTEGER PRIMARY KEY
      - `path` TEXT NOT NULL UNIQUE   -- canonical file path or page identifier used by the API
      - `mtime` INTEGER NOT NULL      -- last modified time in epoch seconds
 
@@ -109,12 +107,35 @@ Return Python dictionaries like:
 
 ```python
 {
-  "path": "Project/ZimX/Design.md",
+  "path": "Project/ZimX/Design.txt",
   "snippet": "...some [highlighted] content...",
 }
 ```
 
 `search_index.py` should contain all DB-specific logic. FastAPI layer should only call these functions.
+
+TAGS -  page content will have '@' tags on them....  there are two contexts for this....
+
+task tags... these tag tasks depicted by '()' 
+( )  tag text @tag1 @tag2
+
+tags can also occur *outside* of the task context and then they apply to the page.
+
+Page Heading
+some page text @pageTag
+lore ipesm, ec
+
+I intend to be able to search the index by tags in both contexts.
+
+Example search query:
+
+'search term' = find everything with search term
+'search term @pageTag' = find everything with search term AND tag @pageTag
+
+'searchterm1 searchterm2 @pageTag1 @pageTag2' = find everything with searchterm1 OR searchterm2 OR @pageTag1 or @pageTag2
+
+'(searchterm1 searchterm2) AND (@pageTag1)' = find searchterm1 OR searmtherm2 AND @pageTag1
+etc.
 
 ---
 
@@ -152,12 +173,13 @@ Behavior:
 
 * Validate that `q` is non-empty.
 * Call `search_index.search_pages(q, limit)`.
+* Call search for a subpage tree
 * Return JSON response with an array of objects:
 
 ```json
 [
   {
-    "path": "Project/ZimX/Design.md",
+    "path": "Project/ZimX/Design.txt",
     "snippet": "...text with [q] in context..."
   },
   ...
@@ -179,30 +201,28 @@ If later we want to fetch the full page, clients should use the existing `/pages
 
 ---
 
-## TASK 6 – (Optional) CMD/REPL sanity test
-
-Add a small test utility (or script) that:
-
-* Inserts a couple of sample pages via `upsert_page`.
-* Searches for a query.
-* Prints results to stdout.
-
-This helps verify FTS wiring without needing the full FastAPI stack running.
-
----
+## TASK 7 - UI Implementation
+- to the right of the 'refresh' icon in the file navigator there should be a magnifying class search icon
+  - when this icon is selected the search tab opens
+  - the search tab will have a search entry box at the top with a go arrow button to the left of it to kick off the search.
+    - just to the left of the search entry box will be a question mark icon, when hovered over pops a label with search instructions.
+  - below the search entry box is a filter by page tree box, this allows for a type ahead index search (like ctrl-j does) to select a path (optional)
+  - below this is the search results display.  
+    - this should show search results based on PATH and then the hits
+      - Page/PageHit
+        - highlighted search term (clickable to load the page at hte line number with a flash animation)
+- the main editor will have a dialog on ctrl-shift-f
+  - dialog 'name 'search across vault'
+  - search term (same question icon with hover over instructions)
+  - below that a limit by page path (default it to current path) and leave it unchecked
+  - search button
+    - when search is clicked this window closes and transfers focus over to the search tab (make it visible if not shown)
+      - passes is the search term, page path limit, etc. so they are populated by default as the search is being performed.
+      - search results stream real time from the search api into the search results area of the search tab.
 
 ## CONSTRAINTS / STYLE
 
-* Use SQLite’s built-in `sqlite3` module unless the project already uses SQLAlchemy or another ORM; if it does, follow the existing pattern.
+* Use SQLite’s built-in `sqlite3` 
 * Keep the FTS integration minimal and straightforward.
 * Do NOT implement incremental re-indexing from disk; indexing is triggered only by API writes/deletes.
 * Do NOT use grep or external processes; all search is via SQLite FTS.
-
-```
-
----
-
-You can paste that whole block as a comment or as a prompt to your local coding assistant (Codex / Copilot-like) and let it generate the schema + helper module + FastAPI route in your actual project structure.
-
-If you want, I can also write a **second brief** focused just on “Refactor `search_index.py` to use connection pooling / dependency injection,” once you get the basic version in.
-```	

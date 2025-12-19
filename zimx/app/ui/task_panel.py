@@ -10,6 +10,7 @@ from PySide6.QtCore import QEvent, Qt, Signal, QSize, QTimer, QByteArray
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QStyle,
     QLineEdit,
@@ -212,6 +213,13 @@ class TaskPanel(QWidget):
         self.task_tree.setHeaderLabels(["!", "Task", "Due", "Path"])
         self.task_tree.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.task_tree.setRootIsDecorated(True)
+        self.task_tree.setAlternatingRowColors(True)
+        # Match search results alternating colors
+        from PySide6.QtGui import QPalette
+        palette = QApplication.palette()
+        window_color = palette.color(QPalette.Window)
+        alt_color = "rgb(220, 220, 220)" if window_color.lightness() > 128 else "rgb(70, 70, 70)"
+        self.task_tree.setStyleSheet(f"QTreeWidget::item:alternate {{ background: {alt_color}; }}")
         self.task_tree.itemActivated.connect(self._on_task_activated)
         self.task_tree.itemDoubleClicked.connect(self._on_task_double_clicked)
         self.task_tree.setSortingEnabled(True)

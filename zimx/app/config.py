@@ -2337,6 +2337,16 @@ def _ensure_tasks_fts(conn: sqlite3.Connection) -> None:
             _TASKS_FTS_ENABLED = preexisting and _tasks_fts_exists(conn)
 
 
+def _ensure_pages_search_fts(conn: sqlite3.Connection) -> None:
+    """Create the pages_search_fts FTS5 virtual table for full-text search."""
+    try:
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS pages_search_fts USING fts5(content, content_rowid='id')"
+        )
+    except sqlite3.OperationalError as e:
+        print(f"[Index] FTS5 for pages search not available: {e}")
+
+
 def _should_use_task_fts(conn: sqlite3.Connection, total_tasks: Optional[int] = None) -> bool:
     if not _TASKS_FTS_ENABLED:
         return False
@@ -2546,12 +2556,19 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             updated REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_attachments_page ON attachments(page_path);
+        CREATE TABLE IF NOT EXISTS pages_search_index (
+            id INTEGER PRIMARY KEY,
+            path TEXT NOT NULL UNIQUE,
+            mtime INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pages_search_path ON pages_search_index(path);
         """
     )
     _ensure_task_columns(conn)
     _ensure_task_indexes(conn)
     _ensure_page_columns(conn)
     _ensure_tasks_fts(conn)
+    _ensure_pages_search_fts(conn)
     conn.commit()
 
 

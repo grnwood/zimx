@@ -47,8 +47,8 @@ Logbook of all the development efforts on zim. yes!
 (x)  right click menus still suck, fix. also right click is losing selected buffer @edit
 	[:RightClickDesign|RightClickDesign]
 	
-( )  there is something wrong with my ctrl-tab history switcher... needs to be MRU.. @edit
-
+( )  there is something wrong with my ctrl-tab history switcher... needs to be MRU.. @edit @wt
+	MONITOR: i think this is working fine actually (2025-12-19).
 ( )  when i paste a link i copied from a header or toc bar and paste into page it doesnt create the link in link navigator @edit
 	Ai is really not handling this well, I'm going to have to debug / fix this one myself.
 ( )  i added redo along with undo.  there is still something funky here but its mostly all usable, so leaving alone for now.  @edit
@@ -150,11 +150,16 @@ a☑  something is still very wrong with camel links and colon link resoultion. 
 ( )  seems like the ai widget and prompt for calendar ai summary cant be found in pyinstalled bundle? @ai
 (x)  i lost my right click ai actions in the ai chat window text, lets put them back. @ai
 (x)  one shot promptiong @ai
-
+   
 ### Nice to Haves
 ---
 (x)  plant uml support in the editor @nice
-
+( )  extend tagging to pages, not just tasks @nice
+	this is probably a key feature for some, i don't use it much bit i might start.
+  - tags that are not part of a task....
+  - should have a 'tag' on global search
+  - probably implement global search first then.  [:FullTextSearch|:FullTextSearch]
+  - 
 
 ### SVG Vector Repo!
 [https://www.svgrepo.com/svg/445655/collapse-vertical|]

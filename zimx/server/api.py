@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field, ConfigDict
 
 from . import indexer
 from . import file_ops
+from . import search_index
 from .adapters import files
 from .adapters.files import FileAccessError
 from .state import vault_state
@@ -354,6 +355,14 @@ def file_write(payload: FileWritePayload) -> dict:
     root = vault_state.get_root()
     try:
         files.write_file(root, payload.path, payload.content)
+        # Update search index
+        db_path = config._vault_db_path()
+        if db_path:
+            import sqlite3
+            import time
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            search_index.upsert_page(conn, payload.path, int(time.time()), payload.content)
+            conn.close()
     except FileAccessError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True}
@@ -399,9 +408,31 @@ def api_tasks(
 
 
 @app.get("/api/search")
-def api_search(q: Optional[str] = None, limit: int = 5) -> dict:
-    hits = indexer.stub_search(q or "", limit)
-    return {"hits": hits}
+def api_search(
+    q: Optional[str] = None,
+    subtree: Optional[str] = None,
+    limit: int = 50
+) -> dict:
+    """Full-text search across all pages using FTS5."""
+    subtree_str = f" subtree={subtree}" if subtree else ""
+    print(f"{_ANSI_BLUE}[API] GET /api/search q={q}{subtree_str} limit={limit}{_ANSI_RESET}")
+    
+    if not q or not q.strip():
+        return {"results": []}
+    
+    db_path = config._vault_db_path()
+    if not db_path:
+        return {"results": []}
+    
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        results = search_index.search_pages(conn, q, subtree, limit)
+        conn.close()
+        return {"results": results}
+    except Exception as e:
+        print(f"[API] Search error: {e}")
+        return {"results": []}
 
 
 @app.post("/api/ai/chat")
@@ -441,6 +472,15 @@ def create_path(payload: CreatePathPayload) -> dict:
             page_path = payload.path
         if page_path:
             config.ensure_page_entry(page_path)
+            # Update search index for new page
+            db_path = config._vault_db_path()
+            if db_path:
+                import sqlite3
+                import time
+                conn = sqlite3.connect(db_path, check_same_thread=False)
+                content = payload.content or ""
+                search_index.upsert_page(conn, page_path, int(time.time()), content)
+                conn.close()
         version = config.bump_tree_version()
     except FileExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -454,6 +494,13 @@ def delete_path(payload: DeletePathPayload) -> dict:
     root = vault_state.get_root()
     try:
         result = file_ops.delete_folder(root, payload.path)
+        # Remove from search index
+        db_path = config._vault_db_path()
+        if db_path:
+            import sqlite3
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            search_index.delete_page(conn, payload.path)
+            conn.close()
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except FileAccessError as exc:

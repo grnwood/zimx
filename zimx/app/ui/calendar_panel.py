@@ -7,8 +7,8 @@ import calendar
 from datetime import date as Date
 from typing import Optional, Callable
 
-from PySide6.QtCore import Qt, Signal, QDate, QEvent, QTimer, QByteArray
-from PySide6.QtGui import QFont, QTextCharFormat, QKeyEvent, QColor, QIcon, QPainter, QPixmap
+from PySide6.QtCore import Qt, Signal, QDate, QEvent, QTimer, QByteArray, QRect
+from PySide6.QtGui import QFont, QTextCharFormat, QKeyEvent, QColor, QIcon, QPainter, QPixmap, QPalette, QBrush
 from PySide6.QtWidgets import (
     QApplication,
     QCalendarWidget,
@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (
     QTextBrowser,
     QStyle,
     QTabWidget,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
 )
 from PySide6.QtCore import QSize
 from PySide6.QtSvg import QSvgRenderer
@@ -48,6 +50,76 @@ PATH_ROLE = Qt.UserRole + 1
 LINE_ROLE = Qt.UserRole + 2
 RECENT_ACTION_ROLE = Qt.UserRole + 50
 TAG_PATTERN = re.compile(r"(?<![\w.+-])@([A-Za-z0-9_]+)")
+
+
+class MultiSelectCalendarDelegate(QStyledItemDelegate):
+    """Custom delegate to paint multi-selected dates with highlighting."""
+    
+    def __init__(self, parent=None, calendar_widget=None):
+        super().__init__(parent)
+        self.multi_selected_dates = set()
+        self.highlight_color = QColor("#4A90E2")
+        self.text_color = QColor("#FFFFFF")
+        self.calendar_widget = calendar_widget
+    
+    def paint(self, painter, option, index):
+        # Try multiple ways to get the date from this cell
+        date_val = index.data(Qt.UserRole)
+        
+        # If UserRole doesn't have the date, try to get it from the calendar widget
+        if not isinstance(date_val, QDate) or not date_val.isValid():
+            if self.calendar_widget:
+                # Try to map row/col to date
+                day_num = index.data(Qt.DisplayRole)
+                if isinstance(day_num, int) and day_num > 0:
+                    # Get current month/year from calendar
+                    year = self.calendar_widget.yearShown()
+                    month = self.calendar_widget.monthShown()
+                    date_val = QDate(year, month, day_num)
+        
+        # Check if this EXACT date (year, month, day) is in the multi-selection
+        is_multi_selected = False
+        if isinstance(date_val, QDate) and date_val.isValid():
+            # Check if date matches any in multi_selected_dates (exact match: year, month, day)
+            for sel_date in self.multi_selected_dates:
+                if (sel_date.isValid() and 
+                    sel_date.year() == date_val.year() and 
+                    sel_date.month() == date_val.month() and 
+                    sel_date.day() == date_val.day()):
+                    is_multi_selected = True
+                    break
+        
+        if is_multi_selected:
+            # Paint base without selection state
+            opt = QStyleOptionViewItem(option)
+            opt.state &= ~QStyle.State_Selected
+            super().paint(painter, opt, index)
+            
+            # Overlay our custom highlight
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing)
+            
+            # Paint background
+            rect = option.rect.adjusted(2, 2, -2, -2)
+            painter.setBrush(QBrush(self.highlight_color))
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(rect, 4, 4)
+            
+            # Draw text
+            painter.setPen(self.text_color)
+            font = QFont(option.font)
+            font.setBold(True)
+            font.setWeight(QFont.Bold)
+            painter.setFont(font)
+            
+            text = str(index.data(Qt.DisplayRole))
+            if text:
+                painter.drawText(option.rect, Qt.AlignCenter, text)
+            
+            painter.restore()
+        else:
+            # Use default painting
+            super().paint(painter, option, index)
 
 
 class CalendarPanel(QWidget):
@@ -99,24 +171,61 @@ class CalendarPanel(QWidget):
         self.calendar = QCalendarWidget()
         self.calendar.setGridVisible(True)
         self.calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
+        # Determine light vs dark mode
+        palette = QApplication.palette()
+        is_light = palette.color(QPalette.Window).lightness() > 128
+        
+        # Prominent selected day colors
+        selected_bg = "#4A90E2" if is_light else "#5BA3F5"  # Bright blue
+        selected_text = "#FFFFFF"
+        
+        # Friendly calendar styling
+        grid_color = "#DDDDDD" if is_light else "#555555"
+        header_bg = "#F5F5F5" if is_light else "#3A3A3A"
+        
         self.calendar.setStyleSheet(
-            """
-            QCalendarWidget QWidget {
+            f"""
+            QCalendarWidget QWidget {{
                 alternate-background-color: palette(base);
-            }
-            QCalendarWidget QToolButton {
-                padding: 4px 6px;
+            }}
+            QCalendarWidget QToolButton {{
+                padding: 6px 8px;
                 font-weight: bold;
-            }
-            QCalendarWidget QTableView {
-                selection-background-color: palette(highlight);
-                selection-color: palette(highlighted-text);
-                gridline-color: #888;
-            }
-            QCalendarWidget QTableView::item {
-                border: 1px solid #888;
+                border-radius: 4px;
+                background-color: {header_bg};
+            }}
+            QCalendarWidget QToolButton:hover {{
+                background-color: palette(highlight);
+                color: palette(highlighted-text);
+            }}
+            QCalendarWidget QMenu {{
+                background-color: palette(base);
+            }}
+            QCalendarWidget QSpinBox {{
+                border-radius: 4px;
                 padding: 4px;
-            }
+            }}
+            QCalendarWidget QTableView {{
+                selection-background-color: {selected_bg};
+                selection-color: {selected_text};
+                gridline-color: {grid_color};
+                border-radius: 6px;
+            }}
+            QCalendarWidget QTableView::item {{
+                border: 1px solid {grid_color};
+                padding: 6px;
+                border-radius: 4px;
+            }}
+            QCalendarWidget QTableView::item:selected {{
+                background-color: {selected_bg};
+                color: {selected_text};
+                font-weight: bold;
+                border: 2px solid {selected_bg};
+            }}
+            QCalendarWidget QTableView::item:hover {{
+                background-color: palette(highlight);
+                color: palette(highlighted-text);
+            }}
             """
         )
         self.calendar.clicked.connect(self._on_date_clicked)
@@ -124,12 +233,23 @@ class CalendarPanel(QWidget):
         self.calendar.selectionChanged.connect(self._update_today_visibility)
         self.calendar.setSelectedDate(QDate.currentDate())
         self.calendar.setFocusPolicy(Qt.StrongFocus)
+        # Install event filter on calendar itself to capture modifier keys
+        self.calendar.installEventFilter(self)
         self._update_today_visibility()
         self.calendar_view: QTableView | None = None
-        self._drag_selecting = False
-        self._last_drag_date: Optional[QDate] = None
         self._suppress_next_click = False
+        self._pending_shift_click = False
         self.multi_selected_dates: set[QDate] = {self.calendar.selectedDate()}
+        
+        # Create custom delegate for multi-selection highlighting
+        self.calendar_delegate = MultiSelectCalendarDelegate(calendar_widget=self.calendar)
+        self.calendar_delegate.multi_selected_dates = self.multi_selected_dates
+        # Determine colors based on theme
+        palette = QApplication.palette()
+        is_light = palette.color(QPalette.Window).lightness() > 128
+        self.calendar_delegate.highlight_color = QColor("#4A90E2" if is_light else "#5BA3F5")
+        self.calendar_delegate.text_color = QColor("#FFFFFF")
+        
         self._attach_calendar_view()
         self.day_insights = QWidget()
         self.day_insights.setMinimumWidth(180)
@@ -275,8 +395,9 @@ class CalendarPanel(QWidget):
             self.recent_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             row_h = self.recent_list.sizeHintForRow(0) or (self.recent_list.fontMetrics().height() + 6)
             row_h = max(20, row_h)
-            self.recent_list.setMinimumHeight(row_h * 8)
-            self.recent_list.setMaximumHeight(row_h * 8 + 12)
+            # Start collapsed to 1 row, will expand to 4 when data is loaded
+            self.recent_list.setMinimumHeight(row_h * 1)
+            self.recent_list.setMaximumHeight(row_h * 1 + 12)
         except Exception:
             pass
         self.day_insights_layout.addLayout(recent_row)
@@ -289,6 +410,11 @@ class CalendarPanel(QWidget):
         self.tasks_due_list.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tasks_due_list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.tasks_due_list.setAlternatingRowColors(True)
+        # Match search results alternating colors
+        palette = QApplication.palette()
+        window_color = palette.color(QPalette.Window)
+        alt_color = "rgb(220, 220, 220)" if window_color.lightness() > 128 else "rgb(70, 70, 70)"
+        self.tasks_due_list.setStyleSheet(f"QTreeWidget::item:alternate {{ background: {alt_color}; }}")
         self.tasks_due_list.itemActivated.connect(self._open_task_item)
         self.tasks_due_list.itemDoubleClicked.connect(self._open_task_item)
         self.tasks_due_list.setSortingEnabled(True)
@@ -329,6 +455,12 @@ class CalendarPanel(QWidget):
         self.journal_tree = QTreeWidget()
         self.journal_tree.setHeaderHidden(True)
         self.journal_tree.setColumnCount(1)
+        self.journal_tree.setAlternatingRowColors(True)
+        # Match search results alternating colors
+        palette = QApplication.palette()
+        window_color = palette.color(QPalette.Window)
+        alt_color = "rgb(220, 220, 220)" if window_color.lightness() > 128 else "rgb(70, 70, 70)"
+        self.journal_tree.setStyleSheet(f"QTreeWidget::item:alternate {{ background: {alt_color}; }}")
         self.journal_tree.itemClicked.connect(self._on_tree_activated)
         self.journal_tree.itemActivated.connect(self._on_tree_activated)
         self.journal_tree.setFocusPolicy(Qt.StrongFocus)
@@ -952,7 +1084,18 @@ class CalendarPanel(QWidget):
         if self._suppress_next_click:
             self._suppress_next_click = False
             return
-        self.multi_selected_dates = {date}
+        
+        # Check if shift key was detected in eventFilter or is currently held
+        if self._pending_shift_click or (QApplication.keyboardModifiers() & Qt.ShiftModifier):
+            # Shift+Click: add this date to the selection
+            self.multi_selected_dates.add(date)
+            print(f"[CALENDAR] _on_date_clicked Shift+Click: Added {date.toString('yyyy-MM-dd')}, total selected: {len(self.multi_selected_dates)}")
+            self._pending_shift_click = False
+        else:
+            # Regular click: select only this date (clear previous selection)
+            self.multi_selected_dates = {date}
+            print(f"[CALENDAR] _on_date_clicked Click: Selected only {date.toString('yyyy-MM-dd')}")
+        
         self._apply_multi_selection_formats()
         self._expand_to_date(date)
         self._update_day_listing(date)
@@ -1032,19 +1175,49 @@ class CalendarPanel(QWidget):
 
     def _apply_multi_selection_formats(self) -> None:
         """Highlight all currently multi-selected dates."""
-        if not self.multi_selected_dates:
-            return
-        highlight_color = self.palette().highlight().color()
-        highlight_color.setAlpha(210)
-        text_color = self.palette().highlightedText().color()
+        # Update the delegate
+        self.calendar_delegate.multi_selected_dates = self.multi_selected_dates.copy()
+        
+        # Also use QTextCharFormat for reliable highlighting
+        palette = QApplication.palette()
+        is_light = palette.color(QPalette.Window).lightness() > 128
+        highlight_color = QColor("#4A90E2" if is_light else "#5BA3F5")
+        text_color = QColor("#FFFFFF")
+        
+        # Get current displayed month
+        year = self.calendar.yearShown()
+        month = self.calendar.monthShown()
+        
+        # Clear ALL date formats (including adjacent month previews)
+        # Go back one month and forward one month to cover all visible dates
+        default_format = QTextCharFormat()
+        for month_offset in [-1, 0, 1]:
+            check_date = QDate(year, month, 1).addMonths(month_offset)
+            check_year = check_date.year()
+            check_month = check_date.month()
+            days_in_month = check_date.daysInMonth()
+            
+            for day in range(1, days_in_month + 1):
+                day_date = QDate(check_year, check_month, day)
+                self.calendar.setDateTextFormat(day_date, default_format)
+        
+        # Now apply highlighting ONLY to multi-selected dates that match exactly
         for date in self.multi_selected_dates:
             if date.isValid():
                 highlight_format = QTextCharFormat()
                 highlight_format.setBackground(highlight_color)
                 highlight_format.setForeground(text_color)
+                bold_font = QFont()
+                bold_font.setBold(True)
+                bold_font.setWeight(QFont.Bold)
+                highlight_format.setFont(bold_font)
                 self.calendar.setDateTextFormat(date, highlight_format)
-        if self.calendar_view and self.calendar_view.viewport():
-            self.calendar_view.viewport().update()
+        
+        # Force repaint
+        if self.calendar_view and Shiboken.isValid(self.calendar_view):
+            if self.calendar_view.viewport():
+                self.calendar_view.viewport().update()
+            self.calendar_view.update()
         self.calendar.update()
 
     def _attach_calendar_view(self) -> None:
@@ -1061,6 +1234,8 @@ class CalendarPanel(QWidget):
             self.calendar_view.setSelectionMode(QAbstractItemView.NoSelection)
             self.calendar_view.viewport().installEventFilter(self)
             self.calendar_view.viewport().setMouseTracking(True)
+            # Install the custom delegate for multi-selection highlighting
+            self.calendar_view.setItemDelegate(self.calendar_delegate)
 
     def _on_tree_activated(self, item: QTreeWidgetItem, column: int | None = None) -> None:  # noqa: ARG002
         """Sync calendar to the activated tree item and open pages."""
@@ -1160,6 +1335,15 @@ class CalendarPanel(QWidget):
         super().keyPressEvent(event)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
+        # Handle calendar widget events to detect shift-click
+        if obj is self.calendar:
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                if event.modifiers() & Qt.ShiftModifier:
+                    self._pending_shift_click = True
+                    print(f"[CALENDAR] Shift key detected on calendar click")
+                else:
+                    self._pending_shift_click = False
+        
         if (
             self.calendar_view
             and Shiboken.isValid(self.calendar_view)
@@ -1169,16 +1353,16 @@ class CalendarPanel(QWidget):
             if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
                 date = self._date_from_pos(event.pos())
                 if date.isValid():
-                    if event.modifiers() & Qt.ControlModifier:
-                        if date in self.multi_selected_dates:
-                            self.multi_selected_dates.remove(date)
-                        else:
-                            self.multi_selected_dates.add(date)
+                    if event.modifiers() & Qt.ShiftModifier:
+                        # Shift+Click: add this date to the selection
+                        self.multi_selected_dates.add(date)
+                        print(f"[CALENDAR] Viewport Shift+Click: Added {date.toString('yyyy-MM-dd')}, total selected: {len(self.multi_selected_dates)}")
                     else:
+                        # Regular click: select only this date (clear previous selection)
                         self.multi_selected_dates = {date}
+                        print(f"[CALENDAR] Viewport Click: Selected only {date.toString('yyyy-MM-dd')}")
+                    
                     self.calendar.setSelectedDate(date)
-                    self._last_drag_date = date
-                    self._drag_selecting = True
                     self._suppress_next_click = True
                     self._apply_multi_selection_formats()
                     self._update_day_listing(date)
@@ -1208,19 +1392,7 @@ class CalendarPanel(QWidget):
                     except Exception:
                         pass
                     return True
-            if event.type() == QEvent.MouseMove and self._drag_selecting and (event.buttons() & Qt.LeftButton):
-                date = self._date_from_pos(event.pos())
-                if date.isValid() and date != self._last_drag_date:
-                    self.multi_selected_dates.add(date)
-                    self._last_drag_date = date
-                    self.calendar.setSelectedDate(date)
-                    self._apply_multi_selection_formats()
-                    self._update_insights_for_selection()
-                    return True
-            if event.type() == QEvent.MouseButtonRelease and self._drag_selecting and event.button() == Qt.LeftButton:
-                self._drag_selecting = False
-                self._last_drag_date = None
-                return True
+
         return super().eventFilter(obj, event)
 
     def _date_from_pos(self, pos) -> QDate:
@@ -1835,6 +2007,15 @@ class CalendarPanel(QWidget):
         """Load the recent edited pages data."""
         if self._recent_fetching or not self._recent_pending_params:
             return
+        
+        # Expand to 4 rows when loading data
+        try:
+            row_h = self.recent_list.sizeHintForRow(0) or (self.recent_list.fontMetrics().height() + 6)
+            row_h = max(20, row_h)
+            self.recent_list.setMinimumHeight(row_h * 4)
+            self.recent_list.setMaximumHeight(row_h * 4 + 12)
+        except Exception:
+            pass
         
         # Mark as loading and show "Fetching data..."
         self._recent_fetching = True

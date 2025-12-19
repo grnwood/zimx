@@ -83,6 +83,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QDialogButtonBox,
     QPushButton,
+    QTabWidget,
 )
 
 from zimx.app import config, indexer
@@ -208,6 +209,8 @@ from .page_editor_window import PageEditorWindow
 from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
 from .mode_window import ModeWindow
 from .find_replace_bar import FindReplaceBar
+from .search_tab import SearchTab
+from .tags_tab import TagsTab
 
 
 PATH_ROLE = int(Qt.ItemDataRole.UserRole)
@@ -628,6 +631,19 @@ class MainWindow(QMainWindow):
         pal = QApplication.instance().palette()
         tooltip_fg = pal.color(QPalette.ToolTipText).name()
         tooltip_bg = pal.color(QPalette.ToolTipBase).name()
+        
+        # Search button to switch to search tab
+        self.search_tree_button = QToolButton()
+        self.search_tree_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogContentsView))
+        self.search_tree_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.search_tree_button.setAutoRaise(True)
+        self.search_tree_button.setToolTip(
+            f"<div style='color:{tooltip_fg}; background:{tooltip_bg}; padding:2px 4px;'>Search vault (Ctrl+Shift+F)</div>"
+        )
+        self.search_tree_button.clicked.connect(self._open_search_tab)
+        tree_header_layout.addWidget(self.search_tree_button)
+
+        tree_header_layout.addStretch()
 
         # Manual refresh button to reload tree data from the API
         self.refresh_tree_button = QToolButton()
@@ -640,16 +656,15 @@ class MainWindow(QMainWindow):
         self.refresh_tree_button.clicked.connect(self._refresh_tree)
         self.refresh_tree_button.setEnabled(False)
         tree_header_layout.addWidget(self.refresh_tree_button)
-
-        tree_header_layout.addStretch()
-
-        # Collapse-all button (aligned to the right)
+        
+        # Collapse-all button (aligned to the right, more prominent with white foreground)
         self.collapse_tree_button = QToolButton()
         icon_path = self._find_asset("collapse.svg")
         base_icon = self._load_icon(icon_path, Qt.white, size=16) or self.style().standardIcon(QStyle.SP_ToolBarVerticalExtensionButton)
         self.collapse_tree_button.setIcon(base_icon)
         self.collapse_tree_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.collapse_tree_button.setAutoRaise(True)
+        self.collapse_tree_button.setStyleSheet("QToolButton { color: white; }")
         self.collapse_tree_button.setToolTip(
             f"<div style='color:{tooltip_fg}; background:{tooltip_bg}; padding:2px 4px;'>Collapse all folders</div>"
         )
@@ -846,21 +861,34 @@ class MainWindow(QMainWindow):
         self.editor_split.setStretchFactor(1, 2)
         self.editor_split.splitterMoved.connect(self._on_splitter_moved)
 
-        # Create tree container with custom header
-        tree_container = QWidget()
-        tree_layout = QVBoxLayout()
-        tree_layout.setContentsMargins(0, 0, 0, 0)
-        tree_layout.setSpacing(0)
-        tree_layout.addWidget(self.tree_header_widget)
-        tree_layout.addWidget(self.tree_view)
-        tree_container.setLayout(tree_layout)
-        try:
-            self.tree_view.setMinimumWidth(80)
-        except Exception:
-            pass
+        # Create left panel with tabs for Vault, Tags, and Search
+        self.left_tab_widget = QTabWidget()
+        self.left_tab_widget.setMinimumWidth(80)
+        
+        # Vault tab (tree with header)
+        vault_tab = QWidget()
+        vault_layout = QVBoxLayout()
+        vault_layout.setContentsMargins(0, 0, 0, 0)
+        vault_layout.setSpacing(0)
+        vault_layout.addWidget(self.tree_header_widget)
+        vault_layout.addWidget(self.tree_view)
+        vault_tab.setLayout(vault_layout)
+        self.left_tab_widget.addTab(vault_tab, "Vault")
+        
+        # Tags tab
+        self.tags_tab = TagsTab(http_client=self.http)
+        self.tags_tab.pageNavigationRequested.connect(self._on_search_result_selected)
+        self.tags_tab.pageNavigationWithEditorFocusRequested.connect(self._on_search_result_selected_with_editor_focus)
+        self.left_tab_widget.addTab(self.tags_tab, "Tags")
+        
+        # Search tab
+        self.search_tab = SearchTab(http_client=self.http)
+        self.search_tab.pageNavigationRequested.connect(self._on_search_result_selected)
+        self.search_tab.pageNavigationWithEditorFocusRequested.connect(self._on_search_result_selected_with_editor_focus)
+        self.left_tab_widget.addTab(self.search_tab, "Search")
         
         self.main_splitter = QSplitter()
-        self.main_splitter.addWidget(tree_container)
+        self.main_splitter.addWidget(self.left_tab_widget)
         self.main_splitter.addWidget(self.editor_split)
         self.main_splitter.setStretchFactor(1, 5)
         self.main_splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -1264,6 +1292,19 @@ class MainWindow(QMainWindow):
         reload_page = QShortcut(QKeySequence("Ctrl+R"), self)
         toggle_left = QShortcut(QKeySequence("Ctrl+Shift+B"), self)
         toggle_right = QShortcut(QKeySequence("Ctrl+Shift+N"), self)
+        search_vault = QShortcut(QKeySequence("Ctrl+Shift+F"), self)
+        search_vault.setContext(Qt.ApplicationShortcut)
+        search_vault.activated.connect(self._show_search_dialog)
+        # Tab switching shortcuts
+        tab_vault = QShortcut(QKeySequence("Ctrl+1"), self)
+        tab_vault.setContext(Qt.ApplicationShortcut)
+        tab_vault.activated.connect(lambda: self.left_tab_widget.setCurrentIndex(0))
+        tab_tags = QShortcut(QKeySequence("Ctrl+2"), self)
+        tab_tags.setContext(Qt.ApplicationShortcut)
+        tab_tags.activated.connect(lambda: self.left_tab_widget.setCurrentIndex(1))
+        tab_search = QShortcut(QKeySequence("Ctrl+3"), self)
+        tab_search.setContext(Qt.ApplicationShortcut)
+        tab_search.activated.connect(lambda: self.left_tab_widget.setCurrentIndex(2))
         prefs_shortcut = QShortcut(QKeySequence("Ctrl+."), self)
         prefs_shortcut.setContext(Qt.ApplicationShortcut)
         prefs_shortcut.activated.connect(self._open_preferences)
@@ -2479,6 +2520,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, lambda: self._deferred_select_tree_path(selection_path))
         self.right_panel.refresh_tasks()
         self.right_panel.refresh_calendar()
+        self.tags_tab.refresh_tags()
         self._apply_nav_filter_style()
 
     def _add_tree_node(self, parent: QStandardItem, node: dict, seen: Optional[set[str]] = None) -> QStandardItem:
@@ -3387,6 +3429,132 @@ class MainWindow(QMainWindow):
     def _collapse_tree_to_root(self) -> None:
         """Collapse the navigation tree to top-level folders."""
         self.tree_view.collapseAll()
+    
+    def _open_search_tab(self) -> None:
+        """Switch to the Search tab and focus the search field."""
+        self.left_tab_widget.setCurrentIndex(2)  # Search tab is now index 2 (Vault=0, Tags=1, Search=2)
+        self.search_tab.focus_search()
+    
+    def _on_search_result_selected(self, path: str, line: int) -> None:
+        """Handle navigation from search results to a specific page."""
+        print(f"[SearchNav] Navigating to {path}, line {line}")
+        self._open_file(path)
+        
+        # Scroll to the line with flash animation if line number is provided
+        if line > 0:
+            print(f"[SearchNav] Scheduling scroll to line {line}")
+            QTimer.singleShot(50, lambda: self._scroll_to_line_with_flash(line))
+        
+        # Return focus to search results tree
+        QTimer.singleShot(100, lambda: self.search_tab.results_tree.setFocus())
+    
+    def _on_search_result_selected_with_editor_focus(self, path: str, line: int) -> None:
+        """Handle navigation from search results with editor focus (Ctrl+Enter)."""
+        self._open_file(path)
+        
+        # Scroll to the line with flash animation if line number is provided
+        if line > 0:
+            QTimer.singleShot(50, lambda: self._scroll_to_line_with_flash(line))
+        
+        # Focus editor instead of returning to search results
+        QTimer.singleShot(100, lambda: self.editor.setFocus())
+    
+    def _scroll_to_line_with_flash(self, line: int) -> None:
+        """Scroll to a specific line number and flash it."""
+        print(f"[SearchNav] _scroll_to_line_with_flash called with line {line}")
+        if line <= 0:
+            print(f"[SearchNav] Line {line} is invalid, skipping")
+            return
+        
+        # Create cursor at the specified line (1-indexed from search, but QTextDocument uses 0-indexed)
+        doc = self.editor.document()
+        total_lines = doc.blockCount()
+        print(f"[SearchNav] Document has {total_lines} lines, looking for line {line}")
+        
+        # Note: Our search returns 1-indexed line numbers from enumerate(lines, 1)
+        # QTextDocument.findBlockByLineNumber expects 0-indexed
+        # So line 1 from search -> block 0, line 2 -> block 1, etc.
+        # But there seems to be an off-by-one, so let's use line directly instead of line-1
+        block = doc.findBlockByLineNumber(line)  # Try without subtracting 1
+        if not block.isValid():
+            # Fallback to line-1 if that doesn't work
+            block = doc.findBlockByLineNumber(line - 1)
+            if not block.isValid():
+                print(f"[SearchNav] Block at line {line} is not valid")
+                return
+        
+        cursor = QTextCursor(block)
+        cursor.movePosition(QTextCursor.StartOfBlock)
+        
+        print(f"[SearchNav] Setting cursor to block {block.blockNumber()} (search line {line}) and animating")
+        # Set the cursor position and scroll with animation and flash
+        self.editor.setTextCursor(cursor)
+        self._animate_or_flash_to_cursor(cursor)
+    
+    def _show_search_dialog(self) -> None:
+        """Show Ctrl+Shift+F search dialog that populates the search tab."""
+        if not config.has_active_vault():
+            return
+        
+        # Simple dialog to get search query
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QCheckBox, QDialogButtonBox
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Search Across Vault")
+        dialog.resize(500, 180)
+        
+        layout = QVBoxLayout()
+        
+        # Search term input
+        layout.addWidget(QLabel("Search query:"))
+        search_input = QLineEdit()
+        search_input.setPlaceholderText("Enter search query (supports AND, OR, NOT, \"phrases\", @tags)")
+        layout.addWidget(search_input)
+        
+        # Limit by path checkbox and input
+        limit_checkbox = QCheckBox("Limit to page path:")
+        limit_checkbox.setChecked(False)
+        layout.addWidget(limit_checkbox)
+        
+        path_input = QLineEdit()
+        path_input.setEnabled(False)
+        # Display current path in colon form without .txt
+        display_path = self.current_path or ""
+        if display_path.endswith(".txt"):
+            display_path = display_path[:-4]
+        if display_path:
+            display_path = path_to_colon(display_path)
+        path_input.setText(display_path)
+        path_input.setPlaceholderText("(current page path)")
+        layout.addWidget(path_input)
+        
+        limit_checkbox.toggled.connect(path_input.setEnabled)
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        dialog.setLayout(layout)
+        search_input.setFocus()
+        
+        if dialog.exec() == QDialog.Accepted:
+            query = search_input.text().strip()
+            if query:
+                # Switch to search tab and populate it
+                self.left_tab_widget.setCurrentIndex(2)  # Search tab (now index 2)
+                
+                subtree = None
+                if limit_checkbox.isChecked() and path_input.text().strip():
+                    # Convert from colon form back to slash form for API
+                    from .path_utils import colon_to_path
+                    subtree = colon_to_path(path_input.text().strip())
+                    # Add .txt extension back if needed
+                    if not subtree.endswith(".txt"):
+                        subtree = subtree + ".txt"
+                
+                self.search_tab.set_search_query(query, subtree)
 
     def _on_attachment_dropped(self, filename: str) -> None:
         """Force-save the current page after a dropped attachment inserts content."""
