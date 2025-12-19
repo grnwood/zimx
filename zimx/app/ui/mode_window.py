@@ -192,6 +192,11 @@ class ModeWindow(QMainWindow):
         title_label.setStyleSheet("font-size: 18px; font-weight: 600;")
         header.addWidget(title_label, 0, Qt.AlignVCenter)
         header.addStretch(1)
+        
+        # Add audience tools to header if in audience mode
+        if self.mode == "audience" and self._settings.get("show_floating_tools", True):
+            self._build_audience_tools_in_header(header)
+        
         self._header_mode_badge = QLabel(self.mode.upper())
         self._header_mode_badge.setStyleSheet(
             "background: #28384a; color: #e8f1ff; padding: 6px 10px; border-radius: 8px; font-weight: bold;"
@@ -279,9 +284,6 @@ class ModeWindow(QMainWindow):
         footer.addWidget(self._mode_indicator, 0, Qt.AlignRight)
         root.addLayout(footer)
 
-        self._audience_tools = self._build_audience_tools()
-        if self._audience_tools:
-            root.insertLayout(1, self._audience_tools)
         self._cursor_halo = _CursorHalo(self.editor.viewport())
         self._cursor_halo.set_mode("line")
         self._find_bar.findNextRequested.connect(self._on_find_next_requested)
@@ -291,30 +293,19 @@ class ModeWindow(QMainWindow):
 
         self.setCentralWidget(container)
 
-    def _build_audience_tools(self) -> Optional[QHBoxLayout]:
-        if self.mode != "audience":
-            return None
-        layout = QHBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addStretch(1)
-        frame = QFrame()
-        frame.setObjectName("audienceToolsFrame")
-        frame.setStyleSheet(
-            "#audienceToolsFrame { background: rgba(20, 26, 36, 0.86); border: 1px solid #3b4555; border-radius: 12px; } "
-            "QToolButton { padding: 6px 10px; color: #e9eef8; background: transparent; border: none; font-weight: 600; } "
-            "QToolButton:hover { background: rgba(255,255,255,0.08); }"
-        )
-        frame_layout = QHBoxLayout(frame)
-        frame_layout.setContentsMargins(8, 4, 8, 4)
-        frame_layout.setSpacing(2)
-
+    def _build_audience_tools_in_header(self, header: QHBoxLayout) -> None:
+        """Add audience mode tools directly to the header bar."""
         def _btn(text: str, tooltip: str, handler):
             btn = QToolButton()
             btn.setText(text)
             btn.setToolTip(tooltip)
             btn.setFocusPolicy(Qt.NoFocus)
+            btn.setStyleSheet(
+                "QToolButton { padding: 4px 8px; color: #e9eef8; background: rgba(40, 56, 74, 0.7); border: 1px solid #3b4555; border-radius: 6px; font-weight: 600; margin-right: 4px; } "
+                "QToolButton:hover { background: rgba(60, 80, 100, 0.9); }"
+            )
             btn.clicked.connect(handler)
-            frame_layout.addWidget(btn)
+            header.addWidget(btn, 0, Qt.AlignRight | Qt.AlignVCenter)
             return btn
 
         _btn("A+", "Increase text size (Ctrl+Alt+=)", lambda: self._adjust_font_scale(0.05))
@@ -322,12 +313,6 @@ class ModeWindow(QMainWindow):
         _btn("#", "Jump to heading", self._jump_to_heading)
         self._highlight_btn = _btn("H", "Toggle paragraph highlight (Ctrl+Alt+H)", self._toggle_paragraph_highlight)
         self._scroll_btn = _btn("S", "Toggle soft auto-scroll (Ctrl+Alt+S)", self._toggle_soft_scroll)
-
-        layout.addWidget(frame, 0, Qt.AlignRight)
-        self._audience_tools_frame = frame
-        show = bool(self._settings.get("show_floating_tools", True))
-        frame.setVisible(show)
-        return layout
 
     def _wire_shortcuts(self) -> None:
         def _add_shortcut(seq: QKeySequence | Qt.Key, handler) -> QShortcut:
@@ -594,11 +579,6 @@ class ModeWindow(QMainWindow):
         return super().eventFilter(obj, event)
 
     def _position_overlays(self) -> None:
-        if hasattr(self, "_audience_tools_frame") and getattr(self, "_audience_tools_frame", None):
-            frame = self._audience_tools_frame
-            host = self.centralWidget()
-            if frame and host:
-                frame.adjustSize()
         if self._cursor_halo.isVisible():
             self._update_cursor_halo()
 
@@ -610,17 +590,12 @@ class ModeWindow(QMainWindow):
             self._typewriter_scroll()
 
     def _on_editor_text_changed(self) -> None:
-        if self.mode == "audience" and getattr(self, "_audience_tools_frame", None):
-            self._audience_tools_frame.hide()
-            self._tools_timer.start()
         if self.mode == "audience" and self._settings.get("paragraph_highlight", True):
             if getattr(self, "_ready", False) and not self._should_block_highlight():
                 self._update_paragraph_highlight()
 
     def _show_tools(self) -> None:
-        frame = getattr(self, "_audience_tools_frame", None)
-        if frame and self._settings.get("show_floating_tools", True):
-            frame.show()
+        # Tools are now always visible in header - just update halo
         if self.mode == "audience" and self._halo_rect_mode:
             self._update_cursor_halo()
 

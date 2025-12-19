@@ -780,6 +780,7 @@ class MainWindow(QMainWindow):
         self.right_panel.refresh_tasks()
         self.right_panel.taskActivated.connect(self._open_task_from_panel)
         self.right_panel.linkActivated.connect(self._open_link_from_panel)
+        self.right_panel.dateActivated.connect(self._open_journal_date)
         self.right_panel.calendarPageActivated.connect(self._open_calendar_page)
         self.right_panel.calendarTaskActivated.connect(self._open_task_from_panel)
         self.right_panel.aiChatNavigateRequested.connect(self._on_ai_chat_navigate)
@@ -1270,8 +1271,8 @@ class MainWindow(QMainWindow):
         nav_forward.activated.connect(self._navigate_history_forward)
         nav_up.activated.connect(self._navigate_hierarchy_up)
         nav_down.activated.connect(self._navigate_hierarchy_down)
-        nav_pg_up.activated.connect(lambda: self._navigate_tree(-1, leaves_only=True))
-        nav_pg_down.activated.connect(lambda: self._navigate_tree(1, leaves_only=True))
+        nav_pg_up.activated.connect(lambda: self._navigate_tree(-1, leaves_only=False))
+        nav_pg_down.activated.connect(lambda: self._navigate_tree(1, leaves_only=False))
         reload_page.activated.connect(self._reload_current_page)
         toggle_left.activated.connect(self._toggle_left_panel)
         toggle_right.activated.connect(self._toggle_right_panel)
@@ -4254,27 +4255,45 @@ class MainWindow(QMainWindow):
     def _open_virtual_journal_page(self, rel_path: str, year: int, month: int, day: int) -> None:
         """Open a virtual (not yet saved) journal page."""
         # Generate template content but don't save to disk yet
-        from datetime import date
+        from datetime import date, datetime
         target_date = date(year, month, day)
         
         preferred_day = config.load_default_journal_template()
         day_tpl = self._resolve_template_path(preferred_day, fallback="JournalDay")
         
+        # Build date-specific variables
         vars_map = {
             "{{YYYY}}": f"{year}",
             "{{Month}}": target_date.strftime("%B"),
+            "{{MM}}": f"{target_date.month:02d}",
             "{{DOW}}": target_date.strftime("%A"),
             "{{dd}}": f"{day:02d}",
+            "{{DayDateYear}}": target_date.strftime("%A %d %B %Y"),
         }
         
         content = ""
+        cursor_pos = -1
         if day_tpl.exists():
             try:
                 raw = day_tpl.read_text(encoding="utf-8")
                 print(f"[Template] Loaded journal template: {day_tpl}")
+                
+                # Process QOTD if template uses it
+                if "{{QOTD}}" in raw:
+                    vars_map["{{QOTD}}"] = self._get_qotd()
+                
+                # Find cursor position before processing
+                if "{{cursor}}" in raw:
+                    cursor_pos = raw.find("{{cursor}}")
+                
+                # Replace all variables
                 content = raw
                 for k, v in vars_map.items():
                     content = content.replace(k, v)
+                
+                # Remove cursor tag
+                content = content.replace("{{cursor}}", "")
+                
             except Exception:
                 content = f"# {target_date.strftime('%A %d %B %Y')}\n\n"
         else:
@@ -4296,10 +4315,16 @@ class MainWindow(QMainWindow):
         self.virtual_pages.add(rel_path)
         self.virtual_page_original_content[rel_path] = content
         
-        # Move cursor to end for immediate typing
+        # Move cursor to template position or end
         cursor = self.editor.textCursor()
-        display_length = len(self.editor.toPlainText())
-        cursor.setPosition(display_length)
+        if cursor_pos >= 0:
+            # Cursor position from template (before variable substitution)
+            # Need to adjust for any variable replacements before cursor position
+            cursor.setPosition(min(cursor_pos, len(self.editor.toPlainText())))
+        else:
+            # Default: move to end
+            display_length = len(self.editor.toPlainText())
+            cursor.setPosition(display_length)
         self.editor.setTextCursor(cursor)
         
         # Update UI
@@ -6796,6 +6821,11 @@ class MainWindow(QMainWindow):
         target = indexes[new_idx]
         self.tree_view.setCurrentIndex(target)
         self.tree_view.scrollTo(target)
+        
+        # Open the page for this node (whether folder or file)
+        open_target = target.data(OPEN_ROLE) or target.data(PATH_ROLE)
+        if open_target and open_target != self.current_path:
+            self._open_file(open_target)
 
     def _rebuild_vault_index_from_disk(self) -> None:
         """Drop and rebuild vault index from source files, preserving bookmarks/kv/ai tables."""
