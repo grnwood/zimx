@@ -5118,6 +5118,10 @@ class MarkdownEditor(QTextEdit):
         """Indent wrapped lines to start after bullet/task markers."""
         if not block or not block.isValid():
             return
+        # Prevent recursion - setBlockFormat can trigger events on Windows
+        # that may call back into formatting code
+        if self._display_guard:
+            return
         fm = self.fontMetrics()
         # Calculate tab width properly for hanging indent
         # Replace tabs with equivalent spaces for consistent rendering
@@ -5138,6 +5142,10 @@ class MarkdownEditor(QTextEdit):
 
     def _clear_hanging_indent(self, block) -> None:
         if not block or not block.isValid():
+            return
+        # Prevent recursion - setBlockFormat can trigger events on Windows
+        # that may call back into formatting code
+        if self._display_guard:
             return
         fmt = block.blockFormat()
         if fmt.leftMargin() == 0 and fmt.textIndent() == 0:
