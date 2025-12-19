@@ -102,7 +102,7 @@ Logbook of all the development efforts on zim. yes!
 ( )   lets fix the font and make it solid white, maybe have it scale down with the view size @link
 ( )   if a back / forward / nav path results in a 404, remove it from recent links and history buffer @link
 (x)  remember prefered / last used view and persist it @link
-(x)  something is still very wrong with camel links and colon link resoultion. @edit
+a☑  something is still very wrong with camel links and colon link resoultion. @edit
 
 ---
 ( ) need a way to print my tasks (esp. the current filter... print to browser?) @task
