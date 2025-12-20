@@ -16,3 +16,5 @@ Pillow>=10.0
 keyboard>=0.13
 markdown>=3.5
 Pygments>=2.18
+Flask>=3.0
+Jinja2>=3.1
