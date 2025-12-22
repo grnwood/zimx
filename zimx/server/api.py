@@ -1,5 +1,5 @@
 from __future__ import annotations
- # --- Fix for FastAPI + PyInstaller + python-multipart ---
+# --- Fix for FastAPI + PyInstaller + python-multipart ---
 try:
     import importlib
 
@@ -16,26 +16,26 @@ try:
 except ImportError:
     # If multipart truly isn't installed, FastAPI will still raise a clear error later
     pass
- # --- end fix ---
+# --- end fix ---
 
 import copy
+from datetime import date as Date
+from datetime import datetime, timedelta
 import os
 import shutil
 import traceback
 from pathlib import Path
-from typing import Iterable, List, Literal, Optional
-from datetime import datetime, timedelta
-from functools import wraps
 import secrets
+from typing import List, Literal, Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException, File as FastAPISingleFile, Form, Query, Request, UploadFile, Depends, Header
+from fastapi import Depends, FastAPI, File as FastAPISingleFile, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, Field, ConfigDict
-from jose import JWTError, jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import JWTError, jwt
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import indexer
 from . import file_ops
@@ -46,7 +46,6 @@ from .state import vault_state
 from .vector import vector_manager
 from zimx.rag.index import RetrievedChunk
 from zimx.app import config
-from datetime import date as Date
 
 _ANSI_BLUE = "\033[94m"
 _ANSI_RESET = "\033[0m"
