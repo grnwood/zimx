@@ -508,12 +508,13 @@ def logNav(message: str) -> None:
 
 class MainWindow(QMainWindow):
 
-    def __init__(self, api_base: str) -> None:
+    def __init__(self, api_base: str, local_auth_token: Optional[str] = None) -> None:
         super().__init__()
         self.setWindowTitle("ZimX Desktop")
         # Ensure standard window controls (including maximize) are present.
         self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint)
         self.api_base = api_base.rstrip("/")
+        self._local_auth_token = local_auth_token
         def _log_request(request):
             try:
                 path = request.url.raw_path.decode("utf-8") if hasattr(request.url, "raw_path") else request.url.path
@@ -528,10 +529,12 @@ class MainWindow(QMainWindow):
                 path = str(response.request.url)
             print(f"{_ANSI_BLUE}[API] {response.status_code} {path}{_ANSI_RESET}")
 
+        headers = {"X-Local-UI-Token": local_auth_token} if local_auth_token else None
         self.http = httpx.Client(
             base_url=self.api_base,
             timeout=10.0,
             event_hooks={"request": [_log_request], "response": [_log_response]},
+            headers=headers,
         )
         self.vault_root: Optional[str] = None
         self.vault_root_name: Optional[str] = None
@@ -4150,6 +4153,7 @@ class MainWindow(QMainWindow):
                 page_path=rel_path,
                 read_only=self._read_only,
                 open_in_main_callback=lambda target, **kw: self._open_link_in_context(target, **kw),
+                local_auth_token=self._local_auth_token,
                 parent=None,
             )
             try:

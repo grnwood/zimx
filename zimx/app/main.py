@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import socket
 import sys
 import threading
@@ -16,7 +17,7 @@ from PySide6.QtCore import QtMsgType, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
 
-from zimx.server.api import get_app
+from zimx.server import api as api_module
 from zimx.app import config
 from zimx.app.ui.main_window import MainWindow
 
@@ -290,7 +291,7 @@ def _start_api_server(host: str, preferred_port: int | None) -> tuple[int, uvico
     # to avoid "Unable to configure formatter 'default'" errors
     log_config = None if getattr(sys, "frozen", False) else None
     config = uvicorn.Config(
-        get_app(),
+        api_module.get_app(),
         host=host,
         port=port,
         log_level=os.getenv("UVICORN_LOG_LEVEL", "debug"),
@@ -425,6 +426,8 @@ def main() -> None:
     _maybe_use_minimal_fonts()
     # Install custom message handler to suppress harmless Qt warnings
     qInstallMessageHandler(_qt_message_handler)
+    local_ui_token = secrets.token_urlsafe(32)
+    api_module.set_local_ui_token(local_ui_token)
     port, server = _start_api_server(args.host, args.port)
     _diag(f"API server started on {args.host}:{port}.")
     qt_app = QApplication(sys.argv)
@@ -434,7 +437,7 @@ def main() -> None:
     _set_app_icon(qt_app)
     # Ensure server shutdown when the UI exits
     qt_app.aboutToQuit.connect(lambda: setattr(server, "should_exit", True))
-    window = MainWindow(api_base=f"http://{args.host}:{port}")
+    window = MainWindow(api_base=f"http://{args.host}:{port}", local_auth_token=local_ui_token)
     window.resize(1200, 800)
     windows = getattr(qt_app, "_zimx_windows", [])
     windows.append(window)

@@ -6,9 +6,11 @@ interface AuthContextType {
   isLoading: boolean;
   user: { username: string; is_admin: boolean } | null;
   authConfigured: boolean;
+  vaultSelected: boolean;
   setup: (username: string, password: string) => Promise<void>;
   login: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
+  refreshAuth: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -18,6 +20,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isLoading, setIsLoading] = useState(true);
   const [user, setUser] = useState<{ username: string; is_admin: boolean } | null>(null);
   const [authConfigured, setAuthConfigured] = useState(false);
+  const [vaultSelected, setVaultSelected] = useState(false);
 
   useEffect(() => {
     checkAuth();
@@ -28,6 +31,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // Check auth status
       const status = await apiClient.authStatus();
       setAuthConfigured(status.configured);
+      setVaultSelected(status.vault_selected);
+
+      if (!status.vault_selected) {
+        setIsAuthenticated(false);
+        setUser(null);
+        setIsLoading(false);
+        return;
+      }
 
       // If auth is disabled, consider user authenticated
       if (!status.enabled) {
@@ -72,9 +83,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isLoading,
         user,
         authConfigured,
+        vaultSelected,
         setup,
         login,
         logout,
+        refreshAuth: checkAuth,
       }}
     >
       {children}
