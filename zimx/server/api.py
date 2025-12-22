@@ -24,11 +24,18 @@ import shutil
 import traceback
 from pathlib import Path
 from typing import Iterable, List, Literal, Optional
+from datetime import datetime, timedelta
+from functools import wraps
+import secrets
 
 import httpx
-from fastapi import FastAPI, HTTPException, File as FastAPISingleFile, Form, Query, Request, UploadFile
+from fastapi import FastAPI, HTTPException, File as FastAPISingleFile, Form, Query, Request, UploadFile, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field, ConfigDict
+from jose import JWTError, jwt
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError
 
 from . import indexer
 from . import file_ops
@@ -88,6 +95,129 @@ def _set_cached_tree(root: Path, path: str, recursive: bool, version: int, tree:
 
 def _clear_tree_cache() -> None:
     _TREE_CACHE.clear()
+
+
+# ===== JWT Authentication Configuration =====
+JWT_SECRET = os.getenv("JWT_SECRET") or secrets.token_urlsafe(32)
+JWT_ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 15
+REFRESH_TOKEN_EXPIRE_DAYS = 7
+AUTH_ENABLED = os.getenv("AUTH_ENABLED", "true").lower() in ("true", "1", "yes")
+
+password_hasher = PasswordHasher()
+security = HTTPBearer(auto_error=False)
+
+
+class AuthModels:
+    class SetupRequest(BaseModel):
+        username: str = Field(..., min_length=3, max_length=50)
+        password: str = Field(..., min_length=8)
+
+    class LoginRequest(BaseModel):
+        username: str
+        password: str
+
+    class TokenResponse(BaseModel):
+        access_token: str
+        refresh_token: str
+        token_type: str = "bearer"
+
+    class UserInfo(BaseModel):
+        username: str
+        is_admin: bool = True
+
+
+def _create_token(data: dict, expires_delta: timedelta) -> str:
+    to_encode = data.copy()
+    expire = datetime.utcnow() + expires_delta
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _verify_password(plain_password: str, hashed_password: str) -> bool:
+    try:
+        password_hasher.verify(hashed_password, plain_password)
+        return True
+    except VerifyMismatchError:
+        return False
+
+
+def _hash_password(password: str) -> str:
+    return password_hasher.hash(password)
+
+
+def _get_auth_config():
+    """Get auth configuration from vault's kv store"""
+    try:
+        vault_root = vault_state.get_root()
+    except Exception:
+        return None
+    if not vault_root:
+        return None
+    db_path = vault_root / ".zimx" / "settings.db"
+    if not db_path.exists():
+        return None
+    
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cursor = conn.execute("SELECT value FROM kv WHERE key = 'auth_config'")
+        row = cursor.fetchone()
+        if row:
+            import json
+            return json.loads(row[0])
+    except Exception:
+        pass
+    finally:
+        conn.close()
+    return None
+
+
+def _set_auth_config(username: str, password_hash: str):
+    """Store auth configuration in vault's kv store"""
+    try:
+        vault_root = vault_state.get_root()
+    except Exception:
+        raise HTTPException(status_code=500, detail="No vault selected")
+    if not vault_root:
+        raise HTTPException(status_code=500, detail="No vault selected")
+    db_path = vault_root / ".zimx" / "settings.db"
+    import sqlite3
+    import json
+    
+    config = {
+        "username": username,
+        "password_hash": password_hash,
+        "configured_at": datetime.utcnow().isoformat()
+    }
+    
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)",
+            ("auth_config", json.dumps(config))
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Optional[AuthModels.UserInfo]:
+    """Dependency to get current authenticated user"""
+    if not AUTH_ENABLED:
+        return AuthModels.UserInfo(username="admin", is_admin=True)
+    
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return AuthModels.UserInfo(username=username, is_admin=True)
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 
 def _filter_out_journal(tree: list[dict]) -> list[dict]:
@@ -273,11 +403,16 @@ class ChatPayload(BaseModel):
 
 
 app = FastAPI(title="ZimX Local API", version="0.1.0")
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1", "http://localhost", "null"],
-    allow_origin_regex=r"^https?://127\.0\.0\.1(:\d+)?$",
+    allow_origins=[
+        "http://127.0.0.1",
+        "http://localhost",
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "null"
+    ],
+    allow_origin_regex=r"^https?://(127\\.0\\.0\\.1|localhost)(:\\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"]
@@ -287,6 +422,145 @@ app.add_middleware(
 @app.get("/api/health")
 def health() -> dict:
     return {"ok": True}
+
+
+# ===== Authentication Endpoints =====
+
+@app.post("/auth/setup", response_model=AuthModels.TokenResponse)
+def auth_setup(payload: AuthModels.SetupRequest) -> dict:
+    """First-time password setup. Only works when no password is configured."""
+    try:
+        vault_root = vault_state.get_root()
+    except Exception:
+        raise HTTPException(status_code=400, detail="No vault selected. Select a vault first.")
+    if not vault_root:
+        raise HTTPException(status_code=400, detail="No vault selected. Select a vault first.")
+    
+    auth_config = _get_auth_config()
+    if auth_config:
+        raise HTTPException(status_code=400, detail="Authentication already configured")
+    
+    # Hash password and store
+    password_hash = _hash_password(payload.password)
+    _set_auth_config(payload.username, password_hash)
+    
+    # Generate tokens
+    access_token = _create_token(
+        {"sub": payload.username},
+        timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    refresh_token = _create_token(
+        {"sub": payload.username, "type": "refresh"},
+        timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    )
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
+    }
+
+
+@app.post("/auth/login", response_model=AuthModels.TokenResponse)
+def auth_login(payload: AuthModels.LoginRequest) -> dict:
+    """Login with username and password."""
+    try:
+        vault_root = vault_state.get_root()
+    except Exception:
+        raise HTTPException(status_code=400, detail="No vault selected")
+    if not vault_root:
+        raise HTTPException(status_code=400, detail="No vault selected")
+    
+    auth_config = _get_auth_config()
+    if not auth_config:
+        raise HTTPException(status_code=400, detail="Authentication not configured. Use /auth/setup first.")
+    
+    # Verify credentials
+    if payload.username != auth_config["username"]:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    if not _verify_password(payload.password, auth_config["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    # Generate tokens
+    access_token = _create_token(
+        {"sub": payload.username},
+        timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    refresh_token = _create_token(
+        {"sub": payload.username, "type": "refresh"},
+        timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    )
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
+    }
+
+
+@app.post("/auth/refresh", response_model=AuthModels.TokenResponse)
+def auth_refresh(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    """Refresh access token using refresh token."""
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "refresh":
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
+        
+        username = payload.get("sub")
+        if not username:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        # Generate new tokens
+        access_token = _create_token(
+            {"sub": username},
+            timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        )
+        refresh_token = _create_token(
+            {"sub": username, "type": "refresh"},
+            timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+        )
+        
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer"
+        }
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+
+@app.post("/auth/logout")
+def auth_logout(user: AuthModels.UserInfo = Depends(get_current_user)) -> dict:
+    """Logout (client should discard tokens)."""
+    return {"ok": True, "message": "Logged out successfully"}
+
+
+@app.get("/auth/me", response_model=AuthModels.UserInfo)
+def auth_me(user: AuthModels.UserInfo = Depends(get_current_user)) -> dict:
+    """Get current user info."""
+    return user.model_dump()
+
+
+@app.get("/auth/status")
+def auth_status() -> dict:
+    """Check if authentication is configured and enabled."""
+    try:
+        vault_root = vault_state.get_root()
+    except Exception:
+        return {"configured": False, "enabled": AUTH_ENABLED, "vault_selected": False}
+    if not vault_root:
+        return {"configured": False, "enabled": AUTH_ENABLED, "vault_selected": False}
+    
+    auth_config = _get_auth_config()
+    return {
+        "configured": auth_config is not None,
+        "enabled": AUTH_ENABLED,
+        "vault_selected": True
+    }
 
 
 @app.post("/api/vault/select")
@@ -351,8 +625,53 @@ def file_read(payload: FilePathPayload) -> dict:
 
 
 @app.post("/api/file/write")
-def file_write(payload: FileWritePayload) -> dict:
+def file_write(
+    payload: FileWritePayload,
+    if_match: Optional[str] = Header(None),
+    user: AuthModels.UserInfo = Depends(get_current_user)
+) -> dict:
     root = vault_state.get_root()
+    
+    # Check If-Match header for conflict detection
+    if if_match is not None:
+        db_path = config._vault_db_path()
+        if db_path:
+            import sqlite3
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            try:
+                row = conn.execute(
+                    "SELECT rev, title FROM pages WHERE path = ?",
+                    (payload.path,)
+                ).fetchone()
+                
+                if row:
+                    current_rev = row[0] or 0
+                    try:
+                        expected_rev = int(if_match)
+                    except ValueError:
+                        conn.close()
+                        raise HTTPException(status_code=400, detail="Invalid If-Match header format")
+                    
+                    if current_rev != expected_rev:
+                        # Conflict: return current state
+                        try:
+                            current_content = files.read_file(root, payload.path)
+                        except FileAccessError:
+                            current_content = ""
+                        
+                        conn.close()
+                        raise HTTPException(
+                            status_code=409,
+                            detail={
+                                "error": "Conflict",
+                                "current_rev": current_rev,
+                                "current_content": current_content,
+                                "current_title": row[1]
+                            }
+                        )
+            finally:
+                conn.close()
+    
     try:
         files.write_file(root, payload.path, payload.content)
         # Update search index
@@ -363,8 +682,18 @@ def file_write(payload: FileWritePayload) -> dict:
             conn = sqlite3.connect(db_path, check_same_thread=False)
             search_index.upsert_page(conn, payload.path, int(time.time()), payload.content)
             conn.close()
+            
+            # Get new revision
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            try:
+                row = conn.execute("SELECT rev FROM pages WHERE path = ?", (payload.path,)).fetchone()
+                new_rev = row[0] if row else 0
+                return {"ok": True, "rev": new_rev}
+            finally:
+                conn.close()
     except FileAccessError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    
     return {"ok": True}
 
 
@@ -433,6 +762,188 @@ def api_search(
     except Exception as e:
         print(f"[API] Search error: {e}")
         return {"results": []}
+
+
+# ===== Web Sync API Endpoints =====
+
+@app.get("/sync/changes")
+def sync_changes(
+    since_rev: int = 0,
+    user: AuthModels.UserInfo = Depends(get_current_user)
+) -> dict:
+    """Get all pages changed since a given sync revision.
+    
+    Returns pages with rev > since_rev, including deleted pages.
+    """
+    db_path = config._vault_db_path()
+    if not db_path:
+        raise HTTPException(status_code=400, detail="No vault selected")
+    
+    import sqlite3
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    try:
+        current_sync_rev = config.get_sync_revision()
+        
+        # Get changed pages (including deleted ones)
+        rows = conn.execute(
+            """
+            SELECT page_id, path, title, updated, rev, deleted, pinned, parent_path
+            FROM pages
+            WHERE rev > ?
+            ORDER BY rev ASC
+            """,
+            (since_rev,)
+        ).fetchall()
+        
+        changes = []
+        for row in rows:
+            changes.append({
+                "page_id": row[0],
+                "path": row[1],
+                "title": row[2],
+                "updated": row[3],
+                "rev": row[4],
+                "deleted": bool(row[5]),
+                "pinned": bool(row[6]),
+                "parent_path": row[7]
+            })
+        
+        return {
+            "sync_revision": current_sync_rev,
+            "changes": changes,
+            "has_more": False
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/recent")
+def get_recent_pages(
+    limit: int = 20,
+    user: AuthModels.UserInfo = Depends(get_current_user)
+) -> dict:
+    """Get recently modified pages."""
+    db_path = config._vault_db_path()
+    if not db_path:
+        raise HTTPException(status_code=400, detail="No vault selected")
+    
+    import sqlite3
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    try:
+        rows = conn.execute(
+            """
+            SELECT page_id, path, title, updated, rev
+            FROM pages
+            WHERE deleted = 0
+            ORDER BY updated DESC
+            LIMIT ?
+            """,
+            (limit,)
+        ).fetchall()
+        
+        pages = []
+        for row in rows:
+            pages.append({
+                "page_id": row[0],
+                "path": row[1],
+                "title": row[2],
+                "updated": row[3],
+                "rev": row[4]
+            })
+        
+        return {"pages": pages}
+    finally:
+        conn.close()
+
+
+@app.get("/tags")
+def get_all_tags(user: AuthModels.UserInfo = Depends(get_current_user)) -> dict:
+    """Get all tags with page counts."""
+    db_path = config._vault_db_path()
+    if not db_path:
+        raise HTTPException(status_code=400, detail="No vault selected")
+    
+    import sqlite3
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    try:
+        rows = conn.execute(
+            """
+            SELECT tag, COUNT(DISTINCT page) as count
+            FROM page_tags
+            WHERE page IN (SELECT path FROM pages WHERE deleted = 0)
+            GROUP BY tag
+            ORDER BY tag
+            """
+        ).fetchall()
+        
+        tags = [{"tag": row[0], "count": row[1]} for row in rows]
+        return {"tags": tags}
+    finally:
+        conn.close()
+
+
+@app.get("/pages/{page_id}/links")
+def get_page_links(
+    page_id: str,
+    user: AuthModels.UserInfo = Depends(get_current_user)
+) -> dict:
+    """Get outgoing links from a page."""
+    db_path = config._vault_db_path()
+    if not db_path:
+        raise HTTPException(status_code=400, detail="No vault selected")
+    
+    import sqlite3
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    try:
+        # Get page path from page_id
+        row = conn.execute("SELECT path FROM pages WHERE page_id = ?", (page_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Page not found")
+        
+        from_path = row[0]
+        
+        # Get outgoing links
+        rows = conn.execute(
+            "SELECT to_path FROM links WHERE from_path = ?",
+            (from_path,)
+        ).fetchall()
+        
+        links = [row[0] for row in rows]
+        return {"links": links}
+    finally:
+        conn.close()
+
+
+@app.get("/pages/{page_id}/backlinks")
+def get_page_backlinks(
+    page_id: str,
+    user: AuthModels.UserInfo = Depends(get_current_user)
+) -> dict:
+    """Get incoming links (backlinks) to a page."""
+    db_path = config._vault_db_path()
+    if not db_path:
+        raise HTTPException(status_code=400, detail="No vault selected")
+    
+    import sqlite3
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    try:
+        # Get page path from page_id
+        row = conn.execute("SELECT path FROM pages WHERE page_id = ?", (page_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Page not found")
+        
+        to_path = row[0]
+        
+        # Get backlinks
+        rows = conn.execute(
+            "SELECT from_path FROM links WHERE to_path = ?",
+            (to_path,)
+        ).fetchall()
+        
+        backlinks = [row[0] for row in rows]
+        return {"backlinks": backlinks}
+    finally:
+        conn.close()
 
 
 @app.post("/api/ai/chat")
@@ -777,3 +1288,19 @@ def render_link(label, target):
 
 def get_app() -> FastAPI:
     return app
+
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    print(f"\n{_ANSI_BLUE}=== ZimX API Server ==={_ANSI_RESET}")
+    print(f"{_ANSI_BLUE}Starting server on http://127.0.0.1:8000{_ANSI_RESET}")
+    print(f"{_ANSI_BLUE}API docs: http://127.0.0.1:8000/docs{_ANSI_RESET}")
+    print(f"{_ANSI_BLUE}Auth enabled: {AUTH_ENABLED}{_ANSI_RESET}\n")
+    
+    uvicorn.run(
+        app,
+        host="127.0.0.1",
+        port=8000,
+        log_level="info"
+    )

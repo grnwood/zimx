@@ -985,6 +985,11 @@ class MainWindow(QMainWindow):
         rebuild_index_action.triggered.connect(self._rebuild_vault_index_from_disk)
         tools_menu.addAction(rebuild_index_action)
 
+        webserver_action = QAction("Start Web Server", self)
+        webserver_action.setToolTip("Start local web server to serve vault as HTML")
+        webserver_action.triggered.connect(self._open_webserver_dialog)
+        tools_menu.addAction(webserver_action)
+
         go_menu = self.menuBar().addMenu("&Go")
         home_action = QAction("(H)ome", self)
         home_action.setShortcut(QKeySequence("G,H"))
@@ -1027,6 +1032,15 @@ class MainWindow(QMainWindow):
         rename_action.setShortcutContext(Qt.ApplicationShortcut)
         rename_action.triggered.connect(self._trigger_tree_rename)
         file_menu.addAction(rename_action)
+
+        file_menu.addSeparator()
+        
+        print_page_action = QAction("Print Page", self)
+        print_page_action.setShortcut(QKeySequence.Print)
+        print_page_action.setShortcutContext(Qt.ApplicationShortcut)
+        print_page_action.setToolTip("Print or export current page to PDF (Ctrl+P)")
+        print_page_action.triggered.connect(self._print_current_page)
+        file_menu.addAction(print_page_action)
 
         help_menu = self.menuBar().addMenu("Hel&p")
         documentation_action = QAction("Documentation", self)
@@ -7049,6 +7063,208 @@ class MainWindow(QMainWindow):
         self._reindex_vault(show_progress=True)
         self.statusBar().showMessage("Reindex complete", 4000)
         print("[UI] Reindex from files complete")
+
+    def _open_webserver_dialog(self) -> None:
+        """Open the web server control dialog."""
+        if not self.vault_root or not config.has_active_vault():
+            self._alert("Select a vault before starting the web server.")
+            return
+        
+        from zimx.app.ui.webserver_dialog import WebServerDialog
+        
+        # Create non-modal dialog and keep reference to prevent garbage collection
+        dialog = WebServerDialog(self.vault_root, config, parent=self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        dialog.show()
+
+    def _print_current_page(self) -> None:
+        """Print or export current page to PDF."""
+        if not self.current_file or not self.vault_root:
+            self._alert("No page is currently open.")
+            return
+        
+        # Determine if we're running locally or remotely
+        is_local = self._is_local_api()
+        
+        if is_local:
+            # Local: render HTML directly from file
+            self._print_page_local()
+        else:
+            # Remote: use webserver or API
+            self._print_page_remote()
+    
+    def _is_local_api(self) -> bool:
+        """Check if the API is running locally."""
+        import urllib.parse
+        parsed = urllib.parse.urlparse(self.api_base)
+        return parsed.hostname in ("localhost", "127.0.0.1", "::1", None)
+    
+    def _print_page_local(self) -> None:
+        """Print page by rendering HTML locally."""
+        import tempfile
+        import webbrowser
+        from urllib.parse import quote
+        
+        try:
+            # Read the current file
+            file_path = Path(self.vault_root) / self.current_file
+            if not file_path.exists():
+                self._alert(f"File not found: {self.current_file}")
+                return
+            
+            content = file_path.read_text(encoding="utf-8")
+            
+            # Render using our webserver template approach
+            html = self._render_page_html(self.current_file, content)
+            
+            # Write to temp file and open in browser
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as f:
+                f.write(html)
+                temp_path = f.name
+            
+            # Open in browser with file:// URL
+            webbrowser.open(f"file://{temp_path}")
+            
+            self.statusBar().showMessage("Print page opened in browser", 3000)
+            
+        except Exception as e:
+            self._alert(f"Failed to render page for printing: {e}")
+            print(f"[UI] Print page error: {e}")
+    
+    def _print_page_remote(self) -> None:
+        """Print page via webserver (for remote UI connections)."""
+        # When UI is remote, we need a webserver running to serve print-ready HTML
+        # Check if there's a webserver we can use
+        
+        # For now, alert the user to use the webserver
+        # In the future, we could auto-start a temporary webserver or use the API
+        self._alert(
+            "Remote printing requires a running web server.\n\n"
+            "Please start the web server via Tools → Start Web Server,\n"
+            "then navigate to your page in the browser and use:\n"
+            f"/wiki/{self.current_file.replace('.txt', '').replace('.md', '')}?mode=print&autoPrint=1"
+        )
+    
+    def _render_page_html(self, page_path: str, content: str) -> str:
+        """Render a markdown page to HTML using the webserver template style."""
+        from jinja2 import Template
+        import markdown
+        
+        # Get page title
+        title = Path(page_path).stem
+        
+        # Render markdown
+        md = markdown.Markdown(extensions=['fenced_code', 'tables', 'nl2br'])
+        html_content = md.convert(content)
+        
+        # Simple HTML template similar to webserver
+        template_html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} - ZimX</title>
+    <style>
+        @page {
+            margin: 2cm;
+            size: A4;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.7;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+            color: #333;
+        }
+        
+        h1 { font-size: 2em; margin-bottom: 0.5em; }
+        h2 { font-size: 1.5em; margin-top: 1em; }
+        h3 { font-size: 1.25em; margin-top: 1em; }
+        
+        pre {
+            background: #f5f5f5;
+            padding: 1em;
+            overflow-x: auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        
+        code {
+            background: #f5f5f5;
+            padding: 0.2em 0.4em;
+            border-radius: 3px;
+            font-family: monospace;
+            font-size: 0.9em;
+        }
+        
+        pre code {
+            background: none;
+            padding: 0;
+        }
+        
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 1em 0;
+        }
+        
+        th, td {
+            border: 1px solid #ddd;
+            padding: 0.5em;
+            text-align: left;
+        }
+        
+        th {
+            background: #f5f5f5;
+            font-weight: bold;
+        }
+        
+        img {
+            max-width: 100%;
+            height: auto;
+        }
+        
+        blockquote {
+            border-left: 4px solid #ddd;
+            margin-left: 0;
+            padding-left: 1em;
+            color: #666;
+        }
+        
+        @media print {
+            body {
+                padding: 0;
+            }
+            
+            h1, h2, h3, h4, h5, h6 {
+                page-break-after: avoid;
+            }
+            
+            pre, table {
+                page-break-inside: avoid;
+            }
+        }
+    </style>
+    <script>
+        window.addEventListener('load', function() {
+            setTimeout(function() {
+                window.print();
+            }, 500);
+        });
+    </script>
+</head>
+<body>
+    <h1>{{ title }}</h1>
+    <div class="content">
+        {{ content | safe }}
+    </div>
+</body>
+</html>"""
+        
+        template = Template(template_html)
+        return template.render(title=title, content=html_content)
 
     def _reindex_vault(self, show_progress: bool = False) -> None:
         """Reindex all pages in the vault."""
