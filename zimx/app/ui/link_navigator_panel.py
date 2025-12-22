@@ -25,6 +25,8 @@ from PySide6.QtWidgets import (
     QTextBrowser,
     QLabel,
     QCheckBox,
+    QComboBox,
+    QLineEdit,
     QStackedLayout,
     QVBoxLayout,
     QWidget,
@@ -39,7 +41,11 @@ from .path_utils import path_to_colon
 class _LinkNode:
     path: str
     label: str
-    direction: str  # "incoming" or "outgoing"
+    direction: str  # "incoming" | "outgoing" | "both" | "center"
+    depth: int = 0
+    radius: float = 28.0
+    tags: tuple[str, ...] = ()
+    filtered: bool = False
 
 
 class _LinkNodeItem(QGraphicsEllipseItem):
@@ -48,12 +54,15 @@ class _LinkNodeItem(QGraphicsEllipseItem):
     def __init__(self, path: str, label: str, radius: float, color: QColor) -> None:
         super().__init__(-radius, -radius, radius * 2, radius * 2)
         self.page_path = path
+        self.label = label
         self._radius = radius
         self._base_color = QColor(color)
         self._base_brush = QBrush(color)
         self.setBrush(self._base_brush)
         self._base_pen = QPen(QColor("#222222"), 2)
         self._focus_pen = QPen(QColor("#ffffff"), 3.4)
+        self._pinned_pen = QPen(QColor("#FFD24D"), 3.0)
+        self._pinned = False
         self.setPen(self._base_pen)
         self.setToolTip(label)
         self._rect_mode = False
@@ -73,15 +82,32 @@ class _LinkNodeItem(QGraphicsEllipseItem):
         text_rect = text.boundingRect()
         text.setPos(-text_rect.width() / 2, -text_rect.height() / 2)
         self.text_item = text
+        self.text_item.setVisible(False)
         self._add_depth_dots()
         self._rect_overlay = QGraphicsRectItem(-radius, -radius, radius * 2, radius * 2, self)
         self._rect_overlay.setVisible(False)
         self._rect_overlay.setZValue(3)
 
     def set_focused(self, focused: bool) -> None:
-        self.setPen(self._focus_pen if focused else self._base_pen)
+        if focused:
+            self.setPen(self._focus_pen)
+        else:
+            self.setPen(self._pinned_pen if self._pinned else self._base_pen)
         if not focused and not self._rect_mode:
             self.setBrush(self._base_brush)
+
+    def set_pinned(self, pinned: bool) -> None:
+        self._pinned = pinned
+        if not pinned:
+            self.setPen(self._base_pen)
+        elif self.pen() != self._focus_pen:
+            self.setPen(self._pinned_pen)
+
+    def is_pinned(self) -> bool:
+        return self._pinned
+
+    def set_label_visible(self, visible: bool) -> None:
+        self.text_item.setVisible(visible)
 
     def _add_depth_dots(self) -> None:
         """Render small dots indicating depth; keeps constructors lean."""
@@ -154,6 +180,7 @@ class LinkGraphView(QGraphicsView):
         self._scene_rect = None
         self._edges: list[tuple[QGraphicsLineItem, _LinkNodeItem, _LinkNodeItem]] = []
         self._nodes: list[_LinkNodeItem] = []
+        self._node_items: dict[str, _LinkNodeItem] = {}
         self._base_positions: dict[_LinkNodeItem, QPointF] = {}
         self._wiggle_timer = QTimer(self)
         # Fast cadence for a "vibrate" feel
@@ -164,13 +191,19 @@ class LinkGraphView(QGraphicsView):
         self._press_pos: Optional[QPointF] = None
         self._press_item: Optional[_LinkNodeItem] = None
         self._dragging = False
+        self._drag_node: Optional[_LinkNodeItem] = None
+        self._drag_offset = QPointF()
         self._label_hide_threshold = 0.9
         self._center_item: Optional[_LinkNodeItem] = None
         self._incoming_items: list[_LinkNodeItem] = []
         self._outgoing_items: list[_LinkNodeItem] = []
+        self._neighbor_items: list[_LinkNodeItem] = []
         self._focused_item: Optional[_LinkNodeItem] = None
         self._keyboard_nav_used = False
         self._mode_toggle_handler: Optional[Callable[[], None]] = None
+        self._pivot_handler: Optional[Callable[[str], None]] = None
+        self._expand_handler: Optional[Callable[[], None]] = None
+        self._focus_query_handler: Optional[Callable[[], None]] = None
         self._selection_anim_timer = QTimer(self)
         self._selection_anim_timer.setInterval(16)
         self._selection_anim_timer.timeout.connect(self._advance_selection_animation)
@@ -209,17 +242,32 @@ class LinkGraphView(QGraphicsView):
         self._repulse_strength = 32.0
         self._layered_mode = False
         self._treemap_mode = False
+        self._physics_mode = False
         self._ring_items: list[QGraphicsEllipseItem] = []
         self._center_path: str = ""
         self._node_depths: dict[_LinkNodeItem, int] = {}
         self._ring_layout: dict[int, list[_LinkNodeItem]] = {}
         self._ring_depths: list[int] = []
+        self._center_label_item: Optional[QGraphicsSimpleTextItem] = None
+        self._center_label_font = QFont()
+        self._center_label_font.setPointSize(16)
+        self._center_label_font.setWeight(QFont.Weight.Bold)
+        self._show_pinned_labels = False
+        self._physics_timer = QTimer(self)
+        self._physics_timer.setInterval(16)
+        self._physics_timer.timeout.connect(self._advance_physics)
+        self._physics_velocities: dict[_LinkNodeItem, QPointF] = {}
+        self._physics_settle_frames = 0
+        self._physics_running = False
+        self._pinned_nodes: set[_LinkNodeItem] = set()
+        self._pinned_paths: set[str] = set()
 
     def set_graph(
         self,
         center: _LinkNode,
-        incoming: Sequence[_LinkNode],
-        outgoing: Sequence[_LinkNode],
+        nodes: Sequence[_LinkNode],
+        edges: Sequence[tuple[str, str]],
+        faded_paths: Optional[set[str]] = None,
     ) -> None:
         # Skip updates during mode overlay transitions to avoid scene mutations mid-teardown.
         try:
@@ -230,36 +278,103 @@ class LinkGraphView(QGraphicsView):
         self._scene.clear()
         self._edges.clear()
         self._nodes.clear()
+        self._node_items.clear()
         self._incoming_items.clear()
         self._outgoing_items.clear()
+        self._neighbor_items.clear()
         self._node_depths.clear()
         self._ring_layout.clear()
         self._ring_depths.clear()
         self._focused_item = None
         self._center_item = None
-        center_radius = 42
+        old_center_path = self._center_path
+        self._repulse_timer.stop()
+        self._repulse_offsets.clear()
+        self._repulse_target = None
+        self._repulse_progress = 0.0
+        self._repulse_goal = 0.0
+        self._wiggle_timer.stop()
+        self._wiggle_target = None
+        self._physics_timer.stop()
+        self._physics_running = False
+        self._physics_velocities.clear()
+        self._physics_settle_frames = 0
+        self._pinned_nodes.clear()
+        if center.path != old_center_path:
+            self._pinned_paths.clear()
+
+        faded_paths = faded_paths or set()
+        center_radius = max(32.0, center.radius)
         center_item = _LinkNodeItem(center.path, center.label, center_radius, QColor("#4A90E2"))
         center_item.setPos(0, 0)
         self._scene.addItem(center_item)
         self._nodes.append(center_item)
+        self._node_items[center.path] = center_item
         self._base_positions[center_item] = QPointF(0, 0)
         self._center_item = center_item
         self._node_depths[center_item] = 0
 
         self._center_path = center.path
-        neighbors = list(incoming) + list(outgoing)
-        if not neighbors:
+        self._center_label_item = None
+        if center.label:
+            label_item = QGraphicsTextItem(center.label)
+            label_item.setFont(self._center_label_font)
+            label_item.setDefaultTextColor(QColor("#f5f5f5"))
+            label_item.setZValue(12)
+            label_item.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+            self._scene.addItem(label_item)
+            self._center_label_item = label_item
+
+        has_neighbors = False
+        for node in nodes:
+            if node.path == center.path:
+                continue
+            has_neighbors = True
+            color = QColor("#7BD88F")
+            if node.direction == "outgoing":
+                color = QColor("#F5A623")
+            elif node.direction == "both":
+                color = QColor("#7FB6E4")
+            item = _LinkNodeItem(node.path, node.label, node.radius, color)
+            item.setPos(QPointF(0, 0))
+            if node.path in faded_paths:
+                item.setOpacity(0.1)
+                item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                item.setAcceptHoverEvents(False)
+            if node.path in self._pinned_paths:
+                item.set_pinned(True)
+                self._pinned_nodes.add(item)
+            self._scene.addItem(item)
+            self._nodes.append(item)
+            self._node_items[node.path] = item
+            self._base_positions[item] = QPointF(0, 0)
+            depth = max(1, node.depth)
+            self._node_depths[item] = depth
+            self._neighbor_items.append(item)
+            if node.direction == "incoming":
+                self._incoming_items.append(item)
+            elif node.direction == "outgoing":
+                self._outgoing_items.append(item)
+            elif node.direction == "both":
+                self._outgoing_items.append(item)
+
+        if not has_neighbors:
             placeholder = QGraphicsTextItem("No links yet")
             placeholder.setDefaultTextColor(QColor("#999999"))
             placeholder.setPos(-placeholder.boundingRect().width() / 2, -8)
             self._scene.addItem(placeholder)
 
-        for node in incoming:
-            item = self._add_neighbor(center_item, node, QPointF(0, 0), QColor("#7BD88F"))
-            self._incoming_items.append(item)
-        for node in outgoing:
-            item = self._add_neighbor(center_item, node, QPointF(0, 0), QColor("#F5A623"))
-            self._outgoing_items.append(item)
+        for from_path, to_path in edges:
+            a = self._node_items.get(from_path)
+            b = self._node_items.get(to_path)
+            if not a or not b:
+                continue
+            line = QGraphicsLineItem()
+            pen = QPen(QColor("#777777"), 1.5)
+            line.setPen(pen)
+            self._scene.addItem(line)
+            self._edges.append((line, a, b))
+            self._update_edge(line, a, b)
 
         self._apply_layout()
 
@@ -272,8 +387,9 @@ class LinkGraphView(QGraphicsView):
         self._repulse_goal = 0.0
         self._repulse_offsets.clear()
         self._repulse_timer.stop()
-        self._labels_congested = self._detect_congestion()
+        self._labels_congested = False
         self._selection_overlay_opacity = 0.0
+        self._position_center_label()
         if self._pending_fade_in:
             self._fade_opacity = 0.05
             self._update_opacity_effect()
@@ -306,7 +422,7 @@ class LinkGraphView(QGraphicsView):
         return item
 
     def set_layered_mode(self, enabled: bool) -> None:
-        if self._treemap_mode and enabled:
+        if (self._treemap_mode or self._physics_mode) and enabled:
             return
         if self._layered_mode == enabled:
             return
@@ -318,8 +434,21 @@ class LinkGraphView(QGraphicsView):
         if self._treemap_mode == enabled:
             return
         self._treemap_mode = enabled
-        if enabled and self._layered_mode:
+        if enabled and (self._layered_mode or self._physics_mode):
             self._layered_mode = False
+            self._physics_mode = False
+        self._apply_layout()
+        self._apply_zoom()
+
+    def set_physics_mode(self, enabled: bool) -> None:
+        if self._physics_mode == enabled:
+            return
+        self._physics_mode = enabled
+        if enabled:
+            self._layered_mode = False
+            self._treemap_mode = False
+        else:
+            self._stop_physics()
         self._apply_layout()
         self._apply_zoom()
 
@@ -327,7 +456,19 @@ class LinkGraphView(QGraphicsView):
         if not self._center_item:
             return
         self._clear_rings()
-        nodes = self._incoming_items + self._outgoing_items
+        nodes = self._neighbor_items
+        if self._physics_mode:
+            self._ring_layout.clear()
+            self._ring_depths.clear()
+            for item in nodes:
+                item.hide_rect_overlay()
+                item.setOpacity(max(0.1, item.opacity()))
+            for line, _, _ in self._edges:
+                line.setVisible(True)
+            self._initialize_physics_positions()
+            self._start_physics()
+            self._labels_congested = False
+            return
         if self._treemap_mode:
             self._ring_layout.clear()
             self._ring_depths.clear()
@@ -348,10 +489,12 @@ class LinkGraphView(QGraphicsView):
             positions: dict[_LinkNodeItem, QPointF] = {}
             for item in nodes:
                 item.hide_rect_overlay()
-                item.setOpacity(1.0)
+                if item.opacity() >= 0.99:
+                    item.setOpacity(1.0)
             for line, _, _ in self._edges:
                 line.setVisible(True)
-            if self._layered_mode:
+            max_depth = max(self._node_depths.values(), default=1)
+            if self._layered_mode or max_depth > 1:
                 positions, radii, ring_layout = self._compute_layered_positions()
                 self._ring_layout = ring_layout
                 self._ring_depths = sorted(self._ring_layout.keys())
@@ -383,7 +526,7 @@ class LinkGraphView(QGraphicsView):
         self,
     ) -> tuple[dict[_LinkNodeItem, QPointF], list[float], dict[int, list[_LinkNodeItem]]]:
         positions: dict[_LinkNodeItem, QPointF] = {}
-        nodes = self._incoming_items + self._outgoing_items
+        nodes = self._neighbor_items
         if not nodes:
             return positions, [], {}
         ring_gap = 130.0
@@ -412,7 +555,8 @@ class LinkGraphView(QGraphicsView):
                 positions[node] = QPointF(x, y)
                 angle_cache[node] = angle
                 fade = max(0.45, 1.0 - (depth - 1) * 0.22)
-                node.setOpacity(fade)
+                if node.opacity() >= 0.3:
+                    node.setOpacity(fade)
         ordered_rings: dict[int, list[_LinkNodeItem]] = {}
         for depth, ring_nodes in ring_map.items():
             ordered = sorted(ring_nodes, key=lambda node: angle_cache.get(node, 0.0))
@@ -429,7 +573,7 @@ class LinkGraphView(QGraphicsView):
             self._ring_items.append(ring)
 
     def _compute_treemap_rects(self) -> dict[_LinkNodeItem, QRectF]:
-        nodes = self._incoming_items + self._outgoing_items
+        nodes = self._neighbor_items
         rects: dict[_LinkNodeItem, QRectF] = {}
         if not nodes:
             return rects
@@ -456,10 +600,107 @@ class LinkGraphView(QGraphicsView):
         return rects
 
     def _apply_treemap_rect(self, item: _LinkNodeItem, rect: QRectF) -> None:
-        color = QColor("#7BD88F") if item in self._incoming_items else QColor("#F5A623")
+        color = QColor(item.brush().color())
         item.setPos(rect.center())
         self._base_positions[item] = QPointF(rect.center())
         item.show_rect_overlay(rect.width(), rect.height(), color)
+
+    def _initialize_physics_positions(self) -> None:
+        if not self._center_item:
+            return
+        nodes = [node for node in self._neighbor_items if node not in self._pinned_nodes]
+        if not nodes:
+            return
+        count = len(nodes)
+        for idx, node in enumerate(nodes):
+            depth = max(1, self._node_depths.get(node, 1))
+            radius = 160.0 + (depth - 1) * 120.0
+            angle = (2 * math.pi * idx) / max(1, count)
+            pos = QPointF(radius * math.cos(angle), radius * math.sin(angle))
+            node.setPos(pos)
+            self._base_positions[node] = QPointF(pos)
+            self._physics_velocities[node] = QPointF(0.0, 0.0)
+        if self._center_item:
+            self._center_item.setPos(0, 0)
+            self._base_positions[self._center_item] = QPointF(0, 0)
+
+    def _start_physics(self) -> None:
+        if not self._physics_mode or not self._neighbor_items:
+            return
+        if self._center_item:
+            self._pinned_nodes.add(self._center_item)
+        if not self._physics_timer.isActive():
+            self._physics_timer.start()
+        self._physics_running = True
+        self._physics_settle_frames = 0
+
+    def _stop_physics(self) -> None:
+        self._physics_timer.stop()
+        self._physics_running = False
+        self._physics_settle_frames = 0
+
+    def _advance_physics(self) -> None:
+        if not self._physics_mode:
+            self._stop_physics()
+            return
+        nodes = [node for node in self._nodes if node is not None]
+        if not nodes:
+            self._stop_physics()
+            return
+        repulse_strength = 22000.0
+        spring_k = 0.08
+        spring_length = 160.0
+        gravity = 0.004
+        damping = 0.84
+        dt = 0.06
+        forces: dict[_LinkNodeItem, QPointF] = {node: QPointF(0.0, 0.0) for node in nodes}
+
+        for i, node in enumerate(nodes):
+            for other in nodes[i + 1 :]:
+                dx = other.pos().x() - node.pos().x()
+                dy = other.pos().y() - node.pos().y()
+                dist = math.hypot(dx, dy)
+                if dist < 1e-2:
+                    continue
+                force = repulse_strength / (dist * dist)
+                fx = force * (dx / dist)
+                fy = force * (dy / dist)
+                forces[node] = QPointF(forces[node].x() - fx, forces[node].y() - fy)
+                forces[other] = QPointF(forces[other].x() + fx, forces[other].y() + fy)
+
+        for _, a, b in self._edges:
+            dx = b.pos().x() - a.pos().x()
+            dy = b.pos().y() - a.pos().y()
+            dist = max(1e-2, math.hypot(dx, dy))
+            stretch = dist - spring_length
+            fx = spring_k * stretch * (dx / dist)
+            fy = spring_k * stretch * (dy / dist)
+            forces[a] = QPointF(forces[a].x() + fx, forces[a].y() + fy)
+            forces[b] = QPointF(forces[b].x() - fx, forces[b].y() - fy)
+
+        max_speed = 0.0
+        for node in nodes:
+            if node in self._pinned_nodes:
+                self._physics_velocities[node] = QPointF(0.0, 0.0)
+                continue
+            pos = node.pos()
+            force = forces.get(node, QPointF(0.0, 0.0))
+            force = QPointF(force.x() - pos.x() * gravity, force.y() - pos.y() * gravity)
+            velocity = self._physics_velocities.get(node, QPointF(0.0, 0.0))
+            velocity = QPointF((velocity.x() + force.x() * dt) * damping, (velocity.y() + force.y() * dt) * damping)
+            node.setPos(QPointF(pos.x() + velocity.x() * dt, pos.y() + velocity.y() * dt))
+            self._physics_velocities[node] = velocity
+            speed = math.hypot(velocity.x(), velocity.y())
+            max_speed = max(max_speed, speed)
+            self._base_positions[node] = QPointF(node.pos())
+
+        self._refresh_edges()
+        if max_speed < 0.15:
+            self._physics_settle_frames += 1
+        else:
+            self._physics_settle_frames = 0
+        if self._physics_settle_frames >= 12:
+            self._stop_physics()
 
     def _treemap_group_key(self, path: str) -> str:
         rel = self._relative_parts(path)
@@ -521,6 +762,7 @@ class LinkGraphView(QGraphicsView):
         self._scene_rect = None
         self._edges.clear()
         self._nodes.clear()
+        self._node_items.clear()
         self._base_positions.clear()
         self._keyboard_nav_used = False
         self._wiggle_timer.stop()
@@ -541,6 +783,12 @@ class LinkGraphView(QGraphicsView):
         self._node_depths.clear()
         self._ring_layout.clear()
         self._ring_depths.clear()
+        self._center_label_item = None
+        self._physics_timer.stop()
+        self._physics_velocities.clear()
+        self._physics_running = False
+        self._physics_settle_frames = 0
+        self._pinned_nodes.clear()
 
     def wheelEvent(self, event):  # type: ignore[override]
         """Use mouse wheel/trackpad to zoom the graph directly."""
@@ -582,7 +830,18 @@ class LinkGraphView(QGraphicsView):
         self.fitInView(self._scene_rect, Qt.AspectRatioMode.KeepAspectRatio)
         self.scale(self._zoom, self._zoom)
         self._update_label_visibility()
+        self._position_center_label()
         self._reset_fade()
+
+    def resizeEvent(self, event):  # type: ignore[override]
+        super().resizeEvent(event)
+        self._position_center_label()
+
+    def _position_center_label(self) -> None:
+        if not self._center_label_item:
+            return
+        origin = self.mapToScene(12, 12)
+        self._center_label_item.setPos(origin)
 
     def _spread_positions(self, count: int, start_angle: float, end_angle: float, radius: float) -> list[QPointF]:
         if count <= 0:
@@ -597,12 +856,20 @@ class LinkGraphView(QGraphicsView):
         ]
 
     def _detect_congestion(self) -> bool:
-        if len(self._nodes) <= 1:
+        candidates = []
+        for node in self._nodes:
+            if node is self._center_item:
+                continue
+            if node is self._focused_item or node is self._hover_item:
+                candidates.append(node)
+            elif node.is_pinned() and self._show_pinned_labels:
+                candidates.append(node)
+        if len(candidates) <= 1:
             return False
         rects: list[QRectF] = []
         scale = max(0.2, self._zoom)
         padding = 6.0 / scale
-        for node in self._nodes:
+        for node in candidates:
             text_rect = node.text_item.boundingRect()
             width = text_rect.width() / scale
             height = text_rect.height() / scale
@@ -620,6 +887,12 @@ class LinkGraphView(QGraphicsView):
         self._press_pos = event.pos()
         self._press_item = self._resolve_node_item(self.itemAt(event.pos()))
         self._dragging = False
+        self._drag_node = self._press_item
+        if self._drag_node:
+            self._drag_offset = self._drag_node.pos() - self.mapToScene(event.pos())
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        else:
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):  # type: ignore[override]
@@ -630,12 +903,27 @@ class LinkGraphView(QGraphicsView):
         if node_item:
             self._set_hover_focus(node_item)
         if event.buttons() & Qt.LeftButton and self._press_pos is not None:
+            if self._drag_node:
+                if (event.pos() - self._press_pos).manhattanLength() > 3:
+                    self._dragging = True
+                new_pos = self.mapToScene(event.pos()) + self._drag_offset
+                self._pin_node(self._drag_node, True)
+                self._drag_node.setPos(new_pos)
+                self._base_positions[self._drag_node] = QPointF(new_pos)
+                self._refresh_edges()
+                if self._physics_mode:
+                    self._start_physics()
+                event.accept()
+                return
             # Mark as dragging once the cursor moves a little to allow panning the scene
             if (event.pos() - self._press_pos).manhattanLength() > 6:
                 self._dragging = True
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):  # type: ignore[override]
+        if self._drag_node:
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self._drag_node = None
         if not self._dragging and self._press_item and event.button() == Qt.LeftButton:
             # Treat as click (no drag) -> activate
             self._activate_node(self._press_item)
@@ -656,8 +944,28 @@ class LinkGraphView(QGraphicsView):
                 self._activate_node(self._focused_item)
                 handled = True
         elif key == Qt.Key_Space:
-            if self._mode_toggle_handler:
+            if self._focused_item and self._pivot_handler:
+                self._pivot_handler(self._focused_item.page_path)
+                handled = True
+            elif self._mode_toggle_handler:
                 self._mode_toggle_handler()
+                handled = True
+        elif key == Qt.Key_E:
+            if self._expand_handler:
+                self._expand_handler()
+                handled = True
+        elif key == Qt.Key_P:
+            if self._focused_item:
+                self._pin_node(self._focused_item, not self._focused_item.is_pinned())
+                self._set_focused_item(self._focused_item)
+                handled = True
+        elif key == Qt.Key_Escape:
+            if self._center_item:
+                self._set_focused_item(self._center_item)
+                handled = True
+        elif key == Qt.Key_Slash:
+            if self._focus_query_handler:
+                self._focus_query_handler()
                 handled = True
         if handled:
             event.accept()
@@ -815,8 +1123,7 @@ class LinkGraphView(QGraphicsView):
         end_x = end_pos.x() - math.cos(angle) * end_radius
         end_y = end_pos.y() - math.sin(angle) * end_radius
         line.setLine(start_x, start_y, end_x, end_y)
-        neighbor = b if a is self._center_item else a
-        opacity = neighbor.opacity() if neighbor else 1.0
+        opacity = min(a.opacity(), b.opacity())
         color = QColor("#777777")
         color.setAlphaF(0.4 + 0.6 * max(0.2, min(1.0, opacity)))
         pen = line.pen()
@@ -836,7 +1143,8 @@ class LinkGraphView(QGraphicsView):
         for node in self._nodes:
             brush = node.brush()
             color = brush.color()
-            color.setAlpha(255 if target and node is target else 200)
+            if node.opacity() >= 0.3:
+                color.setAlpha(255 if target and node is target else 200)
             brush.setColor(color)
             node.setBrush(brush)
             # Ensure hovered node (and its label) stay visually on top
@@ -859,7 +1167,9 @@ class LinkGraphView(QGraphicsView):
             self._focused_item.set_focused(True)
             self._focused_item.setZValue(6)
             self._focused_item.text_item.setZValue(7)
-            self._focused_item.text_item.setVisible(True)
+            self._focused_item.set_label_visible(True)
+            if self._focused_item is self._center_item:
+                self._focused_item.set_label_visible(False)
         if self._focused_item and force_show_label:
             if self._labels_congested:
                 self._configure_repulse(self._focused_item)
@@ -876,8 +1186,10 @@ class LinkGraphView(QGraphicsView):
 
     def _set_hover_focus(self, node: _LinkNodeItem) -> None:
         # Do not steal keyboard focus; just keep hovered label visible and on top
+        if node is self._center_item:
+            return
         if node is not self._focused_item:
-            node.text_item.setVisible(True)
+            node.set_label_visible(True)
             node.text_item.setZValue(7)
 
     def _set_hover_target(self, node: Optional[_LinkNodeItem]) -> None:
@@ -898,6 +1210,19 @@ class LinkGraphView(QGraphicsView):
     def set_mode_toggle_handler(self, handler: Callable[[], None]) -> None:
         self._mode_toggle_handler = handler
 
+    def set_pivot_handler(self, handler: Callable[[str], None]) -> None:
+        self._pivot_handler = handler
+
+    def set_expand_handler(self, handler: Callable[[], None]) -> None:
+        self._expand_handler = handler
+
+    def set_focus_query_handler(self, handler: Callable[[], None]) -> None:
+        self._focus_query_handler = handler
+
+    def set_show_pinned_labels(self, show: bool) -> None:
+        self._show_pinned_labels = show
+        self._update_label_visibility()
+
     def _configure_hover_wiggle(self, node: Optional[_LinkNodeItem]) -> None:
         if self._labels_congested:
             self._wiggle_timer.stop()
@@ -914,6 +1239,31 @@ class LinkGraphView(QGraphicsView):
     def _activate_node(self, node: _LinkNodeItem) -> None:
         self._animate_selection_to_node(node)
         self.nodeActivated.emit(node.page_path)
+
+    def _pin_node(self, node: Optional[_LinkNodeItem], pinned: bool) -> None:
+        if not node:
+            return
+        if pinned:
+            self._pinned_nodes.add(node)
+            self._pinned_paths.add(node.page_path)
+        else:
+            self._pinned_nodes.discard(node)
+            self._pinned_paths.discard(node.page_path)
+        node.set_pinned(pinned)
+        if self._physics_mode:
+            self._start_physics()
+        self._update_label_visibility()
+
+    def unpin_all(self) -> None:
+        if not self._pinned_nodes:
+            return
+        for node in list(self._pinned_nodes):
+            node.set_pinned(False)
+        self._pinned_nodes.clear()
+        self._pinned_paths.clear()
+        if self._physics_mode:
+            self._start_physics()
+        self._update_label_visibility()
 
     def _animate_selection_to_node(self, node: _LinkNodeItem) -> None:
         if not node:
@@ -1019,6 +1369,8 @@ class LinkGraphView(QGraphicsView):
             return ("incoming", self._sorted_ring(self._incoming_items).index(self._focused_item))
         if self._focused_item in self._outgoing_items:
             return ("outgoing", self._sorted_ring(self._outgoing_items).index(self._focused_item))
+        if self._focused_item in self._neighbor_items:
+            return ("neighbors", self._sorted_ring(self._neighbor_items).index(self._focused_item))
         return ("center", 0)
 
     def _sorted_ring(self, items: list[_LinkNodeItem]) -> list[_LinkNodeItem]:
@@ -1028,6 +1380,10 @@ class LinkGraphView(QGraphicsView):
     def _move_focus(self, key: int) -> bool:
         # Mark that keyboard navigation is in use so focus animation can engage
         self._keyboard_nav_used = True
+        if self._physics_mode:
+            moved = self._move_focus_spatial(key)
+            if moved:
+                return True
         if self._treemap_mode:
             moved = self._move_focus_treemap(key)
             if moved:
@@ -1037,6 +1393,8 @@ class LinkGraphView(QGraphicsView):
             if moved:
                 return True
         group, idx = self._current_group_and_index()
+        if group == "neighbors":
+            return self._move_focus_spatial(key)
         def pick(lst: list[_LinkNodeItem], new_idx: int, prefer_left: bool = False, prefer_right: bool = False) -> bool:
             if not lst:
                 return False
@@ -1091,6 +1449,29 @@ class LinkGraphView(QGraphicsView):
                 if self._center_item:
                     self._set_focused_item(self._center_item)
                     return True
+            if group == "neighbors":
+                return self._move_focus_spatial(key)
+        return False
+
+    def _move_focus_spatial(self, key: int) -> bool:
+        direction_map = {
+            Qt.Key_Left: QPointF(-1.0, 0.0),
+            Qt.Key_Right: QPointF(1.0, 0.0),
+            Qt.Key_Up: QPointF(0.0, -1.0),
+            Qt.Key_Down: QPointF(0.0, 1.0),
+        }
+        direction = direction_map.get(key)
+        if direction is None:
+            return False
+        current = self._focused_item or self._center_item
+        if not current:
+            return False
+        target = self._directional_neighbor(current, direction, strict=True)
+        if not target:
+            target = self._directional_neighbor(current, direction, strict=False)
+        if target:
+            self._set_focused_item(target)
+            return True
         return False
 
     def _move_focus_treemap(self, key: int) -> bool:
@@ -1293,18 +1674,22 @@ class LinkGraphView(QGraphicsView):
                 self._configure_repulse(self._hover_item)
         hide_for_zoom = self._zoom < self._label_hide_threshold
         for node in self._nodes:
-            show = not hide_for_zoom and not self._labels_congested
+            show = False
+            if node is self._center_item:
+                node.set_label_visible(False)
+                continue
             if node is self._focused_item:
                 show = True
             elif self._hover_item is node:
                 show = True
-            elif hide_for_zoom:
+            elif node.is_pinned() and self._show_pinned_labels:
+                show = True
+            if hide_for_zoom and node is not self._focused_item:
                 show = False
-            elif self._labels_congested:
-                show = False
-            node.text_item.setVisible(show)
+            node.set_label_visible(show)
 
     def drawForeground(self, painter, rect):  # type: ignore[override]
+        self._position_center_label()
         super().drawForeground(painter, rect)
         if self._selection_overlay_opacity <= 0.01:
             return
@@ -1346,6 +1731,9 @@ class LinkNavigatorPanel(QWidget):
 
         self.graph_view = LinkGraphView()
         self.graph_view.set_mode_toggle_handler(self._toggle_mode)
+        self.graph_view.set_pivot_handler(self._pivot_to_path)
+        self.graph_view.set_expand_handler(self._expand_depth)
+        self.graph_view.set_focus_query_handler(self._focus_query_input)
         # Route panel focus to the graph so arrow keys work without extra clicks
         self.setFocusProxy(self.graph_view)
         self.graph_view.setMinimumHeight(320)
@@ -1367,6 +1755,76 @@ class LinkNavigatorPanel(QWidget):
         )
         self.treemap_checkbox.toggled.connect(self._on_treemap_toggled)
         self.graph_view.set_treemap_mode(self.treemap_checkbox.isChecked())
+        self.physics_checkbox = QCheckBox("Physics layout")
+        self.physics_checkbox.setChecked(False)
+        self.physics_checkbox.setStyleSheet(
+            "color:#f2f2f2; padding:2px 6px; font-size:12px;"
+        )
+        self.physics_checkbox.toggled.connect(self._on_physics_toggled)
+        self.graph_view.set_physics_mode(self.physics_checkbox.isChecked())
+
+        self.depth_label = QLabel("Depth")
+        self.depth_label.setStyleSheet("color:#f2f2f2; padding:2px 2px; font-size:12px;")
+        self.depth_selector = QComboBox()
+        self.depth_selector.addItems(["1", "2", "3"])
+        self.depth_selector.setCurrentIndex(1)
+        self.depth_selector.setToolTip("Depth")
+        self.depth_selector.currentIndexChanged.connect(lambda _: self._schedule_refresh(immediate=True))
+
+        self.size_selector = QComboBox()
+        self.size_selector.addItems(["Size by: Local", "Size by: Global"])
+        self.size_selector.setToolTip("Node sizing")
+        self.size_selector.currentIndexChanged.connect(lambda _: self._schedule_refresh(immediate=True))
+
+        self.pinned_labels_checkbox = QCheckBox("Pinned labels")
+        self.pinned_labels_checkbox.setChecked(False)
+        self.pinned_labels_checkbox.setStyleSheet("color:#f2f2f2; padding:2px 6px; font-size:12px;")
+        self.pinned_labels_checkbox.toggled.connect(self.graph_view.set_show_pinned_labels)
+
+        self.unpin_btn = QToolButton()
+        self.unpin_btn.setText("Unpin all")
+        self.unpin_btn.setToolTip("Clear all pinned nodes")
+        self.unpin_btn.clicked.connect(self.graph_view.unpin_all)
+
+        self.incoming_checkbox = QCheckBox("Backlinks")
+        self.incoming_checkbox.setChecked(True)
+        self.incoming_checkbox.setStyleSheet("color:#f2f2f2; padding:2px 6px; font-size:12px;")
+        self.incoming_checkbox.toggled.connect(lambda _: self._schedule_refresh(immediate=True))
+
+        self.outgoing_checkbox = QCheckBox("Forward links")
+        self.outgoing_checkbox.setChecked(True)
+        self.outgoing_checkbox.setStyleSheet("color:#f2f2f2; padding:2px 6px; font-size:12px;")
+        self.outgoing_checkbox.toggled.connect(lambda _: self._schedule_refresh(immediate=True))
+
+        self.include_tags_edit = QLineEdit()
+        self.include_tags_edit.setPlaceholderText("Include tags (@foo @bar)")
+        self.include_tags_edit.setStyleSheet("padding:2px 6px; font-size:12px;")
+        self.include_tags_edit.textChanged.connect(self._schedule_refresh)
+
+        self.exclude_tags_edit = QLineEdit()
+        self.exclude_tags_edit.setPlaceholderText("Exclude tags (@baz)")
+        self.exclude_tags_edit.setStyleSheet("padding:2px 6px; font-size:12px;")
+        self.exclude_tags_edit.textChanged.connect(self._schedule_refresh)
+
+        self.include_all_checkbox = QCheckBox("Match all tags")
+        self.include_all_checkbox.setChecked(False)
+        self.include_all_checkbox.setStyleSheet("color:#f2f2f2; padding:2px 6px; font-size:12px;")
+        self.include_all_checkbox.toggled.connect(lambda _: self._schedule_refresh(immediate=True))
+
+        self.query_input = QLineEdit()
+        self.query_input.setPlaceholderText("Filter query")
+        self.query_input.setStyleSheet("padding:2px 6px; font-size:12px;")
+        self.query_input.textChanged.connect(self._schedule_refresh)
+
+        self.filter_mode_selector = QComboBox()
+        self.filter_mode_selector.addItems(["Hide filtered", "Fade filtered"])
+        self.filter_mode_selector.setToolTip("Filter mode")
+        self.filter_mode_selector.currentIndexChanged.connect(lambda _: self._schedule_refresh(immediate=True))
+
+        self.constrain_checkbox = QCheckBox("Constrain to tree filter")
+        self.constrain_checkbox.setChecked(False)
+        self.constrain_checkbox.setStyleSheet("color:#f2f2f2; padding:2px 6px; font-size:12px;")
+        self.constrain_checkbox.toggled.connect(lambda _: self._schedule_refresh(immediate=True))
 
         self.zoom_out_btn = QToolButton()
         self.zoom_out_btn.setText("-")
@@ -1413,9 +1871,29 @@ class LinkNavigatorPanel(QWidget):
         self.raw_toggle_checkbox.toggled.connect(lambda checked: self.set_mode("raw" if checked else "graph", persist=True))
         control_row.addWidget(self.layered_checkbox)
         control_row.addWidget(self.treemap_checkbox)
-        control_row.addWidget(self.raw_toggle_checkbox)
+        control_row.addWidget(self.physics_checkbox)
+        control_row.addSpacing(4)
+        control_row.addWidget(self.depth_label)
+        control_row.addWidget(self.depth_selector)
+        control_row.addWidget(self.size_selector)
+        control_row.addWidget(self.pinned_labels_checkbox)
+        control_row.addWidget(self.unpin_btn)
         control_row.addStretch(1)
+        control_row.addWidget(self.raw_toggle_checkbox)
+
+        filter_row = QHBoxLayout()
+        filter_row.setContentsMargins(12, 4, 12, 0)
+        filter_row.setSpacing(6)
+        filter_row.addWidget(self.incoming_checkbox)
+        filter_row.addWidget(self.outgoing_checkbox)
+        filter_row.addWidget(self.include_tags_edit, 1)
+        filter_row.addWidget(self.exclude_tags_edit, 1)
+        filter_row.addWidget(self.include_all_checkbox)
+        filter_row.addWidget(self.query_input, 1)
+        filter_row.addWidget(self.filter_mode_selector)
+        filter_row.addWidget(self.constrain_checkbox)
         graph_layout.addLayout(control_row)
+        graph_layout.addLayout(filter_row)
         graph_layout.addWidget(self.graph_view, 1)
         graph_layout.addWidget(self.legend_widget, 0)
         graph_container.setLayout(graph_layout)
@@ -1428,6 +1906,11 @@ class LinkNavigatorPanel(QWidget):
         layout.addLayout(self.stack)
         self.setLayout(layout)
         self.legend_widget.setVisible(True)
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(150)
+        self._filter_timer.timeout.connect(self._refresh_graph_only)
+        self._nav_filter_path: Optional[str] = None
         self.reload_mode_from_config()
         self.reload_layout_from_config()
 
@@ -1442,7 +1925,7 @@ class LinkNavigatorPanel(QWidget):
                 return True
         return super().eventFilter(obj, event)
 
-    def refresh(self, page_path: Optional[str] = None) -> None:
+    def refresh(self, page_path: Optional[str] = None, *, preserve_zoom: bool = False) -> None:
         # Preserve focus only if the panel currently has it
         had_focus = self.hasFocus() or self.graph_view.hasFocus() or self.raw_view.hasFocus()
         try:
@@ -1464,11 +1947,20 @@ class LinkNavigatorPanel(QWidget):
                 target.setFocus()
             return
 
-        relations = config.fetch_link_relations(self.current_page)
-        all_paths = set([self.current_page] + relations["incoming"] + relations["outgoing"])
-        titles = config.fetch_page_titles(all_paths)
+        center, nodes, edges, faded = self._build_graph_data(self.current_page)
+        self.graph_view.set_graph(center, nodes, edges, faded_paths=faded)
+        # Fit the new graph without requiring a manual refresh click
+        if not preserve_zoom:
+            self.graph_view.reset_zoom()
+        # Disable keyboard-driven animation until user navigates again
+        self.graph_view.reset_keyboard_focus_state()
+        if had_focus:
+            target = self.graph_view if self.mode == "graph" else self.raw_view
+            target.setFocus()
 
-        center = _LinkNode(
+        relations = config.fetch_link_relations(self.current_page)
+        titles = config.fetch_page_titles({self.current_page, *relations["incoming"], *relations["outgoing"]})
+        center_raw = _LinkNode(
             path=self.current_page,
             label=self._display_label(self.current_page, titles),
             direction="center",
@@ -1481,16 +1973,229 @@ class LinkNavigatorPanel(QWidget):
             _LinkNode(path=p, label=self._display_label(p, titles), direction="outgoing")
             for p in relations["outgoing"]
         ]
-        self.graph_view.set_graph(center, incoming_nodes, outgoing_nodes)
-        # Fit the new graph without requiring a manual refresh click
-        self.graph_view.reset_zoom()
-        # Disable keyboard-driven animation until user navigates again
-        self.graph_view.reset_keyboard_focus_state()
-        if had_focus:
-            target = self.graph_view if self.mode == "graph" else self.raw_view
-            target.setFocus()
-        self._update_raw_view(center, incoming_nodes, outgoing_nodes)
+        self._update_raw_view(center_raw, incoming_nodes, outgoing_nodes)
         self.title_label.setText(f"Link Navigator: {center.label}")
+
+    def _schedule_refresh(self, *_args, immediate: bool = False) -> None:
+        if immediate:
+            self._filter_timer.stop()
+            self._refresh_graph_only()
+            return
+        if self._filter_timer.isActive():
+            self._filter_timer.stop()
+        self._filter_timer.start()
+
+    def _refresh_graph_only(self) -> None:
+        if not self.current_page or not config.has_active_vault():
+            return
+        self.refresh(self.current_page, preserve_zoom=True)
+
+    def _focus_query_input(self) -> None:
+        if self.mode == "graph":
+            self.query_input.setFocus(Qt.OtherFocusReason)
+
+    def _expand_depth(self) -> None:
+        current = self.depth_selector.currentIndex()
+        if current < self.depth_selector.count() - 1:
+            self.depth_selector.setCurrentIndex(current + 1)
+            self._schedule_refresh(immediate=True)
+
+    def _pivot_to_path(self, path: str) -> None:
+        if not path or path == self.current_page:
+            return
+        self.current_page = path
+        self.refresh(path, preserve_zoom=False)
+
+    def set_navigation_filter(self, path: Optional[str], refresh: bool = True) -> None:
+        self._nav_filter_path = path
+        if refresh or self.constrain_checkbox.isChecked():
+            self._schedule_refresh(immediate=True)
+
+    def _build_graph_data(
+        self, center_path: str
+    ) -> tuple[_LinkNode, list[_LinkNode], list[tuple[str, str]], set[str]]:
+        depth = max(1, int(self.depth_selector.currentText() or "1"))
+        include_incoming = self.incoming_checkbox.isChecked()
+        include_outgoing = self.outgoing_checkbox.isChecked()
+        nodes, edges, depths, directions = self._collect_graph(center_path, depth, include_incoming, include_outgoing)
+        if center_path not in nodes:
+            nodes.add(center_path)
+            depths[center_path] = 0
+            directions[center_path] = "center"
+
+        titles = config.fetch_page_titles(nodes)
+        tags_map = config.fetch_page_tags(nodes)
+
+        include_tags = self._parse_tag_tokens(self.include_tags_edit.text())
+        exclude_tags = self._parse_tag_tokens(self.exclude_tags_edit.text())
+        query = (self.query_input.text() or "").strip().lower()
+        constrain_prefix = self._nav_filter_path if self.constrain_checkbox.isChecked() else None
+
+        filtered = self._filter_nodes(nodes, titles, tags_map, include_tags, exclude_tags, query, constrain_prefix)
+        filtered.discard(center_path)
+
+        hide_filtered = self.filter_mode_selector.currentIndex() == 0
+        if hide_filtered:
+            visible_nodes = {p for p in nodes if p not in filtered} | {center_path}
+            edges_list = [edge for edge in edges if edge[0] in visible_nodes and edge[1] in visible_nodes]
+            faded_paths: set[str] = set()
+        else:
+            visible_nodes = set(nodes)
+            edges_list = list(edges)
+            faded_paths = set(filtered)
+
+        local_degrees = self._compute_local_degrees(edges_list)
+        use_global = self.size_selector.currentIndex() == 1
+        global_degrees = config.fetch_link_degrees(visible_nodes)
+
+        nodes_list: list[_LinkNode] = []
+        for path in sorted(visible_nodes):
+            label = self._display_label(path, titles)
+            direction = directions.get(path, "incoming")
+            depth_val = depths.get(path, 0)
+            degree = global_degrees.get(path, 0) if use_global else local_degrees.get(path, 0)
+            radius = self._radius_for_degree(degree, path == center_path)
+            tags = tuple(tags_map.get(path, []))
+            nodes_list.append(
+                _LinkNode(
+                    path=path,
+                    label=label,
+                    direction=direction,
+                    depth=depth_val,
+                    radius=radius,
+                    tags=tags,
+                    filtered=path in filtered,
+                )
+            )
+
+        center_label = self._display_label(center_path, titles)
+        center_degree = global_degrees.get(center_path, 0) if use_global else local_degrees.get(center_path, 0)
+        center_node = _LinkNode(
+            path=center_path,
+            label=center_label,
+            direction="center",
+            depth=0,
+            radius=self._radius_for_degree(center_degree, True),
+            tags=tuple(tags_map.get(center_path, [])),
+            filtered=False,
+        )
+        return center_node, nodes_list, edges_list, faded_paths
+
+    def _collect_graph(
+        self,
+        center_path: str,
+        depth: int,
+        include_incoming: bool,
+        include_outgoing: bool,
+    ) -> tuple[set[str], set[tuple[str, str]], dict[str, int], dict[str, str]]:
+        nodes: set[str] = {center_path}
+        edges: set[tuple[str, str]] = set()
+        depths: dict[str, int] = {center_path: 0}
+        directions: dict[str, str] = {center_path: "center"}
+
+        def _merge_direction(existing: Optional[str], new_value: str) -> str:
+            if not existing or existing == "center":
+                return new_value
+            if existing == new_value:
+                return existing
+            return "both"
+
+        if include_outgoing:
+            frontier = {center_path}
+            visited = {center_path}
+            for level in range(1, depth + 1):
+                edge_rows = config.fetch_link_edges(from_paths=frontier)
+                next_frontier: set[str] = set()
+                for from_path, to_path in edge_rows:
+                    edges.add((from_path, to_path))
+                    nodes.add(to_path)
+                    depths[to_path] = min(depths.get(to_path, level), level)
+                    directions[to_path] = _merge_direction(directions.get(to_path), "outgoing")
+                    if to_path not in visited:
+                        visited.add(to_path)
+                        next_frontier.add(to_path)
+                if not next_frontier:
+                    break
+                frontier = next_frontier
+
+        if include_incoming:
+            frontier = {center_path}
+            visited = {center_path}
+            for level in range(1, depth + 1):
+                edge_rows = config.fetch_link_edges(to_paths=frontier)
+                next_frontier = set()
+                for from_path, to_path in edge_rows:
+                    edges.add((from_path, to_path))
+                    nodes.add(from_path)
+                    depths[from_path] = min(depths.get(from_path, level), level)
+                    directions[from_path] = _merge_direction(directions.get(from_path), "incoming")
+                    if from_path not in visited:
+                        visited.add(from_path)
+                        next_frontier.add(from_path)
+                if not next_frontier:
+                    break
+                frontier = next_frontier
+
+        return nodes, edges, depths, directions
+
+    def _compute_local_degrees(self, edges: list[tuple[str, str]]) -> dict[str, int]:
+        degrees: dict[str, int] = {}
+        for from_path, to_path in edges:
+            degrees[from_path] = degrees.get(from_path, 0) + 1
+            degrees[to_path] = degrees.get(to_path, 0) + 1
+        return degrees
+
+    def _parse_tag_tokens(self, text: str) -> set[str]:
+        tokens = [chunk.strip().lstrip("@") for chunk in (text or "").replace(",", " ").split()]
+        return {token.lower() for token in tokens if token}
+
+    def _filter_nodes(
+        self,
+        nodes: set[str],
+        titles: dict[str, str],
+        tags_map: dict[str, list[str]],
+        include_tags: set[str],
+        exclude_tags: set[str],
+        query: str,
+        constrain_prefix: Optional[str],
+    ) -> set[str]:
+        filtered: set[str] = set()
+        require_all = self.include_all_checkbox.isChecked()
+        normalized_prefix = constrain_prefix or ""
+        for path in nodes:
+            tags = {t.lower() for t in tags_map.get(path, [])}
+            if include_tags:
+                if require_all and not include_tags.issubset(tags):
+                    filtered.add(path)
+                    continue
+                if not require_all and tags.isdisjoint(include_tags):
+                    filtered.add(path)
+                    continue
+            if exclude_tags and tags.intersection(exclude_tags):
+                filtered.add(path)
+                continue
+            if normalized_prefix and normalized_prefix not in ("/", ""):
+                if not path.startswith(normalized_prefix):
+                    filtered.add(path)
+                    continue
+            if query:
+                label = self._display_label(path, titles).lower()
+                tag_blob = " ".join(sorted(tags))
+                tag_symbols = " ".join(f"@{tag}" for tag in sorted(tags))
+                query_blob = " ".join([label, path.lower(), tag_blob, tag_symbols])
+                if query not in query_blob:
+                    filtered.add(path)
+                    continue
+        return filtered
+
+    @staticmethod
+    def _radius_for_degree(degree: int, is_center: bool) -> float:
+        base = 16.0
+        scale = 5.0
+        radius = base + scale * math.sqrt(max(0, degree))
+        if is_center:
+            radius += 10.0
+        return min(64.0, max(18.0, radius))
 
     def _display_label(self, path: str, titles: dict[str, str]) -> str:
         if path in titles and titles[path]:
@@ -1582,29 +2287,35 @@ class LinkNavigatorPanel(QWidget):
         self.set_mode(saved)
 
     def _apply_layout_selection(self, layout: str, persist: bool = False) -> None:
-        normalized = layout if layout in {"layered", "treemap"} else "default"
+        normalized = layout if layout in {"layered", "treemap", "physics"} else "default"
         # Update checkboxes without retriggering persistence when requested
         try:
             self.layered_checkbox.blockSignals(True)
             self.treemap_checkbox.blockSignals(True)
+            self.physics_checkbox.blockSignals(True)
             self.layered_checkbox.setChecked(normalized == "layered")
             self.treemap_checkbox.setChecked(normalized == "treemap")
+            self.physics_checkbox.setChecked(normalized == "physics")
         finally:
             self.layered_checkbox.blockSignals(False)
             self.treemap_checkbox.blockSignals(False)
+            self.physics_checkbox.blockSignals(False)
         # Apply to the view
         self.graph_view.set_layered_mode(normalized == "layered")
         self.graph_view.set_treemap_mode(normalized == "treemap")
+        self.graph_view.set_physics_mode(normalized == "physics")
         if persist:
             self._persist_layout_choice(normalized)
 
     def _persist_layout_choice(self, forced: Optional[str] = None) -> None:
         layout = forced
-        if layout not in {"layered", "treemap"}:
+        if layout not in {"layered", "treemap", "physics"}:
             if self.treemap_checkbox.isChecked():
                 layout = "treemap"
             elif self.layered_checkbox.isChecked():
                 layout = "layered"
+            elif self.physics_checkbox.isChecked():
+                layout = "physics"
             else:
                 layout = "default"
         try:
@@ -1621,13 +2332,19 @@ class LinkNavigatorPanel(QWidget):
 
     def _on_layered_toggled(self, checked: bool) -> None:
         # Compute desired layout based on both checkboxes and reapply in one place
-        layout = "layered" if checked else ("treemap" if self.treemap_checkbox.isChecked() else "default")
+        layout = "layered" if checked else ("treemap" if self.treemap_checkbox.isChecked() else ("physics" if self.physics_checkbox.isChecked() else "default"))
         self._apply_layout_selection(layout, persist=True)
         if self.mode == "graph":
             self.graph_view.setFocus()
 
     def _on_treemap_toggled(self, checked: bool) -> None:
-        layout = "treemap" if checked else ("layered" if self.layered_checkbox.isChecked() else "default")
+        layout = "treemap" if checked else ("layered" if self.layered_checkbox.isChecked() else ("physics" if self.physics_checkbox.isChecked() else "default"))
+        self._apply_layout_selection(layout, persist=True)
+        if self.mode == "graph":
+            self.graph_view.setFocus()
+
+    def _on_physics_toggled(self, checked: bool) -> None:
+        layout = "physics" if checked else ("layered" if self.layered_checkbox.isChecked() else ("treemap" if self.treemap_checkbox.isChecked() else "default"))
         self._apply_layout_selection(layout, persist=True)
         if self.mode == "graph":
             self.graph_view.setFocus()

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QLayout,
     QLayoutItem,
     QSizePolicy,
+    QSplitter,
 )
 
 from .path_utils import path_to_colon
@@ -142,6 +143,7 @@ class TagChicklet(QPushButton):
             return """
                 QPushButton {
                     background-color: palette(button);
+                    color: palette(buttonText);
                     border: 2px solid palette(dark);
                     border-radius: 12px;
                     padding: 4px 12px;
@@ -181,7 +183,20 @@ class TagsTab(QWidget):
         """Initialize the UI layout."""
         layout = QVBoxLayout()
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
+        layout.setSpacing(0)
+        
+        # Create scrollable area for tag chicklets with flow layout
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setMinimumHeight(60)
+        scroll_area.setFrameShape(QFrame.StyledPanel)
+        scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        
+        self.tags_container = QWidget()
+        self.tags_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.tags_layout = FlowLayout(self.tags_container, margin=4, spacing=4)
+        self.tags_container.setLayout(self.tags_layout)
+        scroll_area.setWidget(self.tags_container)
         
         # Tags header with checkbox
         from PySide6.QtWidgets import QCheckBox, QToolButton
@@ -189,19 +204,19 @@ class TagsTab(QWidget):
         from PySide6.QtGui import QPalette
         header_layout = QHBoxLayout()
         header_layout.setSpacing(8)
-        
+
         tags_label = QLabel("Tags:")
         tags_label.setStyleSheet("font-weight: bold;")
         header_layout.addWidget(tags_label)
-        
+
         self.task_tags_checkbox = QCheckBox("Tasks?")
         self.task_tags_checkbox.setChecked(False)
         self.task_tags_checkbox.setToolTip("Include tags from tasks (reduces clutter when off)")
         self.task_tags_checkbox.toggled.connect(self._on_task_tags_toggled)
         header_layout.addWidget(self.task_tags_checkbox)
-        
+
         header_layout.addStretch()
-        
+
         # Refresh button
         pal = QApplication.instance().palette()
         tooltip_fg = pal.color(QPalette.ToolTipText).name()
@@ -215,28 +230,19 @@ class TagsTab(QWidget):
         )
         self.refresh_button.clicked.connect(self.refresh_tags)
         header_layout.addWidget(self.refresh_button)
-        
-        layout.addLayout(header_layout)
-        
-        # Create scrollable area for tag chicklets with flow layout
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setMinimumHeight(100)
-        scroll_area.setMaximumHeight(200)
-        scroll_area.setFrameShape(QFrame.StyledPanel)
-        
-        self.tags_container = QWidget()
-        self.tags_layout = FlowLayout(self.tags_container, margin=4, spacing=4)
-        self.tags_container.setLayout(self.tags_layout)
-        scroll_area.setWidget(self.tags_container)
-        
-        layout.addWidget(scroll_area)
-        
-        # Status label
-        self.status_label = QLabel("Select tags to filter pages")
-        self.status_label.setStyleSheet("color: gray; font-style: italic;")
-        layout.addWidget(self.status_label)
-        
+
+        tags_panel = QWidget()
+        tags_panel_layout = QVBoxLayout()
+        tags_panel_layout.setContentsMargins(0, 0, 0, 0)
+        tags_panel_layout.setSpacing(0)
+        tags_panel_layout.addLayout(header_layout)
+        tags_panel_layout.addWidget(scroll_area, 1)
+        tags_panel.setLayout(tags_panel_layout)
+
+        results_panel = QWidget()
+        results_layout = QVBoxLayout()
+        results_layout.setContentsMargins(0, 0, 0, 0)
+        results_layout.setSpacing(0)
         # Results tree
         self.results_tree = QTreeWidget()
         self.results_tree.setHeaderLabels(["Pages"])
@@ -244,7 +250,22 @@ class TagsTab(QWidget):
         self.results_tree.setRootIsDecorated(True)
         self.results_tree.itemDoubleClicked.connect(self._on_result_double_clicked)
         self.results_tree.keyPressEvent = self._on_results_key_press
-        layout.addWidget(self.results_tree, 1)
+        results_layout.addWidget(self.results_tree, 1)
+
+        # Status label
+        self.status_label = QLabel("Select tags to filter pages")
+        self.status_label.setStyleSheet("color: gray; font-style: italic;")
+        self.status_label.setMargin(0)
+        results_layout.addWidget(self.status_label)
+        results_panel.setLayout(results_layout)
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(tags_panel)
+        splitter.addWidget(results_panel)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+        splitter.setSizes([260, 300])
+        layout.addWidget(splitter, 1)
         
         self.setLayout(layout)
     
@@ -279,36 +300,25 @@ class TagsTab(QWidget):
         """Load all tags from the database and create chicklets."""
         try:
             from zimx.app import config
-            db_path = config._vault_db_path()
-            if not db_path:
-                print("[TagsTab] No vault database path available")
-                return
-            
-            import sqlite3
-            conn = sqlite3.connect(str(db_path), check_same_thread=False)
-            
-            # Get all unique tags ordered by frequency
-            # Exclude task tags if checkbox is unchecked
+            conn = config._get_conn()
+            should_close = False
+            if not conn:
+                db_path = config._vault_db_path()
+                if not db_path:
+                    print("[TagsTab] No vault database path available")
+                    return
+                import sqlite3
+                conn = sqlite3.connect(str(db_path), check_same_thread=False)
+                should_close = True
+            rows = config.fetch_tag_summary()
             if self.include_task_tags:
-                # Include all page tags
-                query = """
-                    SELECT tag, COUNT(*) as count
-                    FROM page_tags
-                    GROUP BY tag
-                    ORDER BY count DESC, tag ASC
-                """
-            else:
-                # Exclude tags that appear in task_tags
-                query = """
-                    SELECT tag, COUNT(*) as count
-                    FROM page_tags
-                    WHERE tag NOT IN (SELECT DISTINCT tag FROM task_tags)
-                    GROUP BY tag
-                    ORDER BY count DESC, tag ASC
-                """
-            
-            rows = conn.execute(query).fetchall()
-            conn.close()
+                task_rows = conn.execute("SELECT DISTINCT tag FROM task_tags").fetchall()
+                task_tags = {row[0] for row in task_rows}
+                existing = {tag for tag, _ in rows}
+                for tag in sorted(task_tags - existing):
+                    rows.append((tag, 0))
+            if should_close:
+                conn.close()
             
             print(f"[TagsTab] Query returned {len(rows)} tags from database")
             
@@ -320,11 +330,15 @@ class TagsTab(QWidget):
             # Create chicklets for each tag
             for tag, count in rows:
                 print(f"[TagsTab] Creating chicklet for tag: {tag} ({count} pages)")
-                chicklet = TagChicklet(tag, self)
+                chicklet = TagChicklet(tag, self.tags_container)
                 chicklet.setToolTip(f"@{tag} ({count} pages)")
                 chicklet.clicked.connect(lambda checked, t=tag: self._on_tag_clicked(t, checked))
                 self.tags_layout.addWidget(chicklet)
                 self.tag_chicklets[tag] = chicklet
+
+            self.tags_layout.invalidate()
+            self.tags_container.adjustSize()
+            self.tags_container.updateGeometry()
             
             print(f"[TagsTab] Loaded {len(rows)} tags")
             

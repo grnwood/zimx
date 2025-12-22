@@ -2138,6 +2138,15 @@ class MainWindow(QMainWindow):
             self.right_panel.task_panel.set_navigation_filter(self._nav_filter_path, refresh=False)
         except Exception:
             pass
+        try:
+            self.right_panel.link_panel.set_navigation_filter(self._nav_filter_path, refresh=False)
+        except Exception:
+            pass
+        for panel in list(getattr(self, "_detached_link_panels", [])):
+            try:
+                panel.set_navigation_filter(self._nav_filter_path, refresh=False)
+            except Exception:
+                pass
         self._populate_vault_tree()
         try:
             self.tree_view.expandToDepth(1)
@@ -2157,6 +2166,15 @@ class MainWindow(QMainWindow):
             self.right_panel.task_panel.set_navigation_filter(None, refresh=False)
         except Exception:
             pass
+        try:
+            self.right_panel.link_panel.set_navigation_filter(None, refresh=False)
+        except Exception:
+            pass
+        for panel in list(getattr(self, "_detached_link_panels", [])):
+            try:
+                panel.set_navigation_filter(None, refresh=False)
+            except Exception:
+                pass
         self._populate_vault_tree()
         self.tree_view.collapseAll()
         self._apply_nav_filter_style()

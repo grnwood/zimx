@@ -832,7 +832,7 @@ def save_link_navigator_mode(mode: str) -> None:
     conn.commit()
 
 def load_link_navigator_layout(default: str = "default") -> str:
-    """Load preferred Link Navigator layout (default|layered|treemap) for the active vault."""
+    """Load preferred Link Navigator layout (default|layered|treemap|physics) for the active vault."""
     conn = _get_conn()
     if not conn:
         return default
@@ -841,16 +841,16 @@ def load_link_navigator_layout(default: str = "default") -> str:
     if not row:
         return default
     layout = str(row[0]).strip().lower()
-    return layout if layout in {"default", "layered", "treemap"} else default
+    return layout if layout in {"default", "layered", "treemap", "physics"} else default
 
 
 def save_link_navigator_layout(layout: str) -> None:
-    """Persist Link Navigator layout (default|layered|treemap) for the active vault."""
+    """Persist Link Navigator layout (default|layered|treemap|physics) for the active vault."""
     conn = _get_conn()
     if not conn:
         return
     normalized = (layout or "").strip().lower()
-    if normalized not in {"default", "layered", "treemap"}:
+    if normalized not in {"default", "layered", "treemap", "physics"}:
         normalized = "default"
     conn.execute(
         "REPLACE INTO kv(key, value) VALUES(?, ?)",
@@ -2173,6 +2173,76 @@ def fetch_link_relations(path: str) -> dict[str, list[str]]:
         for row in conn.execute("SELECT from_path FROM links WHERE to_path = ?", (path,)).fetchall()
     ]
     return {"incoming": incoming, "outgoing": outgoing}
+
+def fetch_link_edges(from_paths: Iterable[str] = (), to_paths: Iterable[str] = ()) -> list[tuple[str, str]]:
+    """Return link edges for the provided from/to path sets."""
+    conn = _get_conn()
+    if not conn:
+        return []
+    edges: list[tuple[str, str]] = []
+    from_list = [p for p in set(from_paths) if p]
+    if from_list:
+        placeholders = ",".join("?" for _ in from_list)
+        rows = conn.execute(
+            f"SELECT from_path, to_path FROM links WHERE from_path IN ({placeholders})",
+            from_list,
+        ).fetchall()
+        edges.extend((row[0], row[1]) for row in rows)
+    to_list = [p for p in set(to_paths) if p]
+    if to_list:
+        placeholders = ",".join("?" for _ in to_list)
+        rows = conn.execute(
+            f"SELECT from_path, to_path FROM links WHERE to_path IN ({placeholders})",
+            to_list,
+        ).fetchall()
+        edges.extend((row[0], row[1]) for row in rows)
+    return edges
+
+
+def fetch_page_tags(paths: Iterable[str]) -> dict[str, list[str]]:
+    """Return a mapping of page path -> list of tags for the provided paths."""
+    conn = _get_conn()
+    if not conn:
+        return {}
+    unique = [p for p in set(paths) if p]
+    if not unique:
+        return {}
+    placeholders = ",".join("?" for _ in unique)
+    rows = conn.execute(
+        f"SELECT page, tag FROM page_tags WHERE page IN ({placeholders})",
+        unique,
+    ).fetchall()
+    tags: dict[str, list[str]] = {path: [] for path in unique}
+    for page, tag in rows:
+        if page not in tags:
+            tags[page] = []
+        tags[page].append(tag)
+    return tags
+
+
+def fetch_link_degrees(paths: Iterable[str]) -> dict[str, int]:
+    """Return total link degree (incoming + outgoing) for provided paths."""
+    conn = _get_conn()
+    if not conn:
+        return {}
+    unique = [p for p in set(paths) if p]
+    if not unique:
+        return {}
+    placeholders = ",".join("?" for _ in unique)
+    degrees: dict[str, int] = {path: 0 for path in unique}
+    rows = conn.execute(
+        f"SELECT from_path, COUNT(*) FROM links WHERE from_path IN ({placeholders}) GROUP BY from_path",
+        unique,
+    ).fetchall()
+    for path, count in rows:
+        degrees[path] = degrees.get(path, 0) + int(count or 0)
+    rows = conn.execute(
+        f"SELECT to_path, COUNT(*) FROM links WHERE to_path IN ({placeholders}) GROUP BY to_path",
+        unique,
+    ).fetchall()
+    for path, count in rows:
+        degrees[path] = degrees.get(path, 0) + int(count or 0)
+    return degrees
 
 
 def fetch_page_titles(paths: Iterable[str]) -> dict[str, str]:
