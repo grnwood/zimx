@@ -1,0 +1,491 @@
+<?xml version="1.0" standalone="no"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg version="1.1" width="1200" height="698" onload="init(evt)" viewBox="0 0 1200 698" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:fg="http://github.com/jonhoo/inferno"><!--Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples.--><!--NOTES: --><defs><linearGradient id="background" y1="0" y2="1" x1="0" x2="0"><stop stop-color="#eeeeee" offset="5%"/><stop stop-color="#eeeeb0" offset="95%"/></linearGradient></defs><style type="text/css">
+text { font-family:monospace; font-size:12px }
+#title { text-anchor:middle; font-size:17px; }
+#matched { text-anchor:end; }
+#search { text-anchor:end; opacity:0.1; cursor:pointer; }
+#search:hover, #search.show { opacity:1; }
+#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+#unzoom { cursor:pointer; }
+#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+.hide { display:none; }
+.parent { opacity:0.5; }
+</style><script type="text/ecmascript"><![CDATA[
+        var nametype = 'Function:';
+        var fontsize = 12;
+        var fontwidth = 0.59;
+        var xpad = 10;
+        var inverted = true;
+        var searchcolor = 'rgb(230,0,230)';
+        var fluiddrawing = true;
+        var truncate_text_right = false;
+    ]]><![CDATA["use strict";
+var details, searchbtn, unzoombtn, matchedtxt, svg, searching, frames, known_font_width;
+function init(evt) {
+    details = document.getElementById("details").firstChild;
+    searchbtn = document.getElementById("search");
+    unzoombtn = document.getElementById("unzoom");
+    matchedtxt = document.getElementById("matched");
+    svg = document.getElementsByTagName("svg")[0];
+    frames = document.getElementById("frames");
+    known_font_width = get_monospace_width(frames);
+    total_samples = parseInt(frames.attributes.total_samples.value);
+    searching = 0;
+
+    // Use GET parameters to restore a flamegraph's state.
+    var restore_state = function() {
+        var params = get_params();
+        if (params.x && params.y)
+            zoom(find_group(document.querySelector('[*|x="' + params.x + '"][y="' + params.y + '"]')));
+        if (params.s)
+            search(params.s);
+    };
+
+    if (fluiddrawing) {
+        // Make width dynamic so the SVG fits its parent's width.
+        svg.removeAttribute("width");
+        // Edge requires us to have a viewBox that gets updated with size changes.
+        var isEdge = /Edge\/\d./i.test(navigator.userAgent);
+        if (!isEdge) {
+            svg.removeAttribute("viewBox");
+        }
+        var update_for_width_change = function() {
+            if (isEdge) {
+                svg.attributes.viewBox.value = "0 0 " + svg.width.baseVal.value + " " + svg.height.baseVal.value;
+            }
+
+            // Keep consistent padding on left and right of frames container.
+            frames.attributes.width.value = svg.width.baseVal.value - xpad * 2;
+
+            // Text truncation needs to be adjusted for the current width.
+            update_text_for_elements(frames.children);
+
+            // Keep search elements at a fixed distance from right edge.
+            var svgWidth = svg.width.baseVal.value;
+            searchbtn.attributes.x.value = svgWidth - xpad;
+            matchedtxt.attributes.x.value = svgWidth - xpad;
+        };
+        window.addEventListener('resize', function() {
+            update_for_width_change();
+        });
+        // This needs to be done asynchronously for Safari to work.
+        setTimeout(function() {
+            unzoom();
+            update_for_width_change();
+            restore_state();
+        }, 0);
+    } else {
+        restore_state();
+    }
+}
+// event listeners
+window.addEventListener("click", function(e) {
+    var target = find_group(e.target);
+    if (target) {
+        if (target.nodeName == "a") {
+            if (e.ctrlKey === false) return;
+            e.preventDefault();
+        }
+        if (target.classList.contains("parent")) unzoom();
+        zoom(target);
+
+        // set parameters for zoom state
+        var el = target.querySelector("rect");
+        if (el && el.attributes && el.attributes.y && el.attributes["fg:x"]) {
+            var params = get_params()
+            params.x = el.attributes["fg:x"].value;
+            params.y = el.attributes.y.value;
+            history.replaceState(null, null, parse_params(params));
+        }
+    }
+    else if (e.target.id == "unzoom") {
+        unzoom();
+
+        // remove zoom state
+        var params = get_params();
+        if (params.x) delete params.x;
+        if (params.y) delete params.y;
+        history.replaceState(null, null, parse_params(params));
+    }
+    else if (e.target.id == "search") search_prompt();
+}, false)
+// mouse-over for info
+// show
+window.addEventListener("mouseover", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = nametype + " " + g_to_text(target);
+}, false)
+// clear
+window.addEventListener("mouseout", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = ' ';
+}, false)
+// ctrl-F for search
+window.addEventListener("keydown",function (e) {
+    if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+        e.preventDefault();
+        search_prompt();
+    }
+}, false)
+// functions
+function get_params() {
+    var params = {};
+    var paramsarr = window.location.search.substr(1).split('&');
+    for (var i = 0; i < paramsarr.length; ++i) {
+        var tmp = paramsarr[i].split("=");
+        if (!tmp[0] || !tmp[1]) continue;
+        params[tmp[0]]  = decodeURIComponent(tmp[1]);
+    }
+    return params;
+}
+function parse_params(params) {
+    var uri = "?";
+    for (var key in params) {
+        uri += key + '=' + encodeURIComponent(params[key]) + '&';
+    }
+    if (uri.slice(-1) == "&")
+        uri = uri.substring(0, uri.length - 1);
+    if (uri == '?')
+        uri = window.location.href.split('?')[0];
+    return uri;
+}
+function find_child(node, selector) {
+    var children = node.querySelectorAll(selector);
+    if (children.length) return children[0];
+    return;
+}
+function find_group(node) {
+    var parent = node.parentElement;
+    if (!parent) return;
+    if (parent.id == "frames") return node;
+    return find_group(parent);
+}
+function orig_save(e, attr, val) {
+    if (e.attributes["fg:orig_" + attr] != undefined) return;
+    if (e.attributes[attr] == undefined) return;
+    if (val == undefined) val = e.attributes[attr].value;
+    e.setAttribute("fg:orig_" + attr, val);
+}
+function orig_load(e, attr) {
+    if (e.attributes["fg:orig_"+attr] == undefined) return;
+    e.attributes[attr].value = e.attributes["fg:orig_" + attr].value;
+    e.removeAttribute("fg:orig_" + attr);
+}
+function g_to_text(e) {
+    var text = find_child(e, "title").firstChild.nodeValue;
+    return (text)
+}
+function g_to_func(e) {
+    var func = g_to_text(e);
+    // if there's any manipulation we want to do to the function
+    // name before it's searched, do it here before returning.
+    return (func);
+}
+function get_monospace_width(frames) {
+    // Given the id="frames" element, return the width of text characters if
+    // this is a monospace font, otherwise return 0.
+    text = find_child(frames.children[0], "text");
+    originalContent = text.textContent;
+    text.textContent = "!";
+    bangWidth = text.getComputedTextLength();
+    text.textContent = "W";
+    wWidth = text.getComputedTextLength();
+    text.textContent = originalContent;
+    if (bangWidth === wWidth) {
+        return bangWidth;
+    } else {
+        return 0;
+    }
+}
+function update_text_for_elements(elements) {
+    // In order to render quickly in the browser, you want to do one pass of
+    // reading attributes, and one pass of mutating attributes. See
+    // https://web.dev/avoid-large-complex-layouts-and-layout-thrashing/ for details.
+
+    // Fall back to inefficient calculation, if we're variable-width font.
+    // TODO This should be optimized somehow too.
+    if (known_font_width === 0) {
+        for (var i = 0; i < elements.length; i++) {
+            update_text(elements[i]);
+        }
+        return;
+    }
+
+    var textElemNewAttributes = [];
+    for (var i = 0; i < elements.length; i++) {
+        var e = elements[i];
+        var r = find_child(e, "rect");
+        var t = find_child(e, "text");
+        var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+        var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+        var newX = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+
+        // Smaller than this size won't fit anything
+        if (w < 2 * known_font_width) {
+            textElemNewAttributes.push([newX, ""]);
+            continue;
+        }
+
+        // Fit in full text width
+        if (txt.length * known_font_width < w) {
+            textElemNewAttributes.push([newX, txt]);
+            continue;
+        }
+
+        var substringLength = Math.floor(w / known_font_width) - 2;
+        if (truncate_text_right) {
+            // Truncate the right side of the text.
+            textElemNewAttributes.push([newX, txt.substring(0, substringLength) + ".."]);
+            continue;
+        } else {
+            // Truncate the left side of the text.
+            textElemNewAttributes.push([newX, ".." + txt.substring(txt.length - substringLength, txt.length)]);
+            continue;
+        }
+    }
+
+    console.assert(textElemNewAttributes.length === elements.length, "Resize failed, please file a bug at https://github.com/jonhoo/inferno/");
+
+    // Now that we know new textContent, set it all in one go so we don't refresh a bazillion times.
+    for (var i = 0; i < elements.length; i++) {
+        var e = elements[i];
+        var values = textElemNewAttributes[i];
+        var t = find_child(e, "text");
+        t.attributes.x.value = values[0];
+        t.textContent = values[1];
+    }
+}
+
+function update_text(e) {
+    var r = find_child(e, "rect");
+    var t = find_child(e, "text");
+    var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+    var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+    t.attributes.x.value = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+
+    // Smaller than this size won't fit anything
+    if (w < 2 * fontsize * fontwidth) {
+        t.textContent = "";
+        return;
+    }
+    t.textContent = txt;
+    // Fit in full text width
+    if (t.getComputedTextLength() < w)
+        return;
+    if (truncate_text_right) {
+        // Truncate the right side of the text.
+        for (var x = txt.length - 2; x > 0; x--) {
+            if (t.getSubStringLength(0, x + 2) <= w) {
+                t.textContent = txt.substring(0, x) + "..";
+                return;
+            }
+        }
+    } else {
+        // Truncate the left side of the text.
+        for (var x = 2; x < txt.length; x++) {
+            if (t.getSubStringLength(x - 2, txt.length) <= w) {
+                t.textContent = ".." + txt.substring(x, txt.length);
+                return;
+            }
+        }
+    }
+    t.textContent = "";
+}
+// zoom
+function zoom_reset(e) {
+    if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * parseInt(e.attributes["fg:x"].value) / total_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / total_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_reset(c[i]);
+    }
+}
+function zoom_child(e, x, zoomed_width_samples) {
+    if (e.tagName == "text") {
+        var parent_x = parseFloat(find_child(e.parentNode, "rect[x]").attributes.x.value);
+        e.attributes.x.value = format_percent(parent_x + (100 * 3 / frames.attributes.width.value));
+    } else if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * (parseInt(e.attributes["fg:x"].value) - x) / zoomed_width_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / zoomed_width_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_child(c[i], x, zoomed_width_samples);
+    }
+}
+function zoom_parent(e) {
+    if (e.attributes) {
+        if (e.attributes.x != undefined) {
+            e.attributes.x.value = "0.0%";
+        }
+        if (e.attributes.width != undefined) {
+            e.attributes.width.value = "100.0%";
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_parent(c[i]);
+    }
+}
+function zoom(node) {
+    var attr = find_child(node, "rect").attributes;
+    var width = parseInt(attr["fg:w"].value);
+    var xmin = parseInt(attr["fg:x"].value);
+    var xmax = xmin + width;
+    var ymin = parseFloat(attr.y.value);
+    unzoombtn.classList.remove("hide");
+    var el = frames.children;
+    var to_update_text = [];
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var a = find_child(e, "rect").attributes;
+        var ex = parseInt(a["fg:x"].value);
+        var ew = parseInt(a["fg:w"].value);
+        // Is it an ancestor
+        if (!inverted) {
+            var upstack = parseFloat(a.y.value) > ymin;
+        } else {
+            var upstack = parseFloat(a.y.value) < ymin;
+        }
+        if (upstack) {
+            // Direct ancestor
+            if (ex <= xmin && (ex+ew) >= xmax) {
+                e.classList.add("parent");
+                zoom_parent(e);
+                to_update_text.push(e);
+            }
+            // not in current path
+            else
+                e.classList.add("hide");
+        }
+        // Children maybe
+        else {
+            // no common path
+            if (ex < xmin || ex >= xmax) {
+                e.classList.add("hide");
+            }
+            else {
+                zoom_child(e, xmin, width);
+                to_update_text.push(e);
+            }
+        }
+    }
+    update_text_for_elements(to_update_text);
+}
+function unzoom() {
+    unzoombtn.classList.add("hide");
+    var el = frames.children;
+    for(var i = 0; i < el.length; i++) {
+        el[i].classList.remove("parent");
+        el[i].classList.remove("hide");
+        zoom_reset(el[i]);
+    }
+    update_text_for_elements(el);
+}
+// search
+function reset_search() {
+    var el = document.querySelectorAll("#frames rect");
+    for (var i = 0; i < el.length; i++) {
+        orig_load(el[i], "fill")
+    }
+    var params = get_params();
+    delete params.s;
+    history.replaceState(null, null, parse_params(params));
+}
+function search_prompt() {
+    if (!searching) {
+        var term = prompt("Enter a search term (regexp " +
+            "allowed, eg: ^ext4_)", "");
+        if (term != null) {
+            search(term)
+        }
+    } else {
+        reset_search();
+        searching = 0;
+        searchbtn.classList.remove("show");
+        searchbtn.firstChild.nodeValue = "Search"
+        matchedtxt.classList.add("hide");
+        matchedtxt.firstChild.nodeValue = ""
+    }
+}
+function search(term) {
+    var re = new RegExp(term);
+    var el = frames.children;
+    var matches = new Object();
+    var maxwidth = 0;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        // Skip over frames which are either not visible, or below the zoomed-to frame
+        if (e.classList.contains("hide") || e.classList.contains("parent")) {
+            continue;
+        }
+        var func = g_to_func(e);
+        var rect = find_child(e, "rect");
+        if (func == null || rect == null)
+            continue;
+        // Save max width. Only works as we have a root frame
+        var w = parseInt(rect.attributes["fg:w"].value);
+        if (w > maxwidth)
+            maxwidth = w;
+        if (func.match(re)) {
+            // highlight
+            var x = parseInt(rect.attributes["fg:x"].value);
+            orig_save(rect, "fill");
+            rect.attributes.fill.value = searchcolor;
+            // remember matches
+            if (matches[x] == undefined) {
+                matches[x] = w;
+            } else {
+                if (w > matches[x]) {
+                    // overwrite with parent
+                    matches[x] = w;
+                }
+            }
+            searching = 1;
+        }
+    }
+    if (!searching)
+        return;
+    var params = get_params();
+    params.s = term;
+    history.replaceState(null, null, parse_params(params));
+
+    searchbtn.classList.add("show");
+    searchbtn.firstChild.nodeValue = "Reset Search";
+    // calculate percent matched, excluding vertical overlap
+    var count = 0;
+    var lastx = -1;
+    var lastw = 0;
+    var keys = Array();
+    for (k in matches) {
+        if (matches.hasOwnProperty(k))
+            keys.push(k);
+    }
+    // sort the matched frames by their x location
+    // ascending, then width descending
+    keys.sort(function(a, b){
+        return a - b;
+    });
+    // Step through frames saving only the biggest bottom-up frames
+    // thanks to the sort order. This relies on the tree property
+    // where children are always smaller than their parents.
+    for (var k in keys) {
+        var x = parseInt(keys[k]);
+        var w = matches[keys[k]];
+        if (x >= lastx + lastw) {
+            count += w;
+            lastx = x;
+            lastw = w;
+        }
+    }
+    // display matched percent
+    matchedtxt.classList.remove("hide");
+    var pct = 100 * count / maxwidth;
+    if (pct != 100) pct = pct.toFixed(1);
+    matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+}
+function format_percent(n) {
+    return n.toFixed(4) + "%";
+}
+]]></script><rect x="0" y="0" width="100%" height="698" fill="url(#background)"/><text id="title" fill="rgb(0,0,0)" x="50.0000%" y="24.00">C:\Users\jogreenw\code-local\github-personal\zimx\venv\Scripts\py-spy.exe record -o cpu.svg --pid 23532</text><text id="details" fill="rgb(0,0,0)" x="10" y="40.00"> </text><text id="unzoom" class="hide" fill="rgb(0,0,0)" x="10" y="24.00">Reset Zoom</text><text id="search" fill="rgb(0,0,0)" x="1190" y="24.00">Search</text><text id="matched" fill="rgb(0,0,0)" x="1190" y="687.00"> </text><svg id="frames" x="10" width="1180" total_samples="12172"><g><title>set_active_vault (zimx\app\config.py:2107) (22 samples, 0.18%)</title><rect x="0.1397%" y="132" width="0.1807%" height="15" fill="rgb(227,0,7)" fg:x="17" fg:w="22"/><text x="0.3897%" y="142.50"></text></g><g><title>_prime_page_cache (zimx\app\config.py:45) (26 samples, 0.21%)</title><rect x="0.3368%" y="148" width="0.2136%" height="15" fill="rgb(217,0,24)" fg:x="41" fg:w="26"/><text x="0.5868%" y="158.50"></text></g><g><title>select_vault (zimx\server\api.py:294) (62 samples, 0.51%)</title><rect x="0.0822%" y="116" width="0.5094%" height="15" fill="rgb(221,193,54)" fg:x="10" fg:w="62"/><text x="0.3322%" y="126.50"></text></g><g><title>set_active_vault (zimx\app\config.py:2108) (33 samples, 0.27%)</title><rect x="0.3204%" y="132" width="0.2711%" height="15" fill="rgb(248,212,6)" fg:x="39" fg:w="33"/><text x="0.5704%" y="142.50"></text></g><g><title>run (anyio\_backends\_asyncio.py:986) (82 samples, 0.67%)</title><rect x="0.0000%" y="100" width="0.6737%" height="15" fill="rgb(208,68,35)" fg:x="0" fg:w="82"/><text x="0.2500%" y="110.50"></text></g><g><title>_run_once (asyncio\base_events.py:2012) (115 samples, 0.94%)</title><rect x="0.7148%" y="196" width="0.9448%" height="15" fill="rgb(232,128,0)" fg:x="87" fg:w="115"/><text x="0.9648%" y="206.50"></text></g><g><title>select (asyncio\windows_events.py:446) (115 samples, 0.94%)</title><rect x="0.7148%" y="212" width="0.9448%" height="15" fill="rgb(207,160,47)" fg:x="87" fg:w="115"/><text x="0.9648%" y="222.50"></text></g><g><title>_poll (asyncio\windows_events.py:775) (115 samples, 0.94%)</title><rect x="0.7148%" y="228" width="0.9448%" height="15" fill="rgb(228,23,34)" fg:x="87" fg:w="115"/><text x="0.9648%" y="238.50"></text></g><g><title>exec_module (&lt;frozen importlib._bootstrap_external&gt;:1023) (32 samples, 0.26%)</title><rect x="1.9060%" y="628" width="0.2629%" height="15" fill="rgb(218,30,26)" fg:x="232" fg:w="32"/><text x="2.1560%" y="638.50"></text></g><g><title>get_code (&lt;frozen importlib._bootstrap_external&gt;:1156) (27 samples, 0.22%)</title><rect x="1.9471%" y="644" width="0.2218%" height="15" fill="rgb(220,122,19)" fg:x="237" fg:w="27"/><text x="2.1971%" y="654.50"></text></g><g><title>_compile_bytecode (&lt;frozen importlib._bootstrap_external&gt;:785) (27 samples, 0.22%)</title><rect x="1.9471%" y="660" width="0.2218%" height="15" fill="rgb(250,228,42)" fg:x="237" fg:w="27"/><text x="2.1971%" y="670.50"></text></g><g><title>get_async_backend (anyio\_core\_eventloop.py:195) (180 samples, 1.48%)</title><rect x="1.8074%" y="532" width="1.4788%" height="15" fill="rgb(240,193,28)" fg:x="220" fg:w="180"/><text x="2.0574%" y="542.50"></text></g><g><title>import_module (importlib\__init__.py:88) (180 samples, 1.48%)</title><rect x="1.8074%" y="548" width="1.4788%" height="15" fill="rgb(216,20,37)" fg:x="220" fg:w="180"/><text x="2.0574%" y="558.50"></text></g><g><title>_gcd_import (&lt;frozen importlib._bootstrap&gt;:1387) (180 samples, 1.48%)</title><rect x="1.8074%" y="564" width="1.4788%" height="15" fill="rgb(206,188,39)" fg:x="220" fg:w="180"/><text x="2.0574%" y="574.50"></text></g><g><title>_find_and_load (&lt;frozen importlib._bootstrap&gt;:1360) (180 samples, 1.48%)</title><rect x="1.8074%" y="580" width="1.4788%" height="15" fill="rgb(217,207,13)" fg:x="220" fg:w="180"/><text x="2.0574%" y="590.50"></text></g><g><title>_find_and_load_unlocked (&lt;frozen importlib._bootstrap&gt;:1331) (168 samples, 1.38%)</title><rect x="1.9060%" y="596" width="1.3802%" height="15" fill="rgb(231,73,38)" fg:x="232" fg:w="168"/><text x="2.1560%" y="606.50"></text></g><g><title>_load_unlocked (&lt;frozen importlib._bootstrap&gt;:935) (168 samples, 1.38%)</title><rect x="1.9060%" y="612" width="1.3802%" height="15" fill="rgb(225,20,46)" fg:x="232" fg:w="168"/><text x="2.1560%" y="622.50"></text></g><g><title>exec_module (&lt;frozen importlib._bootstrap_external&gt;:1027) (136 samples, 1.12%)</title><rect x="2.1689%" y="628" width="1.1173%" height="15" fill="rgb(210,31,41)" fg:x="264" fg:w="136"/><text x="2.4189%" y="638.50"></text></g><g><title>_call_with_frames_removed (&lt;frozen importlib._bootstrap&gt;:488) (136 samples, 1.12%)</title><rect x="2.1689%" y="644" width="1.1173%" height="15" fill="rgb(221,200,47)" fg:x="264" fg:w="136"/><text x="2.4189%" y="654.50"></text></g><g><title>app (fastapi\routing.py:391) (184 samples, 1.51%)</title><rect x="1.7992%" y="468" width="1.5117%" height="15" fill="rgb(226,26,5)" fg:x="219" fg:w="184"/><text x="2.0492%" y="478.50"></text></g><g><title>run_endpoint_function (fastapi\routing.py:292) (184 samples, 1.51%)</title><rect x="1.7992%" y="484" width="1.5117%" height="15" fill="rgb(249,33,26)" fg:x="219" fg:w="184"/><text x="2.0492%" y="494.50"></text></g><g><title>run_in_threadpool (starlette\concurrency.py:32) (184 samples, 1.51%)</title><rect x="1.7992%" y="500" width="1.5117%" height="15" fill="rgb(235,183,28)" fg:x="219" fg:w="184"/><text x="2.0492%" y="510.50"></text></g><g><title>run_sync (anyio\to_thread.py:61) (183 samples, 1.50%)</title><rect x="1.8074%" y="516" width="1.5035%" height="15" fill="rgb(221,5,38)" fg:x="220" fg:w="183"/><text x="2.0574%" y="526.50"></text></g><g><title>app (fastapi\routing.py:111) (194 samples, 1.59%)</title><rect x="1.7335%" y="452" width="1.5938%" height="15" fill="rgb(247,18,42)" fg:x="211" fg:w="194"/><text x="1.9835%" y="462.50"></text></g><g><title>run_asgi (uvicorn\protocols\http\httptools_impl.py:409) (199 samples, 1.63%)</title><rect x="1.7171%" y="228" width="1.6349%" height="15" fill="rgb(241,131,45)" fg:x="209" fg:w="199"/><text x="1.9671%" y="238.50"></text></g><g><title>__call__ (uvicorn\middleware\proxy_headers.py:60) (198 samples, 1.63%)</title><rect x="1.7253%" y="244" width="1.6267%" height="15" fill="rgb(249,31,29)" fg:x="210" fg:w="198"/><text x="1.9753%" y="254.50"></text></g><g><title>__call__ (fastapi\applications.py:1134) (198 samples, 1.63%)</title><rect x="1.7253%" y="260" width="1.6267%" height="15" fill="rgb(225,111,53)" fg:x="210" fg:w="198"/><text x="1.9753%" y="270.50"></text></g><g><title>__call__ (starlette\applications.py:107) (198 samples, 1.63%)</title><rect x="1.7253%" y="276" width="1.6267%" height="15" fill="rgb(238,160,17)" fg:x="210" fg:w="198"/><text x="1.9753%" y="286.50"></text></g><g><title>__call__ (starlette\middleware\errors.py:164) (198 samples, 1.63%)</title><rect x="1.7253%" y="292" width="1.6267%" height="15" fill="rgb(214,148,48)" fg:x="210" fg:w="198"/><text x="1.9753%" y="302.50"></text></g><g><title>__call__ (starlette\middleware\cors.py:85) (198 samples, 1.63%)</title><rect x="1.7253%" y="308" width="1.6267%" height="15" fill="rgb(232,36,49)" fg:x="210" fg:w="198"/><text x="1.9753%" y="318.50"></text></g><g><title>__call__ (starlette\middleware\exceptions.py:63) (198 samples, 1.63%)</title><rect x="1.7253%" y="324" width="1.6267%" height="15" fill="rgb(209,103,24)" fg:x="210" fg:w="198"/><text x="1.9753%" y="334.50"></text></g><g><title>wrapped_app (starlette\_exception_handler.py:42) (197 samples, 1.62%)</title><rect x="1.7335%" y="340" width="1.6185%" height="15" fill="rgb(229,88,8)" fg:x="211" fg:w="197"/><text x="1.9835%" y="350.50"></text></g><g><title>__call__ (fastapi\middleware\asyncexitstack.py:18) (197 samples, 1.62%)</title><rect x="1.7335%" y="356" width="1.6185%" height="15" fill="rgb(213,181,19)" fg:x="211" fg:w="197"/><text x="1.9835%" y="366.50"></text></g><g><title>__call__ (starlette\routing.py:716) (197 samples, 1.62%)</title><rect x="1.7335%" y="372" width="1.6185%" height="15" fill="rgb(254,191,54)" fg:x="211" fg:w="197"/><text x="1.9835%" y="382.50"></text></g><g><title>app (starlette\routing.py:736) (197 samples, 1.62%)</title><rect x="1.7335%" y="388" width="1.6185%" height="15" fill="rgb(241,83,37)" fg:x="211" fg:w="197"/><text x="1.9835%" y="398.50"></text></g><g><title>handle (starlette\routing.py:290) (197 samples, 1.62%)</title><rect x="1.7335%" y="404" width="1.6185%" height="15" fill="rgb(233,36,39)" fg:x="211" fg:w="197"/><text x="1.9835%" y="414.50"></text></g><g><title>app (fastapi\routing.py:125) (197 samples, 1.62%)</title><rect x="1.7335%" y="420" width="1.6185%" height="15" fill="rgb(226,3,54)" fg:x="211" fg:w="197"/><text x="1.9835%" y="430.50"></text></g><g><title>wrapped_app (starlette\_exception_handler.py:42) (197 samples, 1.62%)</title><rect x="1.7335%" y="436" width="1.6185%" height="15" fill="rgb(245,192,40)" fg:x="211" fg:w="197"/><text x="1.9835%" y="446.50"></text></g><g><title>serve (uvicorn\server.py:71) (15 samples, 0.12%)</title><rect x="3.3520%" y="228" width="0.1232%" height="15" fill="rgb(238,167,29)" fg:x="408" fg:w="15"/><text x="3.6020%" y="238.50"></text></g><g><title>_serve (uvicorn\server.py:89) (15 samples, 0.12%)</title><rect x="3.3520%" y="244" width="0.1232%" height="15" fill="rgb(232,182,51)" fg:x="408" fg:w="15"/><text x="3.6020%" y="254.50"></text></g><g><title>_bootstrap (threading.py:1014) (424 samples, 3.48%)</title><rect x="0.0000%" y="68" width="3.4834%" height="15" fill="rgb(231,60,39)" fg:x="0" fg:w="424"/><text x="0.2500%" y="78.50">_bo..</text></g><g><title>_bootstrap_inner (threading.py:1043) (424 samples, 3.48%)</title><rect x="0.0000%" y="84" width="3.4834%" height="15" fill="rgb(208,69,12)" fg:x="0" fg:w="424"/><text x="0.2500%" y="94.50">_bo..</text></g><g><title>run (threading.py:994) (338 samples, 2.78%)</title><rect x="0.7065%" y="100" width="2.7769%" height="15" fill="rgb(235,93,37)" fg:x="86" fg:w="338"/><text x="0.9565%" y="110.50">ru..</text></g><g><title>run (uvicorn\server.py:67) (338 samples, 2.78%)</title><rect x="0.7065%" y="116" width="2.7769%" height="15" fill="rgb(213,116,39)" fg:x="86" fg:w="338"/><text x="0.9565%" y="126.50">ru..</text></g><g><title>run (asyncio\runners.py:195) (338 samples, 2.78%)</title><rect x="0.7065%" y="132" width="2.7769%" height="15" fill="rgb(222,207,29)" fg:x="86" fg:w="338"/><text x="0.9565%" y="142.50">ru..</text></g><g><title>run (asyncio\runners.py:118) (338 samples, 2.78%)</title><rect x="0.7065%" y="148" width="2.7769%" height="15" fill="rgb(206,96,30)" fg:x="86" fg:w="338"/><text x="0.9565%" y="158.50">ru..</text></g><g><title>run_until_complete (asyncio\base_events.py:712) (338 samples, 2.78%)</title><rect x="0.7065%" y="164" width="2.7769%" height="15" fill="rgb(218,138,4)" fg:x="86" fg:w="338"/><text x="0.9565%" y="174.50">ru..</text></g><g><title>run_forever (asyncio\base_events.py:683) (338 samples, 2.78%)</title><rect x="0.7065%" y="180" width="2.7769%" height="15" fill="rgb(250,191,14)" fg:x="86" fg:w="338"/><text x="0.9565%" y="190.50">ru..</text></g><g><title>_run_once (asyncio\base_events.py:2050) (221 samples, 1.82%)</title><rect x="1.6678%" y="196" width="1.8156%" height="15" fill="rgb(239,60,40)" fg:x="203" fg:w="221"/><text x="1.9178%" y="206.50">_..</text></g><g><title>_run (asyncio\events.py:89) (221 samples, 1.82%)</title><rect x="1.6678%" y="212" width="1.8156%" height="15" fill="rgb(206,27,48)" fg:x="203" fg:w="221"/><text x="1.9178%" y="222.50">_..</text></g><g><title>_select_vault (zimx\app\ui\main_window.py:1230) (43 samples, 0.35%)</title><rect x="3.4916%" y="148" width="0.3533%" height="15" fill="rgb(225,35,8)" fg:x="425" fg:w="43"/><text x="3.7416%" y="158.50"></text></g><g><title>_set_vault (zimx\app\ui\main_window.py:1557) (17 samples, 0.14%)</title><rect x="4.0914%" y="164" width="0.1397%" height="15" fill="rgb(250,213,24)" fg:x="498" fg:w="17"/><text x="4.3414%" y="174.50"></text></g><g><title>_populate_vault_tree (zimx\app\ui\main_window.py:2261) (17 samples, 0.14%)</title><rect x="4.0914%" y="180" width="0.1397%" height="15" fill="rgb(247,123,22)" fg:x="498" fg:w="17"/><text x="4.3414%" y="190.50"></text></g><g><title>refresh_tasks (zimx\app\ui\tabbed_right_panel.py:115) (17 samples, 0.14%)</title><rect x="4.0914%" y="196" width="0.1397%" height="15" fill="rgb(231,138,38)" fg:x="498" fg:w="17"/><text x="4.3414%" y="206.50"></text></g><g><title>refresh (zimx\app\ui\task_panel.py:628) (17 samples, 0.14%)</title><rect x="4.0914%" y="212" width="0.1397%" height="15" fill="rgb(231,145,46)" fg:x="498" fg:w="17"/><text x="4.3414%" y="222.50"></text></g><g><title>select_recursive_step (glob.py:485) (130 samples, 1.07%)</title><rect x="4.4282%" y="244" width="1.0680%" height="15" fill="rgb(251,118,11)" fg:x="539" fg:w="130"/><text x="4.6782%" y="254.50"></text></g><g><title>select_recursive_step (glob.py:486) (47 samples, 0.39%)</title><rect x="5.4962%" y="244" width="0.3861%" height="15" fill="rgb(217,147,25)" fg:x="669" fg:w="47"/><text x="5.7462%" y="254.50"></text></g><g><title>select_wildcard (glob.py:428) (184 samples, 1.51%)</title><rect x="5.9234%" y="260" width="1.5117%" height="15" fill="rgb(247,81,37)" fg:x="721" fg:w="184"/><text x="6.1734%" y="270.50"></text></g><g><title>select_wildcard (glob.py:429) (57 samples, 0.47%)</title><rect x="7.4351%" y="260" width="0.4683%" height="15" fill="rgb(209,12,38)" fg:x="905" fg:w="57"/><text x="7.6851%" y="270.50"></text></g><g><title>_reload_context_index (zimx\app\ui\ai_chat_panel.py:2078) (452 samples, 3.71%)</title><rect x="4.2557%" y="212" width="3.7134%" height="15" fill="rgb(227,1,9)" fg:x="518" fg:w="452"/><text x="4.5057%" y="222.50">_rel..</text></g><g><title>select_recursive (glob.py:478) (433 samples, 3.56%)</title><rect x="4.4118%" y="228" width="3.5573%" height="15" fill="rgb(248,47,43)" fg:x="537" fg:w="433"/><text x="4.6618%" y="238.50">sele..</text></g><g><title>select_recursive_step (glob.py:502) (251 samples, 2.06%)</title><rect x="5.9070%" y="244" width="2.0621%" height="15" fill="rgb(221,10,30)" fg:x="719" fg:w="251"/><text x="6.1570%" y="254.50">s..</text></g><g><title>__iter__ (&lt;frozen _collections_abc&gt;:1031) (20 samples, 0.16%)</title><rect x="8.1663%" y="260" width="0.1643%" height="15" fill="rgb(210,229,1)" fg:x="994" fg:w="20"/><text x="8.4163%" y="270.50"></text></g><g><title>__getitem__ (pathlib\_local.py:53) (16 samples, 0.13%)</title><rect x="8.1991%" y="276" width="0.1314%" height="15" fill="rgb(222,148,37)" fg:x="998" fg:w="16"/><text x="8.4491%" y="286.50"></text></g><g><title>_from_parsed_parts (pathlib\_local.py:246) (15 samples, 0.12%)</title><rect x="8.2074%" y="292" width="0.1232%" height="15" fill="rgb(234,67,33)" fg:x="999" fg:w="15"/><text x="8.4574%" y="302.50"></text></g><g><title>_from_parsed_string (pathlib\_local.py:253) (14 samples, 0.12%)</title><rect x="8.2156%" y="308" width="0.1150%" height="15" fill="rgb(247,98,35)" fg:x="1000" fg:w="14"/><text x="8.4656%" y="318.50"></text></g><g><title>with_segments (pathlib\_abc.py:135) (14 samples, 0.12%)</title><rect x="8.2156%" y="324" width="0.1150%" height="15" fill="rgb(247,138,52)" fg:x="1000" fg:w="14"/><text x="8.4656%" y="334.50"></text></g><g><title>__contains__ (&lt;frozen _collections_abc&gt;:1038) (25 samples, 0.21%)</title><rect x="8.1334%" y="244" width="0.2054%" height="15" fill="rgb(213,79,30)" fg:x="990" fg:w="25"/><text x="8.3834%" y="254.50"></text></g><g><title>relative_to (pathlib\_local.py:382) (38 samples, 0.31%)</title><rect x="8.1170%" y="228" width="0.3122%" height="15" fill="rgb(246,177,23)" fg:x="988" fg:w="38"/><text x="8.3670%" y="238.50"></text></g><g><title>_reload_context_index (zimx\app\ui\ai_chat_panel.py:2081) (56 samples, 0.46%)</title><rect x="8.0266%" y="212" width="0.4601%" height="15" fill="rgb(230,62,27)" fg:x="977" fg:w="56"/><text x="8.2766%" y="222.50"></text></g><g><title>__init__ (pathlib\_local.py:128) (26 samples, 0.21%)</title><rect x="8.7332%" y="356" width="0.2136%" height="15" fill="rgb(216,154,8)" fg:x="1063" fg:w="26"/><text x="8.9832%" y="366.50"></text></g><g><title>__contains__ (&lt;frozen _collections_abc&gt;:1038) (40 samples, 0.33%)</title><rect x="8.6264%" y="244" width="0.3286%" height="15" fill="rgb(244,35,45)" fg:x="1050" fg:w="40"/><text x="8.8764%" y="254.50"></text></g><g><title>__iter__ (&lt;frozen _collections_abc&gt;:1031) (37 samples, 0.30%)</title><rect x="8.6510%" y="260" width="0.3040%" height="15" fill="rgb(251,115,12)" fg:x="1053" fg:w="37"/><text x="8.9010%" y="270.50"></text></g><g><title>__getitem__ (pathlib\_local.py:53) (35 samples, 0.29%)</title><rect x="8.6674%" y="276" width="0.2875%" height="15" fill="rgb(240,54,50)" fg:x="1055" fg:w="35"/><text x="8.9174%" y="286.50"></text></g><g><title>_from_parsed_parts (pathlib\_local.py:246) (35 samples, 0.29%)</title><rect x="8.6674%" y="292" width="0.2875%" height="15" fill="rgb(233,84,52)" fg:x="1055" fg:w="35"/><text x="8.9174%" y="302.50"></text></g><g><title>_from_parsed_string (pathlib\_local.py:253) (32 samples, 0.26%)</title><rect x="8.6921%" y="308" width="0.2629%" height="15" fill="rgb(207,117,47)" fg:x="1058" fg:w="32"/><text x="8.9421%" y="318.50"></text></g><g><title>with_segments (pathlib\_abc.py:135) (32 samples, 0.26%)</title><rect x="8.6921%" y="324" width="0.2629%" height="15" fill="rgb(249,43,39)" fg:x="1058" fg:w="32"/><text x="8.9421%" y="334.50"></text></g><g><title>__init__ (pathlib\_local.py:503) (29 samples, 0.24%)</title><rect x="8.7167%" y="340" width="0.2383%" height="15" fill="rgb(209,38,44)" fg:x="1061" fg:w="29"/><text x="8.9667%" y="350.50"></text></g><g><title>relative_to (pathlib\_local.py:382) (50 samples, 0.41%)</title><rect x="8.6181%" y="228" width="0.4108%" height="15" fill="rgb(236,212,23)" fg:x="1049" fg:w="50"/><text x="8.8681%" y="238.50"></text></g><g><title>_reload_context_index (zimx\app\ui\ai_chat_panel.py:2087) (55 samples, 0.45%)</title><rect x="8.6017%" y="212" width="0.4519%" height="15" fill="rgb(242,79,21)" fg:x="1047" fg:w="55"/><text x="8.8517%" y="222.50"></text></g><g><title>__lt__ (pathlib\_local.py:210) (21 samples, 0.17%)</title><rect x="9.1686%" y="228" width="0.1725%" height="15" fill="rgb(211,96,35)" fg:x="1116" fg:w="21"/><text x="9.4186%" y="238.50"></text></g><g><title>_from_parsed_string (pathlib\_local.py:253) (17 samples, 0.14%)</title><rect x="9.3411%" y="228" width="0.1397%" height="15" fill="rgb(253,215,40)" fg:x="1137" fg:w="17"/><text x="9.5911%" y="238.50"></text></g><g><title>with_segments (pathlib\_abc.py:135) (14 samples, 0.12%)</title><rect x="9.3658%" y="244" width="0.1150%" height="15" fill="rgb(211,81,21)" fg:x="1140" fg:w="14"/><text x="9.6158%" y="254.50"></text></g><g><title>iterdir (pathlib\_local.py:575) (250 samples, 2.05%)</title><rect x="9.4890%" y="228" width="2.0539%" height="15" fill="rgb(208,190,38)" fg:x="1155" fg:w="250"/><text x="9.7390%" y="238.50">i..</text></g><g><title>iterdir (pathlib\_local.py:576) (98 samples, 0.81%)</title><rect x="11.5429%" y="228" width="0.8051%" height="15" fill="rgb(235,213,38)" fg:x="1405" fg:w="98"/><text x="11.7929%" y="238.50"></text></g><g><title>_reload_context_index (zimx\app\ui\ai_chat_panel.py:2091) (401 samples, 3.29%)</title><rect x="9.0782%" y="212" width="3.2944%" height="15" fill="rgb(237,122,38)" fg:x="1105" fg:w="401"/><text x="9.3282%" y="222.50">_re..</text></g><g><title>_reload_context_index (zimx\app\ui\ai_chat_panel.py:2092) (683 samples, 5.61%)</title><rect x="12.3727%" y="212" width="5.6112%" height="15" fill="rgb(244,218,35)" fg:x="1506" fg:w="683"/><text x="12.6227%" y="222.50">_reload..</text></g><g><title>is_file (pathlib\_abc.py:482) (681 samples, 5.59%)</title><rect x="12.3891%" y="228" width="5.5948%" height="15" fill="rgb(240,68,47)" fg:x="1508" fg:w="681"/><text x="12.6391%" y="238.50">is_file..</text></g><g><title>stat (pathlib\_local.py:515) (678 samples, 5.57%)</title><rect x="12.4137%" y="244" width="5.5702%" height="15" fill="rgb(210,16,53)" fg:x="1511" fg:w="678"/><text x="12.6637%" y="254.50">stat (p..</text></g><g><title>suffix (pathlib\_abc.py:174) (26 samples, 0.21%)</title><rect x="18.0250%" y="228" width="0.2136%" height="15" fill="rgb(235,124,12)" fg:x="2194" fg:w="26"/><text x="18.2750%" y="238.50"></text></g><g><title>name (pathlib\_local.py:349) (26 samples, 0.21%)</title><rect x="18.0250%" y="244" width="0.2136%" height="15" fill="rgb(224,169,11)" fg:x="2194" fg:w="26"/><text x="18.2750%" y="254.50"></text></g><g><title>_tail (pathlib\_local.py:312) (14 samples, 0.12%)</title><rect x="18.1236%" y="260" width="0.1150%" height="15" fill="rgb(250,166,2)" fg:x="2206" fg:w="14"/><text x="18.3736%" y="270.50"></text></g><g><title>_reload_context_index (zimx\app\ui\ai_chat_panel.py:2094) (33 samples, 0.27%)</title><rect x="17.9839%" y="212" width="0.2711%" height="15" fill="rgb(242,216,29)" fg:x="2189" fg:w="33"/><text x="18.2339%" y="222.50"></text></g><g><title>set_vault_root (zimx\app\ui\ai_chat_panel.py:3079) (1,711 samples, 14.06%)</title><rect x="4.2557%" y="196" width="14.0569%" height="15" fill="rgb(230,116,27)" fg:x="518" fg:w="1711"/><text x="4.5057%" y="206.50">set_vault_root (zimx\..</text></g><g><title>set_vault_root (zimx\app\ui\ai_chat_panel.py:3085) (13 samples, 0.11%)</title><rect x="18.3207%" y="196" width="0.1068%" height="15" fill="rgb(228,99,48)" fg:x="2230" fg:w="13"/><text x="18.5707%" y="206.50"></text></g><g><title>_set_vault (zimx\app\ui\main_window.py:1566) (1,755 samples, 14.42%)</title><rect x="4.2310%" y="164" width="14.4183%" height="15" fill="rgb(253,11,6)" fg:x="515" fg:w="1755"/><text x="4.4810%" y="174.50">_set_vault (zimx\app\u..</text></g><g><title>set_vault_root (zimx\app\ui\tabbed_right_panel.py:136) (1,752 samples, 14.39%)</title><rect x="4.2557%" y="180" width="14.3937%" height="15" fill="rgb(247,143,39)" fg:x="518" fg:w="1752"/><text x="4.5057%" y="190.50">set_vault_root (zimx\a..</text></g><g><title>set_vault_root (zimx\app\ui\ai_chat_panel.py:3086) (27 samples, 0.22%)</title><rect x="18.4275%" y="196" width="0.2218%" height="15" fill="rgb(236,97,10)" fg:x="2243" fg:w="27"/><text x="18.6775%" y="206.50"></text></g><g><title>_select_default_chat (zimx\app\ui\ai_chat_panel.py:2229) (16 samples, 0.13%)</title><rect x="18.5179%" y="212" width="0.1314%" height="15" fill="rgb(233,208,19)" fg:x="2254" fg:w="16"/><text x="18.7679%" y="222.50"></text></g><g><title>main (zimx\app\main.py:342) (1,849 samples, 15.19%)</title><rect x="3.4834%" y="116" width="15.1906%" height="15" fill="rgb(216,164,2)" fg:x="424" fg:w="1849"/><text x="3.7334%" y="126.50">main (zimx\app\main.py:..</text></g><g><title>startup (zimx\app\ui\main_window.py:1224) (1,849 samples, 15.19%)</title><rect x="3.4834%" y="132" width="15.1906%" height="15" fill="rgb(220,129,5)" fg:x="424" fg:w="1849"/><text x="3.7334%" y="142.50">startup (zimx\app\ui\ma..</text></g><g><title>_select_vault (zimx\app\ui\main_window.py:1238) (1,805 samples, 14.83%)</title><rect x="3.8449%" y="148" width="14.8291%" height="15" fill="rgb(242,17,10)" fg:x="468" fg:w="1805"/><text x="4.0949%" y="158.50">_select_vault (zimx\app..</text></g><g><title>_to_display (zimx\app\ui\markdown_editor.py:4690) (145 samples, 1.19%)</title><rect x="19.3970%" y="180" width="1.1913%" height="15" fill="rgb(242,107,0)" fg:x="2361" fg:w="145"/><text x="19.6470%" y="190.50"></text></g><g><title>_to_display (zimx\app\ui\markdown_editor.py:4691) (145 samples, 1.19%)</title><rect x="20.5882%" y="180" width="1.1913%" height="15" fill="rgb(251,28,31)" fg:x="2506" fg:w="145"/><text x="20.8382%" y="190.50"></text></g><g><title>set_markdown (zimx\app\ui\markdown_editor.py:1576) (488 samples, 4.01%)</title><rect x="19.3970%" y="164" width="4.0092%" height="15" fill="rgb(233,223,10)" fg:x="2361" fg:w="488"/><text x="19.6470%" y="174.50">set_..</text></g><g><title>_to_display (zimx\app\ui\markdown_editor.py:4695) (198 samples, 1.63%)</title><rect x="21.7795%" y="180" width="1.6267%" height="15" fill="rgb(215,21,27)" fg:x="2651" fg:w="198"/><text x="22.0295%" y="190.50"></text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4715) (1,669 samples, 13.71%)</title><rect x="23.8663%" y="244" width="13.7118%" height="15" fill="rgb(232,23,21)" fg:x="2905" fg:w="1669"/><text x="24.1163%" y="254.50">_from_display (zimx\a..</text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4716) (1,024 samples, 8.41%)</title><rect x="37.5780%" y="244" width="8.4128%" height="15" fill="rgb(244,5,23)" fg:x="4574" fg:w="1024"/><text x="37.8280%" y="254.50">_from_displa..</text></g><g><title>&lt;lambda&gt; (zimx\app\ui\main_window.py:936) (3,271 samples, 26.87%)</title><rect x="23.7677%" y="180" width="26.8732%" height="15" fill="rgb(226,81,46)" fg:x="2893" fg:w="3271"/><text x="24.0177%" y="190.50">&lt;lambda&gt; (zimx\app\ui\main_window.py:936)</text></g><g><title>_update_dirty_indicator (zimx\app\ui\main_window.py:6502) (3,271 samples, 26.87%)</title><rect x="23.7677%" y="196" width="26.8732%" height="15" fill="rgb(247,70,30)" fg:x="2893" fg:w="3271"/><text x="24.0177%" y="206.50">_update_dirty_indicator (zimx\app\ui\main_w..</text></g><g><title>_is_editor_dirty (zimx\app\ui\main_window.py:2785) (3,271 samples, 26.87%)</title><rect x="23.7677%" y="212" width="26.8732%" height="15" fill="rgb(212,68,19)" fg:x="2893" fg:w="3271"/><text x="24.0177%" y="222.50">_is_editor_dirty (zimx\app\ui\main_window.p..</text></g><g><title>to_markdown (zimx\app\ui\markdown_editor.py:1708) (3,259 samples, 26.77%)</title><rect x="23.8663%" y="228" width="26.7746%" height="15" fill="rgb(240,187,13)" fg:x="2905" fg:w="3259"/><text x="24.1163%" y="238.50">to_markdown (zimx\app\ui\markdown_editor.py..</text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4718) (566 samples, 4.65%)</title><rect x="45.9908%" y="244" width="4.6500%" height="15" fill="rgb(223,113,26)" fg:x="5598" fg:w="566"/><text x="46.2408%" y="254.50">_from..</text></g><g><title>highlightBlock (zimx\app\ui\markdown_editor.py:1052) (14 samples, 0.12%)</title><rect x="50.8051%" y="180" width="0.1150%" height="15" fill="rgb(206,192,2)" fg:x="6184" fg:w="14"/><text x="51.0551%" y="190.50"></text></g><g><title>highlightBlock (zimx\app\ui\markdown_editor.py:880) (14 samples, 0.12%)</title><rect x="51.5692%" y="180" width="0.1150%" height="15" fill="rgb(241,108,4)" fg:x="6277" fg:w="14"/><text x="51.8192%" y="190.50"></text></g><g><title>_open_file (zimx\app\ui\main_window.py:2568) (3,964 samples, 32.57%)</title><rect x="19.3888%" y="148" width="32.5665%" height="15" fill="rgb(247,173,49)" fg:x="2360" fg:w="3964"/><text x="19.6388%" y="158.50">_open_file (zimx\app\ui\main_window.py:2568)</text></g><g><title>set_markdown (zimx\app\ui\markdown_editor.py:1624) (3,470 samples, 28.51%)</title><rect x="23.4473%" y="164" width="28.5081%" height="15" fill="rgb(224,114,35)" fg:x="2854" fg:w="3470"/><text x="23.6973%" y="174.50">set_markdown (zimx\app\ui\markdown_editor.py:1..</text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4715) (129 samples, 1.06%)</title><rect x="51.9635%" y="180" width="1.0598%" height="15" fill="rgb(245,159,27)" fg:x="6325" fg:w="129"/><text x="52.2135%" y="190.50"></text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4716) (109 samples, 0.90%)</title><rect x="53.0233%" y="180" width="0.8955%" height="15" fill="rgb(245,172,44)" fg:x="6454" fg:w="109"/><text x="53.2733%" y="190.50"></text></g><g><title>_open_file (zimx\app\ui\main_window.py:2578) (409 samples, 3.36%)</title><rect x="51.9553%" y="148" width="3.3602%" height="15" fill="rgb(236,23,11)" fg:x="6324" fg:w="409"/><text x="52.2053%" y="158.50">_op..</text></g><g><title>to_markdown (zimx\app\ui\markdown_editor.py:1708) (408 samples, 3.35%)</title><rect x="51.9635%" y="164" width="3.3520%" height="15" fill="rgb(205,117,38)" fg:x="6325" fg:w="408"/><text x="52.2135%" y="174.50">to_..</text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4718) (170 samples, 1.40%)</title><rect x="53.9188%" y="180" width="1.3966%" height="15" fill="rgb(237,72,25)" fg:x="6563" fg:w="170"/><text x="54.1688%" y="190.50"></text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4715) (632 samples, 5.19%)</title><rect x="55.3319%" y="212" width="5.1922%" height="15" fill="rgb(244,70,9)" fg:x="6735" fg:w="632"/><text x="55.5819%" y="222.50">_from_..</text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4716) (234 samples, 1.92%)</title><rect x="60.5242%" y="212" width="1.9224%" height="15" fill="rgb(217,125,39)" fg:x="7367" fg:w="234"/><text x="60.7742%" y="222.50">_..</text></g><g><title>_open_file (zimx\app\ui\main_window.py:2579) (963 samples, 7.91%)</title><rect x="55.3155%" y="148" width="7.9116%" height="15" fill="rgb(235,36,10)" fg:x="6733" fg:w="963"/><text x="55.5655%" y="158.50">_open_file ..</text></g><g><title>_update_dirty_indicator (zimx\app\ui\main_window.py:6502) (963 samples, 7.91%)</title><rect x="55.3155%" y="164" width="7.9116%" height="15" fill="rgb(251,123,47)" fg:x="6733" fg:w="963"/><text x="55.5655%" y="174.50">_update_dir..</text></g><g><title>_is_editor_dirty (zimx\app\ui\main_window.py:2785) (963 samples, 7.91%)</title><rect x="55.3155%" y="180" width="7.9116%" height="15" fill="rgb(221,13,13)" fg:x="6733" fg:w="963"/><text x="55.5655%" y="190.50">_is_editor_..</text></g><g><title>to_markdown (zimx\app\ui\markdown_editor.py:1708) (961 samples, 7.90%)</title><rect x="55.3319%" y="196" width="7.8952%" height="15" fill="rgb(238,131,9)" fg:x="6735" fg:w="961"/><text x="55.5819%" y="206.50">to_markdown..</text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4718) (95 samples, 0.78%)</title><rect x="62.4466%" y="212" width="0.7805%" height="15" fill="rgb(211,50,8)" fg:x="7601" fg:w="95"/><text x="62.6966%" y="222.50"></text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4715) (209 samples, 1.72%)</title><rect x="63.4160%" y="212" width="1.7171%" height="15" fill="rgb(245,182,24)" fg:x="7719" fg:w="209"/><text x="63.6660%" y="222.50"></text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4716) (189 samples, 1.55%)</title><rect x="65.1331%" y="212" width="1.5527%" height="15" fill="rgb(242,14,37)" fg:x="7928" fg:w="189"/><text x="65.3831%" y="222.50"></text></g><g><title>_open_file (zimx\app\ui\main_window.py:2642) (486 samples, 3.99%)</title><rect x="63.3503%" y="148" width="3.9928%" height="15" fill="rgb(246,228,12)" fg:x="7711" fg:w="486"/><text x="63.6003%" y="158.50">_ope..</text></g><g><title>_update_dirty_indicator (zimx\app\ui\main_window.py:6502) (486 samples, 3.99%)</title><rect x="63.3503%" y="164" width="3.9928%" height="15" fill="rgb(213,55,15)" fg:x="7711" fg:w="486"/><text x="63.6003%" y="174.50">_upd..</text></g><g><title>_is_editor_dirty (zimx\app\ui\main_window.py:2785) (486 samples, 3.99%)</title><rect x="63.3503%" y="180" width="3.9928%" height="15" fill="rgb(209,9,3)" fg:x="7711" fg:w="486"/><text x="63.6003%" y="190.50">_is_..</text></g><g><title>to_markdown (zimx\app\ui\markdown_editor.py:1708) (478 samples, 3.93%)</title><rect x="63.4160%" y="196" width="3.9270%" height="15" fill="rgb(230,59,30)" fg:x="7719" fg:w="478"/><text x="63.6660%" y="206.50">to_m..</text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4718) (80 samples, 0.66%)</title><rect x="66.6858%" y="212" width="0.6572%" height="15" fill="rgb(209,121,21)" fg:x="8117" fg:w="80"/><text x="66.9358%" y="222.50"></text></g><g><title>_auto_load_initial_file (zimx\app\ui\main_window.py:1838) (5,851 samples, 48.07%)</title><rect x="19.3395%" y="132" width="48.0693%" height="15" fill="rgb(220,109,13)" fg:x="2354" fg:w="5851"/><text x="19.5895%" y="142.50">_auto_load_initial_file (zimx\app\ui\main_window.py:1838)</text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4715) (250 samples, 2.05%)</title><rect x="67.7374%" y="196" width="2.0539%" height="15" fill="rgb(232,18,1)" fg:x="8245" fg:w="250"/><text x="67.9874%" y="206.50">_..</text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4716) (231 samples, 1.90%)</title><rect x="69.7913%" y="196" width="1.8978%" height="15" fill="rgb(215,41,42)" fg:x="8495" fg:w="231"/><text x="70.0413%" y="206.50">_..</text></g><g><title>_save_current_file (zimx\app\ui\main_window.py:2722) (604 samples, 4.96%)</title><rect x="67.6388%" y="164" width="4.9622%" height="15" fill="rgb(224,123,36)" fg:x="8233" fg:w="604"/><text x="67.8888%" y="174.50">_save_..</text></g><g><title>to_markdown (zimx\app\ui\markdown_editor.py:1708) (592 samples, 4.86%)</title><rect x="67.7374%" y="180" width="4.8636%" height="15" fill="rgb(240,125,3)" fg:x="8245" fg:w="592"/><text x="67.9874%" y="190.50">to_mar..</text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4718) (111 samples, 0.91%)</title><rect x="71.6891%" y="196" width="0.9119%" height="15" fill="rgb(205,98,50)" fg:x="8726" fg:w="111"/><text x="71.9391%" y="206.50"></text></g><g><title>_to_display (zimx\app\ui\markdown_editor.py:4690) (281 samples, 2.31%)</title><rect x="72.6011%" y="212" width="2.3086%" height="15" fill="rgb(205,185,37)" fg:x="8837" fg:w="281"/><text x="72.8511%" y="222.50">_..</text></g><g><title>_to_display (zimx\app\ui\markdown_editor.py:4691) (225 samples, 1.85%)</title><rect x="74.9096%" y="212" width="1.8485%" height="15" fill="rgb(238,207,15)" fg:x="9118" fg:w="225"/><text x="75.1596%" y="222.50">_..</text></g><g><title>set_markdown (zimx\app\ui\markdown_editor.py:1576) (713 samples, 5.86%)</title><rect x="72.6011%" y="196" width="5.8577%" height="15" fill="rgb(213,199,42)" fg:x="8837" fg:w="713"/><text x="72.8511%" y="206.50">set_mar..</text></g><g><title>_to_display (zimx\app\ui\markdown_editor.py:4695) (207 samples, 1.70%)</title><rect x="76.7581%" y="212" width="1.7006%" height="15" fill="rgb(235,201,11)" fg:x="9343" fg:w="207"/><text x="77.0081%" y="222.50"></text></g><g><title>to_markdown (zimx\app\ui\markdown_editor.py:1704) (15 samples, 0.12%)</title><rect x="78.7134%" y="260" width="0.1232%" height="15" fill="rgb(207,46,11)" fg:x="9581" fg:w="15"/><text x="78.9634%" y="270.50"></text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4715) (358 samples, 2.94%)</title><rect x="78.8367%" y="276" width="2.9412%" height="15" fill="rgb(241,35,35)" fg:x="9596" fg:w="358"/><text x="79.0867%" y="286.50">_f..</text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4716) (266 samples, 2.19%)</title><rect x="81.7779%" y="276" width="2.1853%" height="15" fill="rgb(243,32,47)" fg:x="9954" fg:w="266"/><text x="82.0279%" y="286.50">_..</text></g><g><title>&lt;lambda&gt; (zimx\app\ui\main_window.py:936) (807 samples, 6.63%)</title><rect x="78.7134%" y="212" width="6.6300%" height="15" fill="rgb(247,202,23)" fg:x="9581" fg:w="807"/><text x="78.9634%" y="222.50">&lt;lambda&gt; ..</text></g><g><title>_update_dirty_indicator (zimx\app\ui\main_window.py:6502) (807 samples, 6.63%)</title><rect x="78.7134%" y="228" width="6.6300%" height="15" fill="rgb(219,102,11)" fg:x="9581" fg:w="807"/><text x="78.9634%" y="238.50">_update_d..</text></g><g><title>_is_editor_dirty (zimx\app\ui\main_window.py:2785) (807 samples, 6.63%)</title><rect x="78.7134%" y="244" width="6.6300%" height="15" fill="rgb(243,110,44)" fg:x="9581" fg:w="807"/><text x="78.9634%" y="254.50">_is_edito..</text></g><g><title>to_markdown (zimx\app\ui\markdown_editor.py:1708) (792 samples, 6.51%)</title><rect x="78.8367%" y="260" width="6.5067%" height="15" fill="rgb(222,74,54)" fg:x="9596" fg:w="792"/><text x="79.0867%" y="270.50">to_markdo..</text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4718) (168 samples, 1.38%)</title><rect x="83.9632%" y="276" width="1.3802%" height="15" fill="rgb(216,99,12)" fg:x="10220" fg:w="168"/><text x="84.2132%" y="286.50"></text></g><g><title>_save_current_file (zimx\app\ui\main_window.py:2729) (1,648 samples, 13.54%)</title><rect x="72.6011%" y="164" width="13.5393%" height="15" fill="rgb(226,22,26)" fg:x="8837" fg:w="1648"/><text x="72.8511%" y="174.50">_save_current_file (..</text></g><g><title>_apply_rewritten_editor_content (zimx\app\ui\main_window.py:5752) (1,648 samples, 13.54%)</title><rect x="72.6011%" y="180" width="13.5393%" height="15" fill="rgb(217,163,10)" fg:x="8837" fg:w="1648"/><text x="72.8511%" y="190.50">_apply_rewritten_edi..</text></g><g><title>set_markdown (zimx\app\ui\markdown_editor.py:1624) (934 samples, 7.67%)</title><rect x="78.4670%" y="196" width="7.6733%" height="15" fill="rgb(213,25,53)" fg:x="9551" fg:w="934"/><text x="78.7170%" y="206.50">set_markdow..</text></g><g><title>to_markdown (zimx\app\ui\markdown_editor.py:1704) (15 samples, 0.12%)</title><rect x="86.2307%" y="212" width="0.1232%" height="15" fill="rgb(252,105,26)" fg:x="10496" fg:w="15"/><text x="86.4807%" y="222.50"></text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4715) (203 samples, 1.67%)</title><rect x="86.3539%" y="228" width="1.6678%" height="15" fill="rgb(220,39,43)" fg:x="10511" fg:w="203"/><text x="86.6039%" y="238.50"></text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4716) (128 samples, 1.05%)</title><rect x="88.0217%" y="228" width="1.0516%" height="15" fill="rgb(229,68,48)" fg:x="10714" fg:w="128"/><text x="88.2717%" y="238.50"></text></g><g><title>focusOutEvent (zimx\app\ui\markdown_editor.py:2490) (2,688 samples, 22.08%)</title><rect x="67.6388%" y="132" width="22.0835%" height="15" fill="rgb(252,8,32)" fg:x="8233" fg:w="2688"/><text x="67.8888%" y="142.50">focusOutEvent (zimx\app\ui\markdown..</text></g><g><title>_on_editor_focus_lost (zimx\app\ui\main_window.py:2976) (2,688 samples, 22.08%)</title><rect x="67.6388%" y="148" width="22.0835%" height="15" fill="rgb(223,20,43)" fg:x="8233" fg:w="2688"/><text x="67.8888%" y="158.50">_on_editor_focus_lost (zimx\app\ui\..</text></g><g><title>_save_current_file (zimx\app\ui\main_window.py:2759) (425 samples, 3.49%)</title><rect x="86.2307%" y="164" width="3.4916%" height="15" fill="rgb(229,81,49)" fg:x="10496" fg:w="425"/><text x="86.4807%" y="174.50">_sa..</text></g><g><title>_update_dirty_indicator (zimx\app\ui\main_window.py:6502) (425 samples, 3.49%)</title><rect x="86.2307%" y="180" width="3.4916%" height="15" fill="rgb(236,28,36)" fg:x="10496" fg:w="425"/><text x="86.4807%" y="190.50">_up..</text></g><g><title>_is_editor_dirty (zimx\app\ui\main_window.py:2785) (425 samples, 3.49%)</title><rect x="86.2307%" y="196" width="3.4916%" height="15" fill="rgb(249,185,26)" fg:x="10496" fg:w="425"/><text x="86.4807%" y="206.50">_is..</text></g><g><title>to_markdown (zimx\app\ui\markdown_editor.py:1708) (410 samples, 3.37%)</title><rect x="86.3539%" y="212" width="3.3684%" height="15" fill="rgb(249,174,33)" fg:x="10511" fg:w="410"/><text x="86.6039%" y="222.50">to_..</text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4718) (79 samples, 0.65%)</title><rect x="89.0733%" y="228" width="0.6490%" height="15" fill="rgb(233,201,37)" fg:x="10842" fg:w="79"/><text x="89.3233%" y="238.50"></text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4715) (256 samples, 2.10%)</title><rect x="90.0592%" y="212" width="2.1032%" height="15" fill="rgb(221,78,26)" fg:x="10962" fg:w="256"/><text x="90.3092%" y="222.50">_..</text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4716) (105 samples, 0.86%)</title><rect x="92.1623%" y="212" width="0.8626%" height="15" fill="rgb(250,127,30)" fg:x="11218" fg:w="105"/><text x="92.4123%" y="222.50"></text></g><g><title>_save_current_file (zimx\app\ui\main_window.py:2722) (444 samples, 3.65%)</title><rect x="90.0181%" y="180" width="3.6477%" height="15" fill="rgb(230,49,44)" fg:x="10957" fg:w="444"/><text x="90.2681%" y="190.50">_sav..</text></g><g><title>to_markdown (zimx\app\ui\markdown_editor.py:1708) (439 samples, 3.61%)</title><rect x="90.0592%" y="196" width="3.6066%" height="15" fill="rgb(229,67,23)" fg:x="10962" fg:w="439"/><text x="90.3092%" y="206.50">to_m..</text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4718) (78 samples, 0.64%)</title><rect x="93.0250%" y="212" width="0.6408%" height="15" fill="rgb(249,83,47)" fg:x="11323" fg:w="78"/><text x="93.2750%" y="222.50"></text></g><g><title>_to_display (zimx\app\ui\markdown_editor.py:4690) (141 samples, 1.16%)</title><rect x="93.6658%" y="228" width="1.1584%" height="15" fill="rgb(215,43,3)" fg:x="11401" fg:w="141"/><text x="93.9158%" y="238.50"></text></g><g><title>_to_display (zimx\app\ui\markdown_editor.py:4691) (179 samples, 1.47%)</title><rect x="94.8242%" y="228" width="1.4706%" height="15" fill="rgb(238,154,13)" fg:x="11542" fg:w="179"/><text x="95.0742%" y="238.50"></text></g><g><title>set_markdown (zimx\app\ui\markdown_editor.py:1576) (471 samples, 3.87%)</title><rect x="93.6658%" y="212" width="3.8695%" height="15" fill="rgb(219,56,2)" fg:x="11401" fg:w="471"/><text x="93.9158%" y="222.50">set_..</text></g><g><title>_to_display (zimx\app\ui\markdown_editor.py:4695) (150 samples, 1.23%)</title><rect x="96.3030%" y="228" width="1.2323%" height="15" fill="rgb(233,0,4)" fg:x="11722" fg:w="150"/><text x="96.5530%" y="238.50"></text></g><g><title>to_markdown (zimx\app\ui\markdown_editor.py:1704) (13 samples, 0.11%)</title><rect x="97.7900%" y="276" width="0.1068%" height="15" fill="rgb(235,30,7)" fg:x="11903" fg:w="13"/><text x="98.0400%" y="286.50"></text></g><g><title>&lt;lambda&gt; (zimx\app\ui\main_window.py:936) (170 samples, 1.40%)</title><rect x="97.7900%" y="228" width="1.3966%" height="15" fill="rgb(250,79,13)" fg:x="11903" fg:w="170"/><text x="98.0400%" y="238.50"></text></g><g><title>_update_dirty_indicator (zimx\app\ui\main_window.py:6502) (170 samples, 1.40%)</title><rect x="97.7900%" y="244" width="1.3966%" height="15" fill="rgb(211,146,34)" fg:x="11903" fg:w="170"/><text x="98.0400%" y="254.50"></text></g><g><title>_is_editor_dirty (zimx\app\ui\main_window.py:2785) (170 samples, 1.40%)</title><rect x="97.7900%" y="260" width="1.3966%" height="15" fill="rgb(228,22,38)" fg:x="11903" fg:w="170"/><text x="98.0400%" y="270.50"></text></g><g><title>to_markdown (zimx\app\ui\markdown_editor.py:1708) (157 samples, 1.29%)</title><rect x="97.8968%" y="276" width="1.2898%" height="15" fill="rgb(235,168,5)" fg:x="11916" fg:w="157"/><text x="98.1468%" y="286.50"></text></g><g><title>_from_display (zimx\app\ui\markdown_editor.py:4715) (157 samples, 1.29%)</title><rect x="97.8968%" y="292" width="1.2898%" height="15" fill="rgb(221,155,16)" fg:x="11916" fg:w="157"/><text x="98.1468%" y="302.50"></text></g><g><title>mousePressEvent (zimx\app\ui\markdown_editor.py:3217) (1,185 samples, 9.74%)</title><rect x="90.0181%" y="132" width="9.7355%" height="15" fill="rgb(215,215,53)" fg:x="10957" fg:w="1185"/><text x="90.2681%" y="142.50">mousePressEven..</text></g><g><title>_open_link_in_context (zimx\app\ui\main_window.py:3861) (1,185 samples, 9.74%)</title><rect x="90.0181%" y="148" width="9.7355%" height="15" fill="rgb(223,4,10)" fg:x="10957" fg:w="1185"/><text x="90.2681%" y="158.50">_open_link_in_..</text></g><g><title>_open_camel_link (zimx\app\ui\main_window.py:4145) (1,185 samples, 9.74%)</title><rect x="90.0181%" y="164" width="9.7355%" height="15" fill="rgb(234,103,6)" fg:x="10957" fg:w="1185"/><text x="90.2681%" y="174.50">_open_camel_li..</text></g><g><title>_save_current_file (zimx\app\ui\main_window.py:2729) (741 samples, 6.09%)</title><rect x="93.6658%" y="180" width="6.0877%" height="15" fill="rgb(227,97,0)" fg:x="11401" fg:w="741"/><text x="93.9158%" y="190.50">_save_cu..</text></g><g><title>_apply_rewritten_editor_content (zimx\app\ui\main_window.py:5752) (741 samples, 6.09%)</title><rect x="93.6658%" y="196" width="6.0877%" height="15" fill="rgb(234,150,53)" fg:x="11401" fg:w="741"/><text x="93.9158%" y="206.50">_apply_r..</text></g><g><title>set_markdown (zimx\app\ui\markdown_editor.py:1624) (267 samples, 2.19%)</title><rect x="97.5600%" y="212" width="2.1936%" height="15" fill="rgb(228,201,54)" fg:x="11875" fg:w="267"/><text x="97.8100%" y="222.50">s..</text></g><g><title>all (12,172 samples, 100%)</title><rect x="0.0000%" y="52" width="100.0000%" height="15" fill="rgb(222,22,37)" fg:x="0" fg:w="12172"/><text x="0.2500%" y="62.50"></text></g><g><title>_run_module_as_main (&lt;frozen runpy&gt;:199) (11,748 samples, 96.52%)</title><rect x="3.4834%" y="68" width="96.5166%" height="15" fill="rgb(237,53,32)" fg:x="424" fg:w="11748"/><text x="3.7334%" y="78.50">_run_module_as_main (&lt;frozen runpy&gt;:199)</text></g><g><title>_run_code (&lt;frozen runpy&gt;:88) (11,748 samples, 96.52%)</title><rect x="3.4834%" y="84" width="96.5166%" height="15" fill="rgb(233,25,53)" fg:x="424" fg:w="11748"/><text x="3.7334%" y="94.50">_run_code (&lt;frozen runpy&gt;:88)</text></g><g><title>&lt;module&gt; (zimx\app\main.py:364) (11,748 samples, 96.52%)</title><rect x="3.4834%" y="100" width="96.5166%" height="15" fill="rgb(210,40,34)" fg:x="424" fg:w="11748"/><text x="3.7334%" y="110.50">&lt;module&gt; (zimx\app\main.py:364)</text></g><g><title>main (zimx\app\main.py:345) (9,898 samples, 81.32%)</title><rect x="18.6822%" y="116" width="81.3178%" height="15" fill="rgb(241,220,44)" fg:x="2274" fg:w="9898"/><text x="18.9322%" y="126.50">main (zimx\app\main.py:345)</text></g><g><title>paintEvent (zimx\app\ui\markdown_editor.py:1502) (13 samples, 0.11%)</title><rect x="99.8932%" y="132" width="0.1068%" height="15" fill="rgb(235,28,35)" fg:x="12159" fg:w="13"/><text x="100.1432%" y="142.50"></text></g></svg></svg>
