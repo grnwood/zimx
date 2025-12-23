@@ -1,8 +1,20 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
+import fs from 'fs'
+import path from 'path'
 
 // https://vite.dev/config/
+const certPath = process.env.DEV_SSL_CERT
+const keyPath = process.env.DEV_SSL_KEY
+const httpsConfig =
+  certPath && keyPath && fs.existsSync(certPath) && fs.existsSync(keyPath)
+    ? {
+        cert: fs.readFileSync(path.resolve(certPath)),
+        key: fs.readFileSync(path.resolve(keyPath))
+      }
+    : undefined
+
 export default defineConfig({
   plugins: [
     react(),
@@ -48,6 +60,7 @@ export default defineConfig({
     })
   ],
   server: {
+    https: httpsConfig,
     proxy: {
       '/api': {
         target: 'http://localhost:8000',
@@ -72,4 +85,3 @@ export default defineConfig({
     }
   }
 })
-

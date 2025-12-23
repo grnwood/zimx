@@ -1,4 +1,4 @@
-import { db, OutboxItem } from './db';
+import { db } from './db';
 import { apiClient } from './api';
 
 export class SyncManager {

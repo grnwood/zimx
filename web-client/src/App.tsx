@@ -39,27 +39,10 @@ function AppContent() {
 
   return (
     <div>
-      <nav style={{ 
-        padding: '10px 20px', 
-        borderBottom: '1px solid #ddd',
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center'
-      }}>
-        <div style={{ fontWeight: 'bold' }}>ZimX</div>
-        <button onClick={logout} style={{
-          padding: '8px 16px',
-          backgroundColor: '#dc3545',
-          color: 'white',
-          border: 'none',
-          borderRadius: '4px',
-          cursor: 'pointer'
-        }}>
-          Logout
-        </button>
-      </nav>
-      
-      <HomePage />
+      <HomePage
+        headerLeft={<div style={{ fontWeight: 'bold' }}>ZimX</div>}
+        onLogout={logout}
+      />
     </div>
   );
 }
@@ -73,4 +56,3 @@ function App() {
 }
 
 export default App;
-

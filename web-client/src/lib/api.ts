@@ -1,8 +1,20 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
 export interface AuthTokens {
   access_token: string;
   refresh_token: string;
+}
+
+export class APIError extends Error {
+  status: number;
+  detail: unknown;
+
+  constructor(status: number, detail: unknown, message?: string) {
+    super(message || `HTTP ${status}`);
+    this.name = 'APIError';
+    this.status = status;
+    this.detail = detail;
+  }
 }
 
 class APIClient {
@@ -34,13 +46,14 @@ class APIClient {
     options: RequestInit = {}
   ): Promise<T> {
     const url = `${API_BASE_URL}${endpoint}`;
-    const headers: HeadersInit = {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    };
+    const isFormData = options.body instanceof FormData;
+    const headers = new Headers(options.headers || {});
+    if (!headers.has('Content-Type') && !isFormData) {
+      headers.set('Content-Type', 'application/json');
+    }
 
     if (this.accessToken) {
-      headers['Authorization'] = `Bearer ${this.accessToken}`;
+      headers.set('Authorization', `Bearer ${this.accessToken}`);
     }
 
     const response = await fetch(url, {
@@ -53,7 +66,7 @@ class APIClient {
       const refreshed = await this.refreshAccessToken();
       if (refreshed) {
         // Retry the original request
-        headers['Authorization'] = `Bearer ${this.accessToken}`;
+        headers.set('Authorization', `Bearer ${this.accessToken}`);
         const retryResponse = await fetch(url, { ...options, headers });
         if (!retryResponse.ok) {
           throw new Error(`HTTP ${retryResponse.status}: ${retryResponse.statusText}`);
@@ -64,7 +77,9 @@ class APIClient {
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: response.statusText }));
-      throw new Error(error.detail || `HTTP ${response.status}`);
+      const detail = (error as { detail?: unknown }).detail;
+      const message = typeof detail === 'string' ? detail : `HTTP ${response.status}`;
+      throw new APIError(response.status, detail, message);
     }
 
     return response.json();
@@ -127,6 +142,17 @@ class APIClient {
   }
 
   // Vault endpoints
+  async listVaults() {
+    return this.request<{ root: string; vaults: Array<{ name: string; path: string }> }>('/api/vaults');
+  }
+
+  async createVault(name: string) {
+    return this.request<{ ok: boolean; name: string; path: string }>('/api/vaults/create', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    });
+  }
+
   async selectVault(path: string) {
     return this.request<{ root: string }>('/api/vault/select', {
       method: 'POST',
@@ -142,19 +168,39 @@ class APIClient {
 
   // Page endpoints
   async readPage(path: string) {
-    return this.request<{ content: string }>(`/api/file/read?path=${encodeURIComponent(path)}`);
+    return this.request<{ content: string; rev?: number; mtime_ns?: number }>('/api/file/read', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    });
   }
 
-  async writePage(path: string, content: string, ifMatch?: number) {
+  async writePage(path: string, content: string, ifMatch?: number | string) {
     const headers: HeadersInit = {};
     if (ifMatch !== undefined) {
       headers['If-Match'] = String(ifMatch);
     }
 
-    return this.request<{ ok: boolean; rev?: number }>('/api/file/write', {
+    return this.request<{ ok: boolean; rev?: number; mtime_ns?: number }>('/api/file/write', {
       method: 'POST',
       headers,
       body: JSON.stringify({ path, content }),
+    });
+  }
+
+  async listAttachments(pagePath: string) {
+    const url = `/files/?page_path=${encodeURIComponent(pagePath)}`;
+    return this.request<{ attachments: Array<{ attachment_path: string; stored_path: string; updated: number }> }>(url);
+  }
+
+  async attachFiles(pagePath: string, files: File[]) {
+    const formData = new FormData();
+    formData.append('page_path', pagePath);
+    for (const file of files) {
+      formData.append('files', file);
+    }
+    return this.request<{ ok: boolean; page: string; attachments: string[] }>('/files/attach', {
+      method: 'POST',
+      body: formData,
     });
   }
 

@@ -24,6 +24,7 @@ class PageEditorWindow(QMainWindow):
         page_path: str,
         read_only: bool,
         open_in_main_callback: Callable[[str], None],
+        local_auth_token: Optional[str] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -33,7 +34,8 @@ class PageEditorWindow(QMainWindow):
         self.page_path = page_path
         self._read_only = read_only
         self._open_in_main = open_in_main_callback
-        self.http = httpx.Client(base_url=self.api_base, timeout=10.0)
+        headers = {"X-Local-UI-Token": local_auth_token} if local_auth_token else None
+        self.http = httpx.Client(base_url=self.api_base, timeout=10.0, headers=headers)
         self._badge_base_style = "border: 1px solid #666; padding: 2px 6px; border-radius: 3px;"
         self._font_size = config.load_popup_font_size(14)
 

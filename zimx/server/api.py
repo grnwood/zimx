@@ -30,6 +30,7 @@ from typing import List, Literal, Optional
 
 import httpx
 from fastapi import Depends, FastAPI, File as FastAPISingleFile, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
@@ -63,6 +64,8 @@ _TASKS_CACHE: dict[tuple[str, tuple[str, ...], Optional[str]], list[dict]] = {}
 _TASK_CACHE_VERSION: int = -1
 
 _TREE_CACHE: dict[tuple[str, str, bool], dict[str, object]] = {}
+_LOCAL_UI_TOKEN: Optional[str] = None
+_VAULTS_ROOT: Optional[str] = None
 
 
 def _normalize_tree_path(path: str) -> str:
@@ -94,6 +97,50 @@ def _set_cached_tree(root: Path, path: str, recursive: bool, version: int, tree:
 
 def _clear_tree_cache() -> None:
     _TREE_CACHE.clear()
+
+
+def set_vaults_root(path: Optional[str]) -> None:
+    """Set the base folder where server-managed vaults live."""
+    global _VAULTS_ROOT
+    _VAULTS_ROOT = path or None
+
+
+def _get_vaults_root() -> Path:
+    root = _VAULTS_ROOT or os.getenv("ZIMX_VAULTS_ROOT", "vaults")
+    root_path = Path(root).expanduser()
+    if not root_path.is_absolute():
+        root_path = (Path.cwd() / root_path).resolve()
+    return root_path.resolve()
+
+
+def _ensure_vaults_root() -> Path:
+    root = _get_vaults_root()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _resolve_vault_path(path: str) -> Path:
+    raw = Path(path).expanduser()
+    if raw.is_absolute():
+        return raw.resolve()
+    root = _ensure_vaults_root()
+    candidate = (root / raw).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Vault path must be under vaults root") from exc
+    return candidate
+
+
+def _normalize_vault_name(name: str) -> str:
+    cleaned = (name or "").strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Vault name is required")
+    if cleaned in (".", ".."):
+        raise HTTPException(status_code=400, detail="Vault name is invalid")
+    if "/" in cleaned or "\\" in cleaned:
+        raise HTTPException(status_code=400, detail="Vault name must be a single folder name")
+    return cleaned
 
 
 # ===== JWT Authentication Configuration =====
@@ -201,14 +248,29 @@ def _set_auth_config(username: str, password_hash: str):
         conn.close()
 
 
-async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Optional[AuthModels.UserInfo]:
-    """Dependency to get current authenticated user"""
+def set_local_ui_token(token: Optional[str]) -> None:
+    """Register a shared local UI token for localhost auth bypass."""
+    global _LOCAL_UI_TOKEN
+    _LOCAL_UI_TOKEN = token or None
+
+
+async def get_current_user(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> Optional[AuthModels.UserInfo]:
+    """Dependency to get current authenticated user."""
     if not AUTH_ENABLED:
         return AuthModels.UserInfo(username="admin", is_admin=True)
-    
+
+    local_token = _LOCAL_UI_TOKEN or os.getenv("ZIMX_LOCAL_UI_TOKEN")
+    token_header = request.headers.get("x-local-ui-token")
+    local_bypass = bool(local_token) and token_header == local_token
+    if request.client and request.client.host in _LOCAL_HOSTS and local_bypass:
+        return AuthModels.UserInfo(username="admin", is_admin=True)
+
     if not credentials:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    
+
     try:
         payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         username: str = payload.get("sub")
@@ -334,6 +396,10 @@ class VaultSelectPayload(BaseModel):
     path: str
 
 
+class VaultCreatePayload(BaseModel):
+    name: str = Field(..., min_length=1)
+
+
 class CreatePathPayload(BaseModel):
     path: str
     is_dir: bool = False
@@ -409,9 +475,10 @@ app.add_middleware(
         "http://localhost",
         "http://127.0.0.1:5173",
         "http://localhost:5173",
-        "null"
+        "null",
+        "https://monarchistic-unretractable-susanna.ngrok-free.dev"
     ],
-    allow_origin_regex=r"^https?://(127\\.0\\.0\\.1|localhost)(:\\d+)?$",
+    allow_origin_regex=r"^https?://(127\.0\.0\.1|localhost|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"]
@@ -562,10 +629,38 @@ def auth_status() -> dict:
     }
 
 
+@app.get("/api/vaults")
+def list_vaults() -> dict:
+    root = _ensure_vaults_root()
+    vaults: list[dict[str, str]] = []
+    for entry in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+        if not entry.is_dir():
+            continue
+        if entry.name.startswith("."):
+            continue
+        vaults.append({"name": entry.name, "path": str(entry)})
+    return {"root": str(root), "vaults": vaults}
+
+
+@app.post("/api/vaults/create")
+def create_vault(payload: VaultCreatePayload) -> dict:
+    root = _ensure_vaults_root()
+    name = _normalize_vault_name(payload.name)
+    target = root / name
+    if target.exists():
+        raise HTTPException(status_code=400, detail="Vault already exists")
+    try:
+        target.mkdir(parents=True)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to create vault: {exc}") from exc
+    return {"ok": True, "name": name, "path": str(target)}
+
+
 @app.post("/api/vault/select")
 def select_vault(payload: VaultSelectPayload) -> dict:
     try:
-        root = vault_state.set_root(payload.path)
+        resolved = _resolve_vault_path(payload.path)
+        root = vault_state.set_root(str(resolved))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _clear_tree_cache()
@@ -614,13 +709,43 @@ def vault_stats() -> dict:
 @app.post("/api/file/read")
 def file_read(payload: FilePathPayload) -> dict:
     root = vault_state.get_root()
+    file_path = root / payload.path.lstrip("/")
     try:
         content = files.read_file(root, payload.path)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except FileAccessError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"content": content}
+    mtime_ns = None
+    try:
+        mtime_ns = file_path.stat().st_mtime_ns
+    except OSError:
+        mtime_ns = None
+    rev = None
+    db_path = config._vault_db_path()
+    if db_path:
+        import sqlite3
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        try:
+            row = conn.execute("SELECT rev FROM pages WHERE path = ?", (payload.path,)).fetchone()
+            rev = row[0] if row else 0
+        finally:
+            conn.close()
+    return {"content": content, "rev": rev, "mtime_ns": mtime_ns}
+
+
+@app.get("/api/file/raw")
+def file_raw(path: str) -> FileResponse:
+    root = _get_vault_root()
+    normalized = _vault_relative_path(path)
+    target = (root / normalized.lstrip("/")).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid file path") from exc
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(target)
 
 
 @app.post("/api/file/write")
@@ -630,9 +755,34 @@ def file_write(
     user: AuthModels.UserInfo = Depends(get_current_user)
 ) -> dict:
     root = vault_state.get_root()
+    file_path = root / payload.path.lstrip("/")
     
     # Check If-Match header for conflict detection
     if if_match is not None:
+        if if_match.startswith("mtime:"):
+            try:
+                expected_mtime = int(if_match.split(":", 1)[1])
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid If-Match mtime format")
+            try:
+                current_mtime = file_path.stat().st_mtime_ns
+            except OSError:
+                current_mtime = 0
+            if current_mtime != expected_mtime:
+                try:
+                    current_content = files.read_file(root, payload.path)
+                except FileAccessError:
+                    current_content = ""
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "Conflict",
+                        "current_mtime_ns": current_mtime,
+                        "current_content": current_content
+                    }
+                )
+        elif if_match.startswith("rev:"):
+            if_match = if_match.split(":", 1)[1]
         db_path = config._vault_db_path()
         if db_path:
             import sqlite3
@@ -657,6 +807,10 @@ def file_write(
                             current_content = files.read_file(root, payload.path)
                         except FileAccessError:
                             current_content = ""
+                        try:
+                            current_mtime = file_path.stat().st_mtime_ns
+                        except OSError:
+                            current_mtime = 0
                         
                         conn.close()
                         raise HTTPException(
@@ -664,6 +818,7 @@ def file_write(
                             detail={
                                 "error": "Conflict",
                                 "current_rev": current_rev,
+                                "current_mtime_ns": current_mtime,
                                 "current_content": current_content,
                                 "current_title": row[1]
                             }
@@ -673,6 +828,10 @@ def file_write(
     
     try:
         files.write_file(root, payload.path, payload.content)
+        try:
+            mtime_ns = file_path.stat().st_mtime_ns
+        except OSError:
+            mtime_ns = None
         # Update search index
         db_path = config._vault_db_path()
         if db_path:
@@ -687,13 +846,13 @@ def file_write(
             try:
                 row = conn.execute("SELECT rev FROM pages WHERE path = ?", (payload.path,)).fetchone()
                 new_rev = row[0] if row else 0
-                return {"ok": True, "rev": new_rev}
+                return {"ok": True, "rev": new_rev, "mtime_ns": mtime_ns}
             finally:
                 conn.close()
     except FileAccessError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     
-    return {"ok": True}
+    return {"ok": True, "mtime_ns": mtime_ns}
 
 
 @app.post("/api/files/modified")
@@ -1291,15 +1450,34 @@ def get_app() -> FastAPI:
 
 if __name__ == "__main__":
     import uvicorn
+    import argparse
     
+    parser = argparse.ArgumentParser(description="ZimX API Server")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--vaults-root",
+        default=os.getenv("ZIMX_VAULTS_ROOT", "vaults"),
+        help="Base folder where vaults are stored",
+    )
+    args = parser.parse_args()
+
+    if not args.vaults_root:
+        print("Error: --vaults-root must be specified or ZIMX_VAULTS_ROOT environment variable set.")
+        exit(1)
+    
+    set_vaults_root(args.vaults_root)
+    vaults_root = _ensure_vaults_root()
+
     print(f"\n{_ANSI_BLUE}=== ZimX API Server ==={_ANSI_RESET}")
-    print(f"{_ANSI_BLUE}Starting server on http://127.0.0.1:8000{_ANSI_RESET}")
-    print(f"{_ANSI_BLUE}API docs: http://127.0.0.1:8000/docs{_ANSI_RESET}")
+    print(f"{_ANSI_BLUE}Starting server on http://{args.host}:{args.port}{_ANSI_RESET}")
+    print(f"{_ANSI_BLUE}API docs: http://{args.host}:{args.port}/docs{_ANSI_RESET}")
     print(f"{_ANSI_BLUE}Auth enabled: {AUTH_ENABLED}{_ANSI_RESET}\n")
+    print(f"{_ANSI_BLUE}Vaults root: {vaults_root}{_ANSI_RESET}\n")
     
     uvicorn.run(
         app,
-        host="127.0.0.1",
-        port=8000,
+        host=args.host,
+        port=args.port,
         log_level="info"
     )
