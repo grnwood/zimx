@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -e
-
+source venv/bin/activate
 # Run the API server over HTTPS using uvicorn.
 # Note: the Python entrypoint only accepts host/port/vault options (no SSL), so we use uvicorn directly.
 
@@ -11,5 +11,4 @@ uvicorn zimx.server.api:app \
   --port 8443 \
   --ssl-keyfile dev-assets/certs/local-key.pem \
   --ssl-certfile dev-assets/certs/local-cert.pem
-
 
