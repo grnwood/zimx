@@ -234,6 +234,25 @@ def _sample_tasks(reference_date: date | None = None) -> list[str]:
     return tasks
 
 
+def _sample_tags(min_count: int = 2, max_count: int = 5) -> list[str]:
+    """Return a small list of tags for page content."""
+    global _TAG_CURSOR
+    if not TAG_POOL:
+        return []
+    count = random.randint(min_count, max_count)
+    tags: list[str] = []
+    while len(tags) < count and TAG_POOL:
+        tag = TAG_POOL[_TAG_CURSOR % len(TAG_POOL)]
+        _TAG_CURSOR += 1
+        if tag not in tags:
+            tags.append(tag)
+    return tags
+
+
+def _format_tags(tags: list[str]) -> str:
+    return " ".join(f"@{tag}" for tag in tags)
+
+
 def _generate_task_text() -> str:
     buzz = "-".join(FAKER.words(nb=random.randint(2, 4)))
     action = FAKER.bs()
@@ -274,6 +293,7 @@ def _build_content(
 ) -> str:
     anchor_slugs = [slug for _, slug in SECTION_DEFS]
     section_labels = {slug: label for label, slug in SECTION_DEFS}
+    page_tags = _sample_tags(3, 6)
     rich_links: list[str] = []
     for target in ordered_links:
         rich_links.append(target)
@@ -325,6 +345,7 @@ def _build_content(
         "",
         f"This page lives at :{colon_path} in the ZimX vault.",
         "It describes features, workflows, and ideas for ZimX while acting as link data.",
+        f"Tags: {_format_tags(page_tags) if page_tags else '@general'}",
         "",
         "Links to explore:",
         *[f"- [:{link}|{link}]" for link in dedup_links],
@@ -361,8 +382,11 @@ def _build_content(
                 extra_note = (
                     f"Cross-reference :{target}#{slug} for aligned {label.lower()} notes."
                 )
+            tag_note = None
+            if random.random() < 0.55:
+                tag_note = f"Related tags: {_format_tags(_sample_tags(2, 4))}"
             level = ((paragraph_counter + idx) % 5) + 1
-            paragraphs_for_section.append(_headered_paragraph(level, extra_note))
+            paragraphs_for_section.append(_headered_paragraph(level, extra_note, tag_note))
         paragraph_counter += count
         section_body = "\n\n".join(paragraphs_for_section)
         body_sections.append(f"## {label}\n\n{section_body}")
@@ -371,7 +395,11 @@ def _build_content(
     return "\n".join(intro) + "\n\n" + body + "\n"
 
 
-def _headered_paragraph(header_level: int, extra_note: str | None = None) -> str:
+def _headered_paragraph(
+    header_level: int,
+    extra_note: str | None = None,
+    tag_note: str | None = None,
+) -> str:
     level = max(1, min(5, header_level))
     heading_words = " ".join(word.capitalize() for word in FAKER.words(nb=random.randint(2, 4)))
     heading = f"{'#' * level} {heading_words}"
@@ -379,6 +407,8 @@ def _headered_paragraph(header_level: int, extra_note: str | None = None) -> str
     body = textwrap.fill(sentences, width=86)
     if extra_note:
         body = f"{body}\n\n{extra_note}"
+    if tag_note:
+        body = f"{body}\n\n{tag_note}"
     return f"{heading}\n\n{body}"
 
 
@@ -466,11 +496,13 @@ def _build_journal_year_content(
     year: int, month_details: list[tuple[int, list[date]]], cross_targets: list[str]
 ) -> str:
     colon_path = f"Journal:{year:04d}:{year:04d}"
+    year_tags = _sample_tags(2, 4)
     cross_refs = _sample_cross_links(cross_targets, 5)
     lines = [
         f"# {year} Journal Overview",
         "",
         f"Annual tracker anchored at :{colon_path}.",
+        f"Tags: {_format_tags(year_tags) if year_tags else '@journal'}",
         "Covered months:",
     ]
     for month, day_dates in month_details:
@@ -520,6 +552,7 @@ def _build_journal_month_content(
 ) -> str:
     month_name = date(year, month, 1).strftime("%B")
     colon_path = f"Journal:{year:04d}:{month:02d}:{month:02d}"
+    month_tags = _sample_tags(2, 5)
     focus_blurbs = ", ".join(FAKER.words(nb=4))
     cross_refs = _sample_cross_links(cross_targets, 4)
     lines = [
@@ -527,6 +560,7 @@ def _build_journal_month_content(
         "",
         f"Monthly tracker anchored at :{colon_path}.",
         f"This span includes {len(day_dates)} daily entries focused on {focus_blurbs}.",
+        f"Tags: {_format_tags(month_tags) if month_tags else '@journal'}",
         "",
         "Daily links:",
     ]
@@ -582,11 +616,13 @@ def _build_journal_day_content(entry_date: date, cross_targets: list[str], sub_l
     day_tasks = random.sample(tasks, k=min(4, len(tasks)))
     timeline = _generate_journal_timeline()
     cross_refs = _sample_cross_links(cross_targets, 6)
+    day_tags = _sample_tags(3, 6)
 
     intro_lines = [
         f"# {entry_date:%A, %B %d, %Y}",
         "",
         f"Tracked at :{colon_path}.",
+        f"Tags: {_format_tags(day_tags) if day_tags else '@journal'}",
         "",
         "Daily context:",
         f"- Mood: {mood}",
@@ -685,10 +721,12 @@ def _write_journal_day_subpages(day_dir: Path, entry_date: date, cross_targets: 
         file_path = sub_dir / f"{slug}{PAGE_SUFFIX}"
         colon_path = f"Journal:{entry_date:%Y}:{entry_date:%m}:{entry_date:%d}:{slug}"
         cross_refs = _sample_cross_links(cross_targets, random.randint(3, 6))
+        sub_tags = _sample_tags(2, 5)
         body_parts = [
             f"# {topic} for {entry_date:%Y-%m-%d}",
             "",
             f"Tracked at :{colon_path}.",
+            f"Tags: {_format_tags(sub_tags) if sub_tags else '@journal'}",
             "",
             "Highlights:",
             *[f"- {FAKER.sentence(nb_words=12)}" for _ in range(random.randint(3, 6))],

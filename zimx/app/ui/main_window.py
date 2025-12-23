@@ -83,6 +83,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QDialogButtonBox,
     QPushButton,
+    QTabWidget,
 )
 
 from zimx.app import config, indexer
@@ -208,6 +209,8 @@ from .page_editor_window import PageEditorWindow
 from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
 from .mode_window import ModeWindow
 from .find_replace_bar import FindReplaceBar
+from .search_tab import SearchTab
+from .tags_tab import TagsTab
 
 
 PATH_ROLE = int(Qt.ItemDataRole.UserRole)
@@ -505,12 +508,13 @@ def logNav(message: str) -> None:
 
 class MainWindow(QMainWindow):
 
-    def __init__(self, api_base: str) -> None:
+    def __init__(self, api_base: str, local_auth_token: Optional[str] = None) -> None:
         super().__init__()
         self.setWindowTitle("ZimX Desktop")
         # Ensure standard window controls (including maximize) are present.
         self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint)
         self.api_base = api_base.rstrip("/")
+        self._local_auth_token = local_auth_token
         def _log_request(request):
             try:
                 path = request.url.raw_path.decode("utf-8") if hasattr(request.url, "raw_path") else request.url.path
@@ -525,10 +529,12 @@ class MainWindow(QMainWindow):
                 path = str(response.request.url)
             print(f"{_ANSI_BLUE}[API] {response.status_code} {path}{_ANSI_RESET}")
 
+        headers = {"X-Local-UI-Token": local_auth_token} if local_auth_token else None
         self.http = httpx.Client(
             base_url=self.api_base,
             timeout=10.0,
             event_hooks={"request": [_log_request], "response": [_log_response]},
+            headers=headers,
         )
         self.vault_root: Optional[str] = None
         self.vault_root_name: Optional[str] = None
@@ -628,6 +634,19 @@ class MainWindow(QMainWindow):
         pal = QApplication.instance().palette()
         tooltip_fg = pal.color(QPalette.ToolTipText).name()
         tooltip_bg = pal.color(QPalette.ToolTipBase).name()
+        
+        # Search button to switch to search tab
+        self.search_tree_button = QToolButton()
+        self.search_tree_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogContentsView))
+        self.search_tree_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.search_tree_button.setAutoRaise(True)
+        self.search_tree_button.setToolTip(
+            f"<div style='color:{tooltip_fg}; background:{tooltip_bg}; padding:2px 4px;'>Search vault (Ctrl+Shift+F)</div>"
+        )
+        self.search_tree_button.clicked.connect(self._open_search_tab)
+        tree_header_layout.addWidget(self.search_tree_button)
+
+        tree_header_layout.addStretch()
 
         # Manual refresh button to reload tree data from the API
         self.refresh_tree_button = QToolButton()
@@ -640,16 +659,15 @@ class MainWindow(QMainWindow):
         self.refresh_tree_button.clicked.connect(self._refresh_tree)
         self.refresh_tree_button.setEnabled(False)
         tree_header_layout.addWidget(self.refresh_tree_button)
-
-        tree_header_layout.addStretch()
-
-        # Collapse-all button (aligned to the right)
+        
+        # Collapse-all button (aligned to the right, more prominent with white foreground)
         self.collapse_tree_button = QToolButton()
         icon_path = self._find_asset("collapse.svg")
         base_icon = self._load_icon(icon_path, Qt.white, size=16) or self.style().standardIcon(QStyle.SP_ToolBarVerticalExtensionButton)
         self.collapse_tree_button.setIcon(base_icon)
         self.collapse_tree_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.collapse_tree_button.setAutoRaise(True)
+        self.collapse_tree_button.setStyleSheet("QToolButton { color: white; }")
         self.collapse_tree_button.setToolTip(
             f"<div style='color:{tooltip_fg}; background:{tooltip_bg}; padding:2px 4px;'>Collapse all folders</div>"
         )
@@ -846,21 +864,34 @@ class MainWindow(QMainWindow):
         self.editor_split.setStretchFactor(1, 2)
         self.editor_split.splitterMoved.connect(self._on_splitter_moved)
 
-        # Create tree container with custom header
-        tree_container = QWidget()
-        tree_layout = QVBoxLayout()
-        tree_layout.setContentsMargins(0, 0, 0, 0)
-        tree_layout.setSpacing(0)
-        tree_layout.addWidget(self.tree_header_widget)
-        tree_layout.addWidget(self.tree_view)
-        tree_container.setLayout(tree_layout)
-        try:
-            self.tree_view.setMinimumWidth(80)
-        except Exception:
-            pass
+        # Create left panel with tabs for Vault, Tags, and Search
+        self.left_tab_widget = QTabWidget()
+        self.left_tab_widget.setMinimumWidth(80)
+        
+        # Vault tab (tree with header)
+        vault_tab = QWidget()
+        vault_layout = QVBoxLayout()
+        vault_layout.setContentsMargins(0, 0, 0, 0)
+        vault_layout.setSpacing(0)
+        vault_layout.addWidget(self.tree_header_widget)
+        vault_layout.addWidget(self.tree_view)
+        vault_tab.setLayout(vault_layout)
+        self.left_tab_widget.addTab(vault_tab, "Vault")
+        
+        # Tags tab
+        self.tags_tab = TagsTab(http_client=self.http)
+        self.tags_tab.pageNavigationRequested.connect(self._on_search_result_selected)
+        self.tags_tab.pageNavigationWithEditorFocusRequested.connect(self._on_search_result_selected_with_editor_focus)
+        self.left_tab_widget.addTab(self.tags_tab, "Tags")
+        
+        # Search tab
+        self.search_tab = SearchTab(http_client=self.http)
+        self.search_tab.pageNavigationRequested.connect(self._on_search_result_selected)
+        self.search_tab.pageNavigationWithEditorFocusRequested.connect(self._on_search_result_selected_with_editor_focus)
+        self.left_tab_widget.addTab(self.search_tab, "Search")
         
         self.main_splitter = QSplitter()
-        self.main_splitter.addWidget(tree_container)
+        self.main_splitter.addWidget(self.left_tab_widget)
         self.main_splitter.addWidget(self.editor_split)
         self.main_splitter.setStretchFactor(1, 5)
         self.main_splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -957,6 +988,11 @@ class MainWindow(QMainWindow):
         rebuild_index_action.triggered.connect(self._rebuild_vault_index_from_disk)
         tools_menu.addAction(rebuild_index_action)
 
+        webserver_action = QAction("Start Web Server", self)
+        webserver_action.setToolTip("Start local web server to serve vault as HTML")
+        webserver_action.triggered.connect(self._open_webserver_dialog)
+        tools_menu.addAction(webserver_action)
+
         go_menu = self.menuBar().addMenu("&Go")
         home_action = QAction("(H)ome", self)
         home_action.setShortcut(QKeySequence("G,H"))
@@ -999,6 +1035,15 @@ class MainWindow(QMainWindow):
         rename_action.setShortcutContext(Qt.ApplicationShortcut)
         rename_action.triggered.connect(self._trigger_tree_rename)
         file_menu.addAction(rename_action)
+
+        file_menu.addSeparator()
+        
+        print_page_action = QAction("Print Page", self)
+        print_page_action.setShortcut(QKeySequence.Print)
+        print_page_action.setShortcutContext(Qt.ApplicationShortcut)
+        print_page_action.setToolTip("Print or export current page to PDF (Ctrl+P)")
+        print_page_action.triggered.connect(self._print_current_page)
+        file_menu.addAction(print_page_action)
 
         help_menu = self.menuBar().addMenu("Hel&p")
         documentation_action = QAction("Documentation", self)
@@ -1264,6 +1309,19 @@ class MainWindow(QMainWindow):
         reload_page = QShortcut(QKeySequence("Ctrl+R"), self)
         toggle_left = QShortcut(QKeySequence("Ctrl+Shift+B"), self)
         toggle_right = QShortcut(QKeySequence("Ctrl+Shift+N"), self)
+        search_vault = QShortcut(QKeySequence("Ctrl+Shift+F"), self)
+        search_vault.setContext(Qt.ApplicationShortcut)
+        search_vault.activated.connect(self._show_search_dialog)
+        # Tab switching shortcuts
+        tab_vault = QShortcut(QKeySequence("Ctrl+1"), self)
+        tab_vault.setContext(Qt.ApplicationShortcut)
+        tab_vault.activated.connect(lambda: self.left_tab_widget.setCurrentIndex(0))
+        tab_tags = QShortcut(QKeySequence("Ctrl+2"), self)
+        tab_tags.setContext(Qt.ApplicationShortcut)
+        tab_tags.activated.connect(lambda: self.left_tab_widget.setCurrentIndex(1))
+        tab_search = QShortcut(QKeySequence("Ctrl+3"), self)
+        tab_search.setContext(Qt.ApplicationShortcut)
+        tab_search.activated.connect(lambda: self.left_tab_widget.setCurrentIndex(2))
         prefs_shortcut = QShortcut(QKeySequence("Ctrl+."), self)
         prefs_shortcut.setContext(Qt.ApplicationShortcut)
         prefs_shortcut.activated.connect(self._open_preferences)
@@ -2097,6 +2155,15 @@ class MainWindow(QMainWindow):
             self.right_panel.task_panel.set_navigation_filter(self._nav_filter_path, refresh=False)
         except Exception:
             pass
+        try:
+            self.right_panel.link_panel.set_navigation_filter(self._nav_filter_path, refresh=False)
+        except Exception:
+            pass
+        for panel in list(getattr(self, "_detached_link_panels", [])):
+            try:
+                panel.set_navigation_filter(self._nav_filter_path, refresh=False)
+            except Exception:
+                pass
         self._populate_vault_tree()
         try:
             self.tree_view.expandToDepth(1)
@@ -2116,6 +2183,15 @@ class MainWindow(QMainWindow):
             self.right_panel.task_panel.set_navigation_filter(None, refresh=False)
         except Exception:
             pass
+        try:
+            self.right_panel.link_panel.set_navigation_filter(None, refresh=False)
+        except Exception:
+            pass
+        for panel in list(getattr(self, "_detached_link_panels", [])):
+            try:
+                panel.set_navigation_filter(None, refresh=False)
+            except Exception:
+                pass
         self._populate_vault_tree()
         self.tree_view.collapseAll()
         self._apply_nav_filter_style()
@@ -2479,6 +2555,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, lambda: self._deferred_select_tree_path(selection_path))
         self.right_panel.refresh_tasks()
         self.right_panel.refresh_calendar()
+        self.tags_tab.refresh_tags()
         self._apply_nav_filter_style()
 
     def _add_tree_node(self, parent: QStandardItem, node: dict, seen: Optional[set[str]] = None) -> QStandardItem:
@@ -3387,6 +3464,132 @@ class MainWindow(QMainWindow):
     def _collapse_tree_to_root(self) -> None:
         """Collapse the navigation tree to top-level folders."""
         self.tree_view.collapseAll()
+    
+    def _open_search_tab(self) -> None:
+        """Switch to the Search tab and focus the search field."""
+        self.left_tab_widget.setCurrentIndex(2)  # Search tab is now index 2 (Vault=0, Tags=1, Search=2)
+        self.search_tab.focus_search()
+    
+    def _on_search_result_selected(self, path: str, line: int) -> None:
+        """Handle navigation from search results to a specific page."""
+        print(f"[SearchNav] Navigating to {path}, line {line}")
+        self._open_file(path)
+        
+        # Scroll to the line with flash animation if line number is provided
+        if line > 0:
+            print(f"[SearchNav] Scheduling scroll to line {line}")
+            QTimer.singleShot(50, lambda: self._scroll_to_line_with_flash(line))
+        
+        # Return focus to search results tree
+        QTimer.singleShot(100, lambda: self.search_tab.results_tree.setFocus())
+    
+    def _on_search_result_selected_with_editor_focus(self, path: str, line: int) -> None:
+        """Handle navigation from search results with editor focus (Ctrl+Enter)."""
+        self._open_file(path)
+        
+        # Scroll to the line with flash animation if line number is provided
+        if line > 0:
+            QTimer.singleShot(50, lambda: self._scroll_to_line_with_flash(line))
+        
+        # Focus editor instead of returning to search results
+        QTimer.singleShot(100, lambda: self.editor.setFocus())
+    
+    def _scroll_to_line_with_flash(self, line: int) -> None:
+        """Scroll to a specific line number and flash it."""
+        print(f"[SearchNav] _scroll_to_line_with_flash called with line {line}")
+        if line <= 0:
+            print(f"[SearchNav] Line {line} is invalid, skipping")
+            return
+        
+        # Create cursor at the specified line (1-indexed from search, but QTextDocument uses 0-indexed)
+        doc = self.editor.document()
+        total_lines = doc.blockCount()
+        print(f"[SearchNav] Document has {total_lines} lines, looking for line {line}")
+        
+        # Note: Our search returns 1-indexed line numbers from enumerate(lines, 1)
+        # QTextDocument.findBlockByLineNumber expects 0-indexed
+        # So line 1 from search -> block 0, line 2 -> block 1, etc.
+        # But there seems to be an off-by-one, so let's use line directly instead of line-1
+        block = doc.findBlockByLineNumber(line)  # Try without subtracting 1
+        if not block.isValid():
+            # Fallback to line-1 if that doesn't work
+            block = doc.findBlockByLineNumber(line - 1)
+            if not block.isValid():
+                print(f"[SearchNav] Block at line {line} is not valid")
+                return
+        
+        cursor = QTextCursor(block)
+        cursor.movePosition(QTextCursor.StartOfBlock)
+        
+        print(f"[SearchNav] Setting cursor to block {block.blockNumber()} (search line {line}) and animating")
+        # Set the cursor position and scroll with animation and flash
+        self.editor.setTextCursor(cursor)
+        self._animate_or_flash_to_cursor(cursor)
+    
+    def _show_search_dialog(self) -> None:
+        """Show Ctrl+Shift+F search dialog that populates the search tab."""
+        if not config.has_active_vault():
+            return
+        
+        # Simple dialog to get search query
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QCheckBox, QDialogButtonBox
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Search Across Vault")
+        dialog.resize(500, 180)
+        
+        layout = QVBoxLayout()
+        
+        # Search term input
+        layout.addWidget(QLabel("Search query:"))
+        search_input = QLineEdit()
+        search_input.setPlaceholderText("Enter search query (supports AND, OR, NOT, \"phrases\", @tags)")
+        layout.addWidget(search_input)
+        
+        # Limit by path checkbox and input
+        limit_checkbox = QCheckBox("Limit to page path:")
+        limit_checkbox.setChecked(False)
+        layout.addWidget(limit_checkbox)
+        
+        path_input = QLineEdit()
+        path_input.setEnabled(False)
+        # Display current path in colon form without .txt
+        display_path = self.current_path or ""
+        if display_path.endswith(".txt"):
+            display_path = display_path[:-4]
+        if display_path:
+            display_path = path_to_colon(display_path)
+        path_input.setText(display_path)
+        path_input.setPlaceholderText("(current page path)")
+        layout.addWidget(path_input)
+        
+        limit_checkbox.toggled.connect(path_input.setEnabled)
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        dialog.setLayout(layout)
+        search_input.setFocus()
+        
+        if dialog.exec() == QDialog.Accepted:
+            query = search_input.text().strip()
+            if query:
+                # Switch to search tab and populate it
+                self.left_tab_widget.setCurrentIndex(2)  # Search tab (now index 2)
+                
+                subtree = None
+                if limit_checkbox.isChecked() and path_input.text().strip():
+                    # Convert from colon form back to slash form for API
+                    from .path_utils import colon_to_path
+                    subtree = colon_to_path(path_input.text().strip())
+                    # Add .txt extension back if needed
+                    if not subtree.endswith(".txt"):
+                        subtree = subtree + ".txt"
+                
+                self.search_tab.set_search_query(query, subtree)
 
     def _on_attachment_dropped(self, filename: str) -> None:
         """Force-save the current page after a dropped attachment inserts content."""
@@ -3968,6 +4171,7 @@ class MainWindow(QMainWindow):
                 page_path=rel_path,
                 read_only=self._read_only,
                 open_in_main_callback=lambda target, **kw: self._open_link_in_context(target, **kw),
+                local_auth_token=self._local_auth_token,
                 parent=None,
             )
             try:
@@ -6863,6 +7067,208 @@ class MainWindow(QMainWindow):
         self._reindex_vault(show_progress=True)
         self.statusBar().showMessage("Reindex complete", 4000)
         print("[UI] Reindex from files complete")
+
+    def _open_webserver_dialog(self) -> None:
+        """Open the web server control dialog."""
+        if not self.vault_root or not config.has_active_vault():
+            self._alert("Select a vault before starting the web server.")
+            return
+        
+        from zimx.app.ui.webserver_dialog import WebServerDialog
+        
+        # Create non-modal dialog and keep reference to prevent garbage collection
+        dialog = WebServerDialog(self.vault_root, config, parent=self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        dialog.show()
+
+    def _print_current_page(self) -> None:
+        """Print or export current page to PDF."""
+        if not self.current_file or not self.vault_root:
+            self._alert("No page is currently open.")
+            return
+        
+        # Determine if we're running locally or remotely
+        is_local = self._is_local_api()
+        
+        if is_local:
+            # Local: render HTML directly from file
+            self._print_page_local()
+        else:
+            # Remote: use webserver or API
+            self._print_page_remote()
+    
+    def _is_local_api(self) -> bool:
+        """Check if the API is running locally."""
+        import urllib.parse
+        parsed = urllib.parse.urlparse(self.api_base)
+        return parsed.hostname in ("localhost", "127.0.0.1", "::1", None)
+    
+    def _print_page_local(self) -> None:
+        """Print page by rendering HTML locally."""
+        import tempfile
+        import webbrowser
+        from urllib.parse import quote
+        
+        try:
+            # Read the current file
+            file_path = Path(self.vault_root) / self.current_file
+            if not file_path.exists():
+                self._alert(f"File not found: {self.current_file}")
+                return
+            
+            content = file_path.read_text(encoding="utf-8")
+            
+            # Render using our webserver template approach
+            html = self._render_page_html(self.current_file, content)
+            
+            # Write to temp file and open in browser
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as f:
+                f.write(html)
+                temp_path = f.name
+            
+            # Open in browser with file:// URL
+            webbrowser.open(f"file://{temp_path}")
+            
+            self.statusBar().showMessage("Print page opened in browser", 3000)
+            
+        except Exception as e:
+            self._alert(f"Failed to render page for printing: {e}")
+            print(f"[UI] Print page error: {e}")
+    
+    def _print_page_remote(self) -> None:
+        """Print page via webserver (for remote UI connections)."""
+        # When UI is remote, we need a webserver running to serve print-ready HTML
+        # Check if there's a webserver we can use
+        
+        # For now, alert the user to use the webserver
+        # In the future, we could auto-start a temporary webserver or use the API
+        self._alert(
+            "Remote printing requires a running web server.\n\n"
+            "Please start the web server via Tools → Start Web Server,\n"
+            "then navigate to your page in the browser and use:\n"
+            f"/wiki/{self.current_file.replace('.txt', '').replace('.md', '')}?mode=print&autoPrint=1"
+        )
+    
+    def _render_page_html(self, page_path: str, content: str) -> str:
+        """Render a markdown page to HTML using the webserver template style."""
+        from jinja2 import Template
+        import markdown
+        
+        # Get page title
+        title = Path(page_path).stem
+        
+        # Render markdown
+        md = markdown.Markdown(extensions=['fenced_code', 'tables', 'nl2br'])
+        html_content = md.convert(content)
+        
+        # Simple HTML template similar to webserver
+        template_html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} - ZimX</title>
+    <style>
+        @page {
+            margin: 2cm;
+            size: A4;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.7;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+            color: #333;
+        }
+        
+        h1 { font-size: 2em; margin-bottom: 0.5em; }
+        h2 { font-size: 1.5em; margin-top: 1em; }
+        h3 { font-size: 1.25em; margin-top: 1em; }
+        
+        pre {
+            background: #f5f5f5;
+            padding: 1em;
+            overflow-x: auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        
+        code {
+            background: #f5f5f5;
+            padding: 0.2em 0.4em;
+            border-radius: 3px;
+            font-family: monospace;
+            font-size: 0.9em;
+        }
+        
+        pre code {
+            background: none;
+            padding: 0;
+        }
+        
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 1em 0;
+        }
+        
+        th, td {
+            border: 1px solid #ddd;
+            padding: 0.5em;
+            text-align: left;
+        }
+        
+        th {
+            background: #f5f5f5;
+            font-weight: bold;
+        }
+        
+        img {
+            max-width: 100%;
+            height: auto;
+        }
+        
+        blockquote {
+            border-left: 4px solid #ddd;
+            margin-left: 0;
+            padding-left: 1em;
+            color: #666;
+        }
+        
+        @media print {
+            body {
+                padding: 0;
+            }
+            
+            h1, h2, h3, h4, h5, h6 {
+                page-break-after: avoid;
+            }
+            
+            pre, table {
+                page-break-inside: avoid;
+            }
+        }
+    </style>
+    <script>
+        window.addEventListener('load', function() {
+            setTimeout(function() {
+                window.print();
+            }, 500);
+        });
+    </script>
+</head>
+<body>
+    <h1>{{ title }}</h1>
+    <div class="content">
+        {{ content | safe }}
+    </div>
+</body>
+</html>"""
+        
+        template = Template(template_html)
+        return template.render(title=title, content=html_content)
 
     def _reindex_vault(self, show_progress: bool = False) -> None:
         """Reindex all pages in the vault."""

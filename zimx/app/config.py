@@ -832,7 +832,7 @@ def save_link_navigator_mode(mode: str) -> None:
     conn.commit()
 
 def load_link_navigator_layout(default: str = "default") -> str:
-    """Load preferred Link Navigator layout (default|layered|treemap) for the active vault."""
+    """Load preferred Link Navigator layout (default|layered|treemap|physics) for the active vault."""
     conn = _get_conn()
     if not conn:
         return default
@@ -841,16 +841,16 @@ def load_link_navigator_layout(default: str = "default") -> str:
     if not row:
         return default
     layout = str(row[0]).strip().lower()
-    return layout if layout in {"default", "layered", "treemap"} else default
+    return layout if layout in {"default", "layered", "treemap", "physics"} else default
 
 
 def save_link_navigator_layout(layout: str) -> None:
-    """Persist Link Navigator layout (default|layered|treemap) for the active vault."""
+    """Persist Link Navigator layout (default|layered|treemap|physics) for the active vault."""
     conn = _get_conn()
     if not conn:
         return
     normalized = (layout or "").strip().lower()
-    if normalized not in {"default", "layered", "treemap"}:
+    if normalized not in {"default", "layered", "treemap", "physics"}:
         normalized = "default"
     conn.execute(
         "REPLACE INTO kv(key, value) VALUES(?, ?)",
@@ -1364,10 +1364,22 @@ def update_page_index(
     with conn:
         unique_tags = list(dict.fromkeys(tags))
         unique_links = list(dict.fromkeys(links))
+        
+        # Check if page exists and get current rev
+        row = conn.execute("SELECT rev, page_id FROM pages WHERE path = ?", (path,)).fetchone()
+        current_rev = row[0] if row and row[0] is not None else 0
+        current_page_id = row[1] if row and row[1] else None
+        new_rev = current_rev + 1
+        
+        # Generate page_id if creating new page
+        if not current_page_id:
+            import uuid
+            current_page_id = str(uuid.uuid4())
+        
         conn.execute(
             """
-            INSERT INTO pages(path, title, updated, parent_path, display_order, path_ci, title_ci)
-            VALUES(?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO pages(path, title, updated, parent_path, display_order, path_ci, title_ci, page_id, rev)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(path) DO UPDATE SET
                 title = excluded.title,
                 updated = excluded.updated,
@@ -1375,7 +1387,8 @@ def update_page_index(
                 parent_path = excluded.parent_path,
                 display_order = COALESCE(excluded.display_order, pages.display_order),
                 path_ci = excluded.path_ci,
-                title_ci = excluded.title_ci
+                title_ci = excluded.title_ci,
+                rev = excluded.rev
             """,
             (
                 path,
@@ -1385,8 +1398,14 @@ def update_page_index(
                 display_order,
                 path.lower(),
                 (title or "").lower(),
+                current_page_id,
+                new_rev,
             ),
         )
+        
+        # Bump global sync revision
+        bump_sync_revision()
+        
         conn.execute("DELETE FROM page_tags WHERE page = ?", (path,))
         conn.executemany(
             "INSERT INTO page_tags(page, tag) VALUES(?, ?)",
@@ -1494,10 +1513,25 @@ def _normalize_folder_prefix(folder_path: str) -> str:
 
 
 def _delete_index_for_prefix(conn: sqlite3.Connection, folder_prefix: str) -> None:
+    """Mark pages as deleted (soft delete) and remove related data."""
     _invalidate_task_cache()
     like_pattern = f"{folder_prefix}/%"
+    
     with conn:
-        conn.execute("DELETE FROM pages WHERE path LIKE ?", (like_pattern,))
+        # Soft delete pages: mark as deleted and bump revision
+        rows = conn.execute("SELECT path, rev FROM pages WHERE path LIKE ?", (like_pattern,)).fetchall()
+        for path, current_rev in rows:
+            new_rev = (current_rev or 0) + 1
+            conn.execute(
+                "UPDATE pages SET deleted = 1, rev = ? WHERE path = ?",
+                (new_rev, path)
+            )
+        
+        # Bump global sync revision for each deleted page
+        for _ in rows:
+            bump_sync_revision()
+        
+        # Remove related data (tags, links, tasks, etc.) - these can be hard deleted
         conn.execute("DELETE FROM page_tags WHERE page LIKE ?", (like_pattern,))
         conn.execute("DELETE FROM links WHERE from_path LIKE ? OR to_path LIKE ?", (like_pattern, like_pattern))
         conn.execute("DELETE FROM tasks WHERE path LIKE ?", (like_pattern,))
@@ -1509,6 +1543,7 @@ def _delete_index_for_prefix(conn: sqlite3.Connection, folder_prefix: str) -> No
         conn.execute("DELETE FROM attachments WHERE page_path LIKE ?", (like_pattern,))
         conn.execute("DELETE FROM attachments WHERE attachment_path LIKE ?", (like_pattern,))
         conn.execute("DELETE FROM kv WHERE key LIKE ?", (f"hash:{folder_prefix}/%",))
+    
     _invalidate_page_cache()
     bump_task_index_version()
 
@@ -1720,17 +1755,30 @@ def ensure_page_entry(page_path: str, title: Optional[str] = None) -> None:
             existing_order = None
         order = existing_order if existing_order is not None else _next_display_order(conn, parent_path)
         page_title = title or Path(page_path.lstrip("/")).stem
+        
+        # Check if page exists and get current rev and page_id
+        row = conn.execute("SELECT rev, page_id FROM pages WHERE path = ?", (page_path,)).fetchone()
+        current_rev = row[0] if row and row[0] is not None else 0
+        current_page_id = row[1] if row and row[1] else None
+        new_rev = current_rev + 1
+        
+        # Generate page_id if creating new page
+        if not current_page_id:
+            import uuid
+            current_page_id = str(uuid.uuid4())
+        
         with conn:
             conn.execute(
                 """
-                INSERT INTO pages(path, title, updated, parent_path, display_order, path_ci, title_ci)
-                VALUES(?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO pages(path, title, updated, parent_path, display_order, path_ci, title_ci, page_id, rev)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(path) DO UPDATE SET
                     parent_path = excluded.parent_path,
                     last_modified = excluded.updated,
                     display_order = COALESCE(pages.display_order, excluded.display_order),
                     path_ci = excluded.path_ci,
-                    title_ci = lower(COALESCE(pages.title, excluded.title))
+                    title_ci = lower(COALESCE(pages.title, excluded.title)),
+                    rev = excluded.rev
                 """,
             (
                 page_path,
@@ -1740,8 +1788,14 @@ def ensure_page_entry(page_path: str, title: Optional[str] = None) -> None:
                 order,
                 page_path.lower(),
                 (page_title or "").lower(),
+                current_page_id,
+                new_rev,
             ),
         )
+        
+        # Bump global sync revision
+        bump_sync_revision()
+        
         _invalidate_page_cache()
     finally:
         conn.close()
@@ -1774,6 +1828,39 @@ def bump_tree_version() -> int:
     new_val = current + 1
     try:
         conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("tree_version", str(new_val)))
+        conn.commit()
+    except Exception:
+        pass
+    return new_val
+
+
+def get_sync_revision() -> int:
+    """Get the current global sync revision counter."""
+    conn = _get_conn()
+    if not conn:
+        return 0
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key = 'sync_revision'").fetchone()
+        if row:
+            return int(row[0])
+    except Exception:
+        pass
+    return 0
+
+
+def bump_sync_revision() -> int:
+    """Increment and return the new global sync revision."""
+    conn = _get_conn()
+    if not conn:
+        return 0
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key = 'sync_revision'").fetchone()
+        current = int(row[0]) if row else 0
+    except Exception:
+        current = 0
+    new_val = current + 1
+    try:
+        conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("sync_revision", str(new_val)))
         conn.commit()
     except Exception:
         pass
@@ -2174,6 +2261,76 @@ def fetch_link_relations(path: str) -> dict[str, list[str]]:
     ]
     return {"incoming": incoming, "outgoing": outgoing}
 
+def fetch_link_edges(from_paths: Iterable[str] = (), to_paths: Iterable[str] = ()) -> list[tuple[str, str]]:
+    """Return link edges for the provided from/to path sets."""
+    conn = _get_conn()
+    if not conn:
+        return []
+    edges: list[tuple[str, str]] = []
+    from_list = [p for p in set(from_paths) if p]
+    if from_list:
+        placeholders = ",".join("?" for _ in from_list)
+        rows = conn.execute(
+            f"SELECT from_path, to_path FROM links WHERE from_path IN ({placeholders})",
+            from_list,
+        ).fetchall()
+        edges.extend((row[0], row[1]) for row in rows)
+    to_list = [p for p in set(to_paths) if p]
+    if to_list:
+        placeholders = ",".join("?" for _ in to_list)
+        rows = conn.execute(
+            f"SELECT from_path, to_path FROM links WHERE to_path IN ({placeholders})",
+            to_list,
+        ).fetchall()
+        edges.extend((row[0], row[1]) for row in rows)
+    return edges
+
+
+def fetch_page_tags(paths: Iterable[str]) -> dict[str, list[str]]:
+    """Return a mapping of page path -> list of tags for the provided paths."""
+    conn = _get_conn()
+    if not conn:
+        return {}
+    unique = [p for p in set(paths) if p]
+    if not unique:
+        return {}
+    placeholders = ",".join("?" for _ in unique)
+    rows = conn.execute(
+        f"SELECT page, tag FROM page_tags WHERE page IN ({placeholders})",
+        unique,
+    ).fetchall()
+    tags: dict[str, list[str]] = {path: [] for path in unique}
+    for page, tag in rows:
+        if page not in tags:
+            tags[page] = []
+        tags[page].append(tag)
+    return tags
+
+
+def fetch_link_degrees(paths: Iterable[str]) -> dict[str, int]:
+    """Return total link degree (incoming + outgoing) for provided paths."""
+    conn = _get_conn()
+    if not conn:
+        return {}
+    unique = [p for p in set(paths) if p]
+    if not unique:
+        return {}
+    placeholders = ",".join("?" for _ in unique)
+    degrees: dict[str, int] = {path: 0 for path in unique}
+    rows = conn.execute(
+        f"SELECT from_path, COUNT(*) FROM links WHERE from_path IN ({placeholders}) GROUP BY from_path",
+        unique,
+    ).fetchall()
+    for path, count in rows:
+        degrees[path] = degrees.get(path, 0) + int(count or 0)
+    rows = conn.execute(
+        f"SELECT to_path, COUNT(*) FROM links WHERE to_path IN ({placeholders}) GROUP BY to_path",
+        unique,
+    ).fetchall()
+    for path, count in rows:
+        degrees[path] = degrees.get(path, 0) + int(count or 0)
+    return degrees
+
 
 def fetch_page_titles(paths: Iterable[str]) -> dict[str, str]:
     """Return a mapping of page path -> title for the provided paths."""
@@ -2337,6 +2494,16 @@ def _ensure_tasks_fts(conn: sqlite3.Connection) -> None:
             _TASKS_FTS_ENABLED = preexisting and _tasks_fts_exists(conn)
 
 
+def _ensure_pages_search_fts(conn: sqlite3.Connection) -> None:
+    """Create the pages_search_fts FTS5 virtual table for full-text search."""
+    try:
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS pages_search_fts USING fts5(content, content_rowid='id')"
+        )
+    except sqlite3.OperationalError as e:
+        print(f"[Index] FTS5 for pages search not available: {e}")
+
+
 def _should_use_task_fts(conn: sqlite3.Connection, total_tasks: Optional[int] = None) -> bool:
     if not _TASKS_FTS_ENABLED:
         return False
@@ -2424,6 +2591,8 @@ def _ensure_page_columns(conn: sqlite3.Connection) -> None:
     existing = {row[1] for row in conn.execute("PRAGMA table_info(pages)").fetchall()}
     added = False
     normalized_added = False
+    
+    # Original columns
     if "parent_path" not in existing:
         conn.execute("ALTER TABLE pages ADD COLUMN parent_path TEXT")
         added = True
@@ -2438,6 +2607,27 @@ def _ensure_page_columns(conn: sqlite3.Connection) -> None:
         normalized_added = True
     if "title_ci" not in existing:
         conn.execute("ALTER TABLE pages ADD COLUMN title_ci TEXT")
+        normalized_added = True
+    
+    # Web sync columns
+    if "page_id" not in existing:
+        conn.execute("ALTER TABLE pages ADD COLUMN page_id TEXT")
+        # Generate UUIDs for existing pages
+        import uuid
+        rows = conn.execute("SELECT path FROM pages WHERE page_id IS NULL").fetchall()
+        for (path,) in rows:
+            page_id = str(uuid.uuid4())
+            conn.execute("UPDATE pages SET page_id = ? WHERE path = ?", (page_id, path))
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pages_page_id ON pages(page_id)")
+    
+    if "rev" not in existing:
+        conn.execute("ALTER TABLE pages ADD COLUMN rev INTEGER DEFAULT 0")
+    
+    if "deleted" not in existing:
+        conn.execute("ALTER TABLE pages ADD COLUMN deleted INTEGER DEFAULT 0")
+    
+    if "pinned" not in existing:
+        conn.execute("ALTER TABLE pages ADD COLUMN pinned INTEGER DEFAULT 0")
         normalized_added = True
     if added:
         _backfill_page_hierarchy(conn)
@@ -2546,12 +2736,19 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             updated REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_attachments_page ON attachments(page_path);
+        CREATE TABLE IF NOT EXISTS pages_search_index (
+            id INTEGER PRIMARY KEY,
+            path TEXT NOT NULL UNIQUE,
+            mtime INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pages_search_path ON pages_search_index(path);
         """
     )
     _ensure_task_columns(conn)
     _ensure_task_indexes(conn)
     _ensure_page_columns(conn)
     _ensure_tasks_fts(conn)
+    _ensure_pages_search_fts(conn)
     conn.commit()
 
 

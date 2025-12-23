@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import socket
 import sys
 import threading
@@ -16,7 +17,7 @@ from PySide6.QtCore import QtMsgType, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
 
-from zimx.server.api import get_app
+from zimx.server import api as api_module
 from zimx.app import config
 from zimx.app.ui.main_window import MainWindow
 
@@ -121,6 +122,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--vault", help="Path to a vault to open at startup.")
     parser.add_argument("--port", type=int, help="Preferred API port (0 = auto-select).")
     parser.add_argument("--host", default=os.getenv("ZIMX_HOST", "127.0.0.1"), help="Host/interface to bind the API server.")
+    parser.add_argument("--webserver", nargs="?", const="127.0.0.1:0", help="Start web server mode [bind:port]. Default: 127.0.0.1:0")
     return parser.parse_args(argv)
 
 
@@ -289,7 +291,7 @@ def _start_api_server(host: str, preferred_port: int | None) -> tuple[int, uvico
     # to avoid "Unable to configure formatter 'default'" errors
     log_config = None if getattr(sys, "frozen", False) else None
     config = uvicorn.Config(
-        get_app(),
+        api_module.get_app(),
         host=host,
         port=port,
         log_level=os.getenv("UVICORN_LOG_LEVEL", "debug"),
@@ -301,6 +303,75 @@ def _start_api_server(host: str, preferred_port: int | None) -> tuple[int, uvico
     # Give the event loop a moment to bind the socket before the UI fires requests.
     time.sleep(0.2)
     return port, server
+
+
+def _run_webserver_mode(args: argparse.Namespace) -> None:
+    """Run in headless web server mode."""
+    import signal
+    from zimx.webserver import WebServer
+    
+    # Parse bind:port from --webserver argument
+    bind_str = args.webserver
+    if ":" in bind_str:
+        host, port_str = bind_str.rsplit(":", 1)
+        try:
+            port = int(port_str)
+        except ValueError:
+            port = 0
+    else:
+        host = bind_str
+        port = 0
+    
+    # Get vault path
+    vault_path = args.vault
+    if not vault_path:
+        # Try to get most recent vault from config
+        config.init_settings()
+        recent = config.get_recent_vaults()
+        if recent:
+            vault_path = recent[0]
+        else:
+            print("Error: No vault specified. Use --vault <path>", file=sys.stderr)
+            sys.exit(1)
+    
+    vault_path = Path(vault_path).resolve()
+    if not vault_path.exists():
+        print(f"Error: Vault not found: {vault_path}", file=sys.stderr)
+        sys.exit(1)
+    
+    # Initialize config with vault
+    config.init_settings()
+    config.set_active_vault(str(vault_path))
+    
+    # Create and start web server
+    web_server = WebServer(str(vault_path), config=config)
+    actual_host, actual_port = web_server.start(host, port)
+    
+    protocol = "https" if web_server.use_ssl else "http"
+    url = f"{protocol}://{actual_host}:{actual_port}/"
+    
+    print(f"\n✓ ZimX Web Server started")
+    print(f"  Vault: {vault_path}")
+    print(f"  URL:   {url}")
+    print(f"\nPress Ctrl+C to stop.\n")
+    
+    # Setup signal handler for graceful shutdown
+    def signal_handler(sig, frame):
+        print("\n\nShutting down web server...")
+        web_server.stop()
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Keep running until interrupted
+    try:
+        while web_server.is_running:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n\nShutting down web server...")
+        web_server.stop()
+
 
 def _parse_vault_arg(argv: list[str]) -> str | None:
     """Return a vault path passed via --vault flag, if present."""
@@ -342,6 +413,12 @@ def _enable_faulthandler_log() -> None:
 
 def main() -> None:
     args = _parse_args(sys.argv[1:])
+    
+    # Handle webserver mode
+    if args.webserver is not None:
+        _run_webserver_mode(args)
+        return
+    
     start_ts = time.time()
     _enable_faulthandler_log()
     _diag("Application starting.")
@@ -349,6 +426,8 @@ def main() -> None:
     _maybe_use_minimal_fonts()
     # Install custom message handler to suppress harmless Qt warnings
     qInstallMessageHandler(_qt_message_handler)
+    local_ui_token = secrets.token_urlsafe(32)
+    api_module.set_local_ui_token(local_ui_token)
     port, server = _start_api_server(args.host, args.port)
     _diag(f"API server started on {args.host}:{port}.")
     qt_app = QApplication(sys.argv)
@@ -358,7 +437,7 @@ def main() -> None:
     _set_app_icon(qt_app)
     # Ensure server shutdown when the UI exits
     qt_app.aboutToQuit.connect(lambda: setattr(server, "should_exit", True))
-    window = MainWindow(api_base=f"http://{args.host}:{port}")
+    window = MainWindow(api_base=f"http://{args.host}:{port}", local_auth_token=local_ui_token)
     window.resize(1200, 800)
     windows = getattr(qt_app, "_zimx_windows", [])
     windows.append(window)
