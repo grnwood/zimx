@@ -46,13 +46,14 @@ class APIClient {
     options: RequestInit = {}
   ): Promise<T> {
     const url = `${API_BASE_URL}${endpoint}`;
-    const headers: HeadersInit = {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    };
+    const isFormData = options.body instanceof FormData;
+    const headers = new Headers(options.headers || {});
+    if (!headers.has('Content-Type') && !isFormData) {
+      headers.set('Content-Type', 'application/json');
+    }
 
     if (this.accessToken) {
-      headers['Authorization'] = `Bearer ${this.accessToken}`;
+      headers.set('Authorization', `Bearer ${this.accessToken}`);
     }
 
     const response = await fetch(url, {
@@ -65,7 +66,7 @@ class APIClient {
       const refreshed = await this.refreshAccessToken();
       if (refreshed) {
         // Retry the original request
-        headers['Authorization'] = `Bearer ${this.accessToken}`;
+        headers.set('Authorization', `Bearer ${this.accessToken}`);
         const retryResponse = await fetch(url, { ...options, headers });
         if (!retryResponse.ok) {
           throw new Error(`HTTP ${retryResponse.status}: ${retryResponse.statusText}`);
@@ -189,6 +190,18 @@ class APIClient {
   async listAttachments(pagePath: string) {
     const url = `/files/?page_path=${encodeURIComponent(pagePath)}`;
     return this.request<{ attachments: Array<{ attachment_path: string; stored_path: string; updated: number }> }>(url);
+  }
+
+  async attachFiles(pagePath: string, files: File[]) {
+    const formData = new FormData();
+    formData.append('page_path', pagePath);
+    for (const file of files) {
+      formData.append('files', file);
+    }
+    return this.request<{ ok: boolean; page: string; attachments: string[] }>('/files/attach', {
+      method: 'POST',
+      body: formData,
+    });
   }
 
   // Sync endpoints
