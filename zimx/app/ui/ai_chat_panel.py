@@ -81,7 +81,12 @@ class VectorAPIClient:
         self._client = client
 
     def available(self) -> bool:
-        return self._client is not None
+        if self._client is None:
+            return False
+        try:
+            return not self._client.is_closed
+        except Exception:
+            return True
 
     def index_text(self, page_ref: str, text: str, kind: str, attachment: Optional[str] = None) -> bool:
         if not self.available():
@@ -96,7 +101,7 @@ class VectorAPIClient:
             resp = self._client.post("/vector/add", json=payload)
             resp.raise_for_status()
             return True
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, RuntimeError) as exc:
             _log_vector(f"Failed to index {page_ref}: {exc}")
             return False
 
@@ -112,7 +117,7 @@ class VectorAPIClient:
             resp = self._client.post("/vector/remove", json=payload)
             resp.raise_for_status()
             return True
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, RuntimeError) as exc:
             _log_vector(f"Failed to delete {page_ref}: {exc}")
             return False
 
@@ -142,7 +147,7 @@ class VectorAPIClient:
             resp.raise_for_status()
             data = resp.json()
             return [RetrievedChunk(**item) for item in data.get("chunks", [])]
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, RuntimeError) as exc:
             _log_vector(f"Failed to query context: {exc}")
             return []
 
@@ -1122,9 +1127,11 @@ class AIChatPanel(QtWidgets.QWidget):
         self._context_popup = ContextListPopup(self)
         self._context_popup.activated.connect(self._open_context_item)
         self._context_popup.deleted.connect(self._context_popup_delete_handler)
+        self._context_popup.refreshed.connect(self._context_popup_refresh_handler)
         self._context_popup_position: Optional[QtCore.QPoint] = None
         self._context_popup_width: Optional[int] = None
         self._vector_api = VectorAPIClient(api_client)
+        self._api_client = api_client
         self._chat_history: List[str] = []
         self._chat_history_index: Optional[int] = None
         self._unsent_buffer: str = ""
@@ -1146,6 +1153,15 @@ class AIChatPanel(QtWidgets.QWidget):
         self._stream_flush_timer.setInterval(40)
         self._stream_flush_timer.setSingleShot(True)
         self._stream_flush_timer.timeout.connect(self._flush_pending_stream_chunks)
+        self._stream_think_state: dict[int, dict[str, str | bool]] = {}
+        self._message_think: dict[int, str] = {}
+        self._message_think_active: set[int] = set()
+        self._message_think_expanded: set[int] = set()
+        self._condense_think_state: dict[str, str | bool] = {
+            "in_think": False,
+            "pending": "",
+            "visible": "",
+        }
         self._condense_flush_timer = QtCore.QTimer(self)
         self._condense_flush_timer.setInterval(40)
         self._condense_flush_timer.setSingleShot(True)
@@ -1258,12 +1274,19 @@ class AIChatPanel(QtWidgets.QWidget):
         cfg_layout.addLayout(model_row)
         layout.addWidget(self.server_config_widget)
         self.context_bar = QtWidgets.QWidget()
-        context_layout = QtWidgets.QVBoxLayout(self.context_bar)
+        context_layout = QtWidgets.QHBoxLayout(self.context_bar)
         context_layout.setContentsMargins(4, 2, 4, 2)
+        self.context_refresh_btn = QtWidgets.QToolButton()
+        self.context_refresh_btn.setText("↺")
+        self.context_refresh_btn.setToolTip("Refresh current page context")
+        self.context_refresh_btn.setAutoRaise(True)
+        self.context_refresh_btn.clicked.connect(self._refresh_current_page_context)
+        context_layout.addWidget(self.context_refresh_btn)
         self.context_summary_label = ClickableLabel("Context: —")
         self.context_summary_label.setStyleSheet("color: #007acc; text-decoration: underline;")
         self.context_summary_label.clicked.connect(self._show_context_popup)
         context_layout.addWidget(self.context_summary_label)
+        context_layout.addStretch()
         layout.addWidget(self.context_bar)
         self.splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         left_container = QtWidgets.QWidget()
@@ -1272,9 +1295,6 @@ class AIChatPanel(QtWidgets.QWidget):
         left_layout.setSpacing(4)
         header_row = QtWidgets.QHBoxLayout()
         header_row.addWidget(QtWidgets.QLabel("Chat Folders"))
-        self.new_chat_btn = QtWidgets.QPushButton("New Chat")
-        self.new_chat_btn.clicked.connect(self._new_chat)
-        header_row.addWidget(self.new_chat_btn)
         header_row.addStretch()
         left_layout.addLayout(header_row)
         self.chat_tree = QtWidgets.QTreeWidget()
@@ -1299,7 +1319,15 @@ class AIChatPanel(QtWidgets.QWidget):
         self.chat_view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.chat_view.customContextMenuRequested.connect(self._on_history_context_menu)
         self.chat_view.setReadOnly(True)
-        self.chat_view.setStyleSheet("QTextBrowser { padding: 6px;}") # font-size: 10px; }")
+        self.chat_view.setStyleSheet(
+            "QTextBrowser {"
+            "  padding: 6px;"
+            "  background: #0b0b0b;"
+            "  color: #d6f5d6;"
+            "  border: 1px solid #1f1f1f;"
+            "  font-family: \"Courier New\", monospace;"
+            "}"
+        )
         self.chat_view.installEventFilter(self)
         self._apply_font_size()
         chat_split.addWidget(self.chat_view)
@@ -1401,6 +1429,10 @@ class AIChatPanel(QtWidgets.QWidget):
         self.current_session_id = None
         self._condense_buffer = ""
         self._summary_content = None
+        self._message_think.clear()
+        self._message_think_active.clear()
+        self._message_think_expanded.clear()
+        self._condense_think_state = {"in_think": False, "pending": "", "visible": ""}
         self._context_popup_position = None
         self._context_popup_width = None
         self._load_chat_tree()
@@ -1460,6 +1492,8 @@ class AIChatPanel(QtWidgets.QWidget):
         menu = QtWidgets.QMenu(self)
         go_action = menu.addAction("Go To Page")
         go_action.triggered.connect(lambda: self._go_to_page_for_chat(data))
+        delete_action = menu.addAction("Delete Chat")
+        delete_action.triggered.connect(lambda: self._delete_chat_session(data))
         menu.exec(self.chat_tree.viewport().mapToGlobal(pos))
 
     def _toggle_server_config(self, checked: bool) -> None:
@@ -1482,21 +1516,156 @@ class AIChatPanel(QtWidgets.QWidget):
         else:
             self.status_label.setStyleSheet("")
 
+    def _strip_think_blocks(self, text: str) -> str:
+        if not text:
+            return ""
+        cleaned = re.sub(r"<think\b[^>]*>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(r"<think\b[^>]*/>", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"<think\b[^>]*>.*", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+        return cleaned
+
+    def _extract_think_blocks(self, text: str) -> str:
+        if not text:
+            return ""
+        matches = re.findall(r"<think\b[^>]*>(.*?)</think>", text, flags=re.DOTALL | re.IGNORECASE)
+        if not matches:
+            return ""
+        return "\n\n".join(match.strip() for match in matches if match.strip())
+
+    def _extract_think_pending(self, tail: str, marker: str) -> str:
+        if not tail:
+            return ""
+        max_len = len(marker) - 1
+        snippet = tail[-max_len:] if len(tail) > max_len else tail
+        last_lt = snippet.rfind("<")
+        if last_lt == -1:
+            return snippet if marker.startswith(snippet) else ""
+        candidate = snippet[last_lt:]
+        return candidate if marker.startswith(candidate) else ""
+
+    def _apply_stream_think_chunk(self, idx: int, chunk: str) -> None:
+        state = self._stream_think_state.setdefault(
+            idx, {"in_think": False, "pending": "", "visible": "", "think": ""}
+        )
+        text = f"{state['pending']}{chunk}"
+        state["pending"] = ""
+        visible_append = ""
+        think_append = ""
+        i = 0
+        while i < len(text):
+            if state["in_think"]:
+                end = text.find("</think>", i)
+                if end == -1:
+                    trailing = text[i:]
+                    pending = self._extract_think_pending(trailing, "</think>")
+                    if pending:
+                        think_append += trailing[: -len(pending)]
+                        state["pending"] = pending
+                    else:
+                        think_append += trailing
+                    break
+                think_append += text[i:end]
+                i = end + len("</think>")
+                state["in_think"] = False
+                continue
+            start = text.find("<think", i)
+            if start == -1:
+                trailing = text[i:]
+                pending = self._extract_think_pending(trailing, "<think")
+                if pending:
+                    visible_append += trailing[: -len(pending)]
+                    state["pending"] = pending
+                else:
+                    visible_append += trailing
+                break
+            visible_append += text[i:start]
+            tag_end = text.find(">", start)
+            if tag_end == -1:
+                state["pending"] = text[start:]
+                break
+            tag_text = text[start : tag_end + 1]
+            if tag_text.endswith("/>"):
+                i = tag_end + 1
+                continue
+            state["in_think"] = True
+            i = tag_end + 1
+        state["visible"] = f"{state['visible']}{visible_append}"
+        state["think"] = f"{state['think']}{think_append}"
+        display_text = state["visible"]
+        if 0 <= idx < len(self.messages):
+            role, _ = self.messages[idx]
+            if role == "assistant":
+                self.messages[idx] = (role, display_text)
+        if state["think"]:
+            self._message_think[idx] = state["think"]
+        if state["in_think"]:
+            self._message_think_active.add(idx)
+        else:
+            self._message_think_active.discard(idx)
+
+    def _apply_condense_think_chunk(self, chunk: str) -> None:
+        state = self._condense_think_state
+        text = f"{state['pending']}{chunk}"
+        state["pending"] = ""
+        visible_append = ""
+        i = 0
+        while i < len(text):
+            if state["in_think"]:
+                end = text.find("</think>", i)
+                if end == -1:
+                    state["pending"] = self._extract_think_pending(text[i:], "</think>")
+                    break
+                i = end + len("</think>")
+                state["in_think"] = False
+                continue
+            start = text.find("<think", i)
+            if start == -1:
+                trailing = text[i:]
+                pending = self._extract_think_pending(trailing, "<think")
+                if pending:
+                    visible_append += trailing[: -len(pending)]
+                    state["pending"] = pending
+                else:
+                    visible_append += trailing
+                break
+            visible_append += text[i:start]
+            tag_end = text.find(">", start)
+            if tag_end == -1:
+                state["pending"] = text[start:]
+                break
+            tag_text = text[start : tag_end + 1]
+            if tag_text.endswith("/>"):
+                i = tag_end + 1
+                continue
+            state["in_think"] = True
+            i = tag_end + 1
+        state["visible"] = f"{state['visible']}{visible_append}"
+        display_text = state["visible"]
+        if state["in_think"]:
+            display_text = f"{display_text}\n\nThinking..." if display_text.strip() else "Thinking..."
+        self._condense_buffer = display_text
+
     def _render_messages(self) -> None:
         parts: List[str] = []
-        base_color = self.palette().color(QPalette.Base).name()
-        text_color = self.palette().color(QPalette.Text).name()
-        accent = self.palette().color(QPalette.Highlight).name()
+        base_color = "#0b0b0b"
+        text_color = "#d6f5d6"
+        accent = "#7fd4a7"
         parts.append(
-            f"<style>body {{ background:{base_color}; color:{text_color}; }}"
+            f"<style>body {{ background:{base_color}; color:{text_color}; font-family: \"Courier New\", monospace; }}"
             f".bubble {{ position:relative; border-radius:6px; padding:6px 8px 12px; margin-bottom:8px; }}"
-            f".bubble:hover {{ background:rgba(0,0,0,0.05); }}"
+            f".bubble:hover {{ background:rgba(255,255,255,0.04); }}"
             f".actions {{ text-align:left; display:none; margin-top:6px; margin-left:0; }}"
             f".bubble:hover .actions {{ display:block; }}"
             f".actions a {{ margin-right:12px; margin-left:0; text-decoration:none; color:{accent}; }}"
-            f".user {{ background:rgba(80,120,200,0.10); }}"
-            f".assistant {{ background:rgba(60,200,140,0.10); }}"
-            f".summary {{ border:1px solid #e88; }}"
+            f".user {{ color:#f2e7a1; background:transparent; }}"
+            f".assistant {{ color:#8fe39b; background:transparent; }}"
+            f".summary {{ border:1px solid #2f4f2f; }}"
+            f".think-toggle {{ margin-top:6px; color:{accent}; text-decoration:none; display:inline-block; }}"
+            f".think-active a {{ animation: thinkPulse 1.2s infinite; }}"
+            f".think-body {{ margin-top:6px; padding:6px; border:2px solid #ffffff;"
+            f" background:rgba(0,0,0,0.35); max-height:7em; overflow:auto; white-space:pre-wrap;"
+            f" color:#bdbdbd; }}"
+            f"@keyframes thinkPulse {{ 0% {{ opacity:0.4; }} 50% {{ opacity:1; }} 100% {{ opacity:0.4; }} }}"
             f".role {{ font-weight:bold; color:{accent}; }}</style>"
         )
         self._message_map = {}
@@ -1512,9 +1681,28 @@ class AIChatPanel(QtWidgets.QWidget):
                 f"<a href='action:goto:{msg_id}'>{_icon_tag('go-to-top.svg','Go to start', 20)}</a>",
                 f"<a href='action:delete:{msg_id}'>{_icon_tag('icons8-trash.svg','Delete message', 20)}</a>",
             ]
+            think_html = ""
+            if role == "assistant":
+                think_text = self._message_think.get(idx, "")
+                if think_text or idx in self._message_think_active:
+                    label = "Hide thinking" if idx in self._message_think_expanded else "Thinking..."
+                    safe_think = html.escape(think_text).replace("\n", "<br>")
+                    if not safe_think:
+                        safe_think = "<em>...</em>"
+                    body = (
+                        f"<div class='think-body'>{safe_think}</div>"
+                        if idx in self._message_think_expanded
+                        else ""
+                    )
+                    active_class = " think-active" if idx in self._message_think_active else ""
+                    think_html = (
+                        f"<div class='think-toggle{active_class}'>"
+                        f"<a href='action:think:{msg_id}' title='Toggle thinking details'>{label}</a>"
+                        f"{body}</div>"
+                    )
             parts.append(
                 f"<div class='bubble {cls}' id='{msg_id}'><a name='{msg_id}' href='msg:{msg_id}'></a>"
-                f"<span class='role'>{role.title()}:</span><br>{rendered}"
+                f"<span class='role'>{role.title()}:</span><br>{think_html}{rendered}"
                 f"<div class='actions'>{' | '.join(actions)}</div>"
                 f"</div>"
             )
@@ -1695,6 +1883,9 @@ class AIChatPanel(QtWidgets.QWidget):
         return None
 
     def _maybe_open_context_picker(self) -> None:
+        self._try_open_context_picker(attempt=0)
+
+    def _try_open_context_picker(self, attempt: int) -> None:
         if self._is_global_chat_path(self._current_chat_path):
             return
         trigger = self._detect_context_trigger()
@@ -1706,7 +1897,24 @@ class AIChatPanel(QtWidgets.QWidget):
         if not self.ai_manager:
             return
         candidates = self._candidates_for_trigger(trigger)
+        if not candidates and trigger in ("@", "#") and self._api_client_available():
+            pages, trees = self._fetch_context_candidates_from_api()
+            if pages or trees:
+                self._page_candidates = pages
+                self._tree_candidates = trees
+                candidates = self._candidates_for_trigger(trigger)
         if not candidates:
+            if trigger in ("@", "#") and self.vault_root:
+                if self._context_reload_in_progress:
+                    self._set_status("Building context index…", "#f6c343")
+                    if attempt < 6:
+                        QtCore.QTimer.singleShot(250, lambda: self._try_open_context_picker(attempt + 1))
+                    return
+                self._reload_context_index()
+                self._set_status("Building context index…", "#f6c343")
+                if attempt < 6:
+                    QtCore.QTimer.singleShot(250, lambda: self._try_open_context_picker(attempt + 1))
+                return
             QtWidgets.QMessageBox.information(self, "Context", "No context items are available.")
             return
         cursor_rect = self.input_edit.cursorRect()
@@ -1994,12 +2202,49 @@ class AIChatPanel(QtWidgets.QWidget):
         self._context_popup.remove_item(item)
         self._delete_context_item(item)
 
+    def _context_popup_refresh_handler(self, item: ContextItem) -> None:
+        self._refresh_context_item(item)
+
+    def _refresh_context_item(self, item: ContextItem) -> None:
+        if not self._vector_api.available():
+            _log_vector(f"Skipping refresh for context {item.page_ref} ({item.kind}) — client unavailable.")
+            return
+        self._set_status("Refreshing context...", "#f6c343")
+        try:
+            self._delete_context_source(item)
+        except Exception:
+            pass
+        trigger = {"page": "@", "page-tree": "#"}.get(item.kind, "^")
+        candidate = ContextCandidate(
+            page_ref=item.page_ref,
+            label=item.page_ref,
+            attachment_name=item.attachment_name,
+        )
+        self._index_context_item(trigger, candidate)
+
+    def _refresh_current_page_context(self) -> None:
+        if not self.current_page_path:
+            return
+        target = next(
+            (
+                item
+                for item in self._context_items
+                if item.kind == "page" and item.page_ref == self.current_page_path
+            ),
+            None,
+        )
+        if target:
+            self._refresh_context_item(target)
+            return
+        self._ensure_page_context_added()
+
     def _index_context_item(self, trigger: str, candidate: ContextCandidate) -> None:
         if not self._vector_api.available():
             _log_vector(f"Skipping indexing for context {candidate.page_ref} ({trigger}) — client unavailable.")
             return
         kind = {"@": "page", "#": "page-tree"}.get(trigger, "attachment")
         _log_vector(f"Indexing {kind} context for {candidate.page_ref}")
+        self._set_status(f"Indexing context: {kind}", "#f6c343")
         if trigger == "@":
             text = self._read_page_text(candidate.page_ref)
             self._vector_api.index_text(candidate.page_ref, text, kind="page")
@@ -2020,6 +2265,7 @@ class AIChatPanel(QtWidgets.QWidget):
                 f"({attachment_path or 'path unavailable'})"
             )
             self._vector_api.index_text(candidate.page_ref, text, kind="attachment", attachment=candidate.attachment_name)
+        self._set_status("Context indexed.", "#2ecc71")
 
     def _delete_context_source(self, item: ContextItem) -> None:
         if not self._vector_api.available():
@@ -2071,20 +2317,26 @@ class AIChatPanel(QtWidgets.QWidget):
         return candidate if candidate.exists() else None
 
     def _reload_context_index(self) -> None:
-        if not self.vault_root:
+        if not self.vault_root and not self._api_client_available():
             self._page_candidates = []
             self._tree_candidates = []
             self._attachment_candidates = []
             self._context_reload_in_progress = False
             self._context_reload_pending = False
             return
+        _log_vector(
+            f"Reloading context index (vault_root={'set' if self.vault_root else 'none'}, "
+            f"api_client={'ready' if self._api_client_available() else 'missing'})"
+        )
         if self._context_reload_in_progress:
             self._context_reload_pending = True
             return
         self._context_reload_in_progress = True
-        root = Path(self.vault_root)
+        root = Path(self.vault_root) if self.vault_root else None
 
-        def scan() -> tuple[list[ContextCandidate], list[ContextCandidate], list[ContextCandidate]]:
+        def _scan_local_candidates() -> tuple[list[ContextCandidate], list[ContextCandidate], list[ContextCandidate]]:
+            if not root:
+                return [], [], []
             pages: list[ContextCandidate] = []
             trees: list[ContextCandidate] = []
             attachments: list[ContextCandidate] = []
@@ -2117,6 +2369,21 @@ class AIChatPanel(QtWidgets.QWidget):
                     )
             return pages, trees, attachments
 
+        def _scan_api_candidates() -> tuple[list[ContextCandidate], list[ContextCandidate]]:
+            return self._fetch_context_candidates_from_api()
+
+        def scan() -> tuple[list[ContextCandidate], list[ContextCandidate], list[ContextCandidate]]:
+            pages: list[ContextCandidate] = []
+            trees: list[ContextCandidate] = []
+            attachments: list[ContextCandidate] = []
+            if self._api_client_available():
+                pages, trees = _scan_api_candidates()
+                if root:
+                    _, _, attachments = _scan_local_candidates()
+            elif root:
+                pages, trees, attachments = _scan_local_candidates()
+            return pages, trees, attachments
+
         def finish(result: tuple[list[ContextCandidate], list[ContextCandidate], list[ContextCandidate]]) -> None:
             pages, trees, attachments = result
             self._page_candidates = pages
@@ -2128,7 +2395,11 @@ class AIChatPanel(QtWidgets.QWidget):
                 self._reload_context_index()
 
         def worker() -> None:
-            result = scan()
+            try:
+                result = scan()
+            except Exception as exc:
+                _log_vector(f"Failed to build context index: {exc}")
+                result = ([], [], [])
             QtCore.QTimer.singleShot(0, lambda r=result: finish(r))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -2315,6 +2586,9 @@ class AIChatPanel(QtWidgets.QWidget):
     def _load_chat_messages(self, session_id: int) -> None:
         self.current_session_id = session_id
         self.messages = self.store.get_messages(session_id)
+        self._message_think.clear()
+        self._message_think_active.clear()
+        self._message_think_expanded.clear()
         self._render_messages()
         session = self.store.get_session_by_id(session_id)
         if session:
@@ -2519,6 +2793,7 @@ class AIChatPanel(QtWidgets.QWidget):
             if not self._summary_content:
                 self._summary_content = "[condense cancelled]"
             self._condense_buffer = ""
+            self._condense_think_state = {"in_think": False, "pending": "", "visible": ""}
             self.condense_btn.setEnabled(True)
         if cancelled:
             self._render_messages()
@@ -2574,6 +2849,7 @@ class AIChatPanel(QtWidgets.QWidget):
         blocks = [{"role": "system", "content": self.condense_prompt}, {"role": "user", "content": history_text}]
         self._condense_buffer = ""
         self._summary_content = None
+        self._condense_think_state = {"in_think": False, "pending": "", "visible": ""}
         self._render_messages()
         try:
             self._condense_worker = ApiWorker(self.current_server, blocks, self.model_combo.currentText(), stream=True)
@@ -2605,6 +2881,12 @@ class AIChatPanel(QtWidgets.QWidget):
             self.store.save_message(self.current_session_id, "user", content)
         self.messages.append(("assistant", ""))
         assistant_index = len(self.messages) - 1
+        self._stream_think_state[assistant_index] = {
+            "in_think": False,
+            "pending": "",
+            "visible": "",
+            "think": "",
+        }
         self._render_messages()
         try:
             blocks = [{"role": role, "content": text} for role, text in self.messages[:-1]]
@@ -2642,21 +2924,41 @@ class AIChatPanel(QtWidgets.QWidget):
     def _handle_finished(self, idx: int, full: str) -> None:
         if self._cancel_pending_send:
             self._cancel_pending_send = False
+            self._stream_think_state.pop(idx, None)
+            self._message_think_active.discard(idx)
             self._api_worker = None
             self._update_stop_button()
             return
+        pending = self._pending_stream_chunks.pop(idx, [])
+        if pending:
+            self._apply_stream_think_chunk(idx, "".join(pending))
+        state = self._stream_think_state.pop(idx, None)
+        fallback = ""
+        if state:
+            fallback = str(state.get("visible", ""))
+        clean_full = self._strip_think_blocks(full or fallback)
+        think_text = ""
+        if state:
+            think_text = str(state.get("think", ""))
+        if not think_text and full:
+            think_text = self._extract_think_blocks(full)
+        if think_text:
+            self._message_think[idx] = think_text
+        else:
+            self._message_think.pop(idx, None)
+        self._message_think_active.discard(idx)
         if 0 <= idx < len(self.messages):
             role, _ = self.messages[idx]
-            self.messages[idx] = (role, full)
+            self.messages[idx] = (role, clean_full)
             if self.current_session_id:
-                self.store.save_message(self.current_session_id, "assistant", full)
+                self.store.save_message(self.current_session_id, "assistant", clean_full)
                 self.store.update_session_last_model(self.current_session_id, self.model_combo.currentText())
                 self.store.update_session_last_server(self.current_session_id, self.current_server.get("name", ""))
         self._render_messages()
         self._set_status("Response received.", "#2ecc71")
         try:
-            if full:
-                QtWidgets.QApplication.clipboard().setText(self._sanitize_for_clipboard(full))
+            if clean_full:
+                QtWidgets.QApplication.clipboard().setText(self._sanitize_for_clipboard(clean_full))
                 self.responseCopied.emit("Last chat response copied to buffer.")
         except Exception:
             pass
@@ -2669,7 +2971,7 @@ class AIChatPanel(QtWidgets.QWidget):
     def _handle_condense_chunk(self, chunk: str) -> None:
         if self._cancel_pending_condense:
             return
-        self._condense_buffer += chunk
+        self._apply_condense_think_chunk(chunk)
         if not self._condense_flush_timer.isActive():
             self._condense_flush_timer.start()
 
@@ -2677,11 +2979,15 @@ class AIChatPanel(QtWidgets.QWidget):
         if self._cancel_pending_condense:
             self._cancel_pending_condense = False
             self._condense_worker = None
+            self._condense_think_state = {"in_think": False, "pending": "", "visible": ""}
             self._update_stop_button()
             return
-        self._summary_content = full or self._condense_buffer
+        fallback = str(self._condense_think_state.get("visible", ""))
+        clean_full = self._strip_think_blocks(full or fallback)
+        self._summary_content = clean_full or self._strip_think_blocks(self._condense_buffer)
         self._condense_buffer = ""
         self._condense_worker = None
+        self._condense_think_state = {"in_think": False, "pending": "", "visible": ""}
         self.condense_btn.setEnabled(True)
         self._render_messages()
         self._set_status("Condensed chat ready.", "#2ecc71")
@@ -2693,6 +2999,7 @@ class AIChatPanel(QtWidgets.QWidget):
             self._summary_content = None
         self._condense_worker = None
         self._cancel_pending_condense = False
+        self._condense_think_state = {"in_think": False, "pending": "", "visible": ""}
         self.condense_btn.setEnabled(True)
         self._render_messages()
         if err == "Cancelled":
@@ -2711,8 +3018,12 @@ class AIChatPanel(QtWidgets.QWidget):
                 continue
             if 0 <= idx < len(self.messages):
                 role, existing = self.messages[idx]
+                chunk_text = "".join(chunks)
                 if role == "assistant":
-                    self.messages[idx] = (role, existing + "".join(chunks))
+                    self._apply_stream_think_chunk(idx, chunk_text)
+                    updated = True
+                else:
+                    self.messages[idx] = (role, existing + chunk_text)
                     updated = True
             self._pending_stream_chunks[idx] = []
         if updated:
@@ -2726,6 +3037,7 @@ class AIChatPanel(QtWidgets.QWidget):
             self._render_messages()
 
     def _handle_error(self, err: str) -> None:
+        self._message_think_active.clear()
         if self.messages and self.messages[-1][0] == "assistant" and not self.messages[-1][1]:
             self.messages[-1] = ("assistant", f"[error] {err}")
         self._render_messages()
@@ -2761,9 +3073,36 @@ class AIChatPanel(QtWidgets.QWidget):
             idx = int(msg_id.split("-")[-1])
             if 0 <= idx < len(self.messages):
                 self.messages.pop(idx)
+                self._shift_think_indices(idx)
         except Exception:
             self.messages = [m for m in self.messages if not (m[0] == role and m[1] == content)]
         self._render_messages()
+
+    def _shift_think_indices(self, removed_idx: int) -> None:
+        if self._message_think:
+            self._message_think = {
+                (idx - 1 if idx > removed_idx else idx): text
+                for idx, text in self._message_think.items()
+                if idx != removed_idx
+            }
+        if self._message_think_active:
+            self._message_think_active = {
+                idx - 1 if idx > removed_idx else idx
+                for idx in self._message_think_active
+                if idx != removed_idx
+            }
+        if self._message_think_expanded:
+            self._message_think_expanded = {
+                idx - 1 if idx > removed_idx else idx
+                for idx in self._message_think_expanded
+                if idx != removed_idx
+            }
+        if self._stream_think_state:
+            self._stream_think_state = {
+                (idx - 1 if idx > removed_idx else idx): state
+                for idx, state in self._stream_think_state.items()
+                if idx != removed_idx
+            }
 
     def _current_folder_path(self) -> str:
         if self.current_page_path:
@@ -2780,6 +3119,58 @@ class AIChatPanel(QtWidgets.QWidget):
         if path:
             self.chatNavigateRequested.emit(path)
 
+    def _delete_chat_session(self, data: Dict) -> None:
+        session_id = data.get("id")
+        if not session_id:
+            return
+        session = self.store.get_session_by_id(session_id) or data
+        conv_id = session.get("ai_conversation_id")
+        if self.ai_manager and conv_id:
+            try:
+                items = self.ai_manager.list_context_items(conv_id)
+            except Exception:
+                items = []
+            for item in items:
+                try:
+                    self._delete_context_source(item)
+                except Exception:
+                    pass
+            try:
+                self.ai_manager.delete_conversation(conv_id)
+            except Exception:
+                pass
+        try:
+            self.store.delete_session(session_id)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Delete Chat", str(exc))
+            return
+        was_current = session_id == self.current_session_id
+        if was_current:
+            self.current_session_id = None
+            self.messages = []
+            self.chat_view.clear()
+            self._context_items = []
+            self._current_ai_conversation_id = None
+            self._update_context_summary()
+            self._condense_buffer = ""
+            self._summary_content = None
+            self._message_think.clear()
+            self._message_think_active.clear()
+            self._message_think_expanded.clear()
+            self._condense_think_state = {"in_think": False, "pending": "", "visible": ""}
+        if was_current:
+            sessions = self.store.get_sessions()
+            next_chat = next((s for s in sessions if s.get("type") == "chat"), None)
+            if next_chat:
+                self.current_session_id = next_chat["id"]
+                self._load_chat_tree(select_id=next_chat["id"])
+            else:
+                self._load_chat_tree()
+                self._select_default_chat()
+        else:
+            self._load_chat_tree()
+        self._set_status("Chat deleted.", "#2ecc71")
+
     def _on_anchor_clicked(self, url: QUrl) -> None:
         href = url.toString()
         if href.startswith("action:"):
@@ -2791,6 +3182,17 @@ class AIChatPanel(QtWidgets.QWidget):
                         self._accept_summary()
                     elif msg_id == "reject":
                         self._reject_summary()
+                    return
+                if action == "think":
+                    try:
+                        idx = int(msg_id.split("-")[-1])
+                    except Exception:
+                        return
+                    if idx in self._message_think_expanded:
+                        self._message_think_expanded.discard(idx)
+                    else:
+                        self._message_think_expanded.add(idx)
+                    self._render_messages()
                     return
                 if action == "copy":
                     content = self._message_map.get(msg_id, ("", ""))[1]
@@ -3114,6 +3516,64 @@ class AIChatPanel(QtWidgets.QWidget):
         self.chat_view.clear()
         self._load_system_prompts()
         self._load_chat_tree()
+
+    def set_api_client(self, api_client: Optional[httpx.Client]) -> None:
+        """Update the shared HTTP client used for vector operations."""
+        self._vector_api = VectorAPIClient(api_client)
+        self._api_client = api_client
+
+    def _api_client_available(self) -> bool:
+        if self._api_client is None:
+            return False
+        try:
+            return not self._api_client.is_closed
+        except Exception:
+            return True
+
+    def _collect_candidates_from_tree(self, tree: list[dict]) -> tuple[list[ContextCandidate], list[ContextCandidate]]:
+        pages: list[ContextCandidate] = []
+        trees: list[ContextCandidate] = []
+        seen_pages: set[str] = set()
+        seen_trees: set[str] = set()
+
+        def norm(path: str) -> str:
+            return path if path.startswith("/") else f"/{path}"
+
+        def walk(node: dict) -> None:
+            path = node.get("path")
+            if path:
+                path = norm(str(path))
+                if path not in seen_trees:
+                    seen_trees.add(path)
+                    trees.append(ContextCandidate(page_ref=path, label=path))
+            open_path = node.get("open_path")
+            if open_path:
+                open_path = norm(str(open_path))
+                if open_path not in seen_pages:
+                    seen_pages.add(open_path)
+                    pages.append(ContextCandidate(page_ref=open_path, label=open_path))
+            for child in node.get("children") or []:
+                if isinstance(child, dict):
+                    walk(child)
+
+        for node in tree:
+            if isinstance(node, dict):
+                walk(node)
+        return pages, trees
+
+    def _fetch_context_candidates_from_api(self) -> tuple[list[ContextCandidate], list[ContextCandidate]]:
+        if not self._api_client_available():
+            return [], []
+        try:
+            _log_vector("Fetching context tree from API for context picker.")
+            resp = self._api_client.get("/api/vault/tree", params={"path": "/", "recursive": "true"})
+            resp.raise_for_status()
+            payload = resp.json() or {}
+            tree = payload.get("tree") or []
+            return self._collect_candidates_from_tree(tree)
+        except Exception as exc:
+            _log_vector(f"Failed to load context tree from API: {exc}")
+            return [], []
         self._select_default_chat()
         self._update_load_current_page_button()
 
@@ -3249,6 +3709,7 @@ class ContextOverlay(QtWidgets.QFrame):
 class ContextListPopup(QtWidgets.QFrame):
     activated = QtCore.Signal(ContextItem)
     deleted = QtCore.Signal(ContextItem)
+    refreshed = QtCore.Signal(ContextItem)
 
     def __init__(self, parent=None):
         super().__init__(parent, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint)
@@ -3286,11 +3747,23 @@ class ContextListPopup(QtWidgets.QFrame):
         for item in items:
             row = self.table.rowCount()
             self.table.insertRow(row)
+            refresh_btn = QtWidgets.QToolButton()
+            refresh_btn.setText("↺")
+            refresh_btn.setToolTip("Refresh context")
+            refresh_btn.setAutoRaise(True)
+            refresh_btn.clicked.connect(lambda checked=False, tgt=item: self.refreshed.emit(tgt))
             delete_btn = QtWidgets.QToolButton()
             delete_btn.setText("✕")
+            delete_btn.setToolTip("Remove context")
             delete_btn.setAutoRaise(True)
             delete_btn.clicked.connect(lambda checked=False, tgt=item: self.deleted.emit(tgt))
-            self.table.setCellWidget(row, 0, delete_btn)
+            actions = QtWidgets.QWidget()
+            actions_layout = QtWidgets.QHBoxLayout(actions)
+            actions_layout.setContentsMargins(0, 0, 0, 0)
+            actions_layout.setSpacing(4)
+            actions_layout.addWidget(refresh_btn)
+            actions_layout.addWidget(delete_btn)
+            self.table.setCellWidget(row, 0, actions)
             name_item = QtWidgets.QTableWidgetItem(self._context_label(item))
             name_item.setData(QtCore.Qt.UserRole, item)
             self.table.setItem(row, 1, name_item)

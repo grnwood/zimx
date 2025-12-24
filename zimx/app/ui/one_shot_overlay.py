@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import re
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -103,6 +104,9 @@ class OneShotPromptOverlay(QDialog):
         self._worker = None
         self._streaming = False
         self._stream_buffer = ""
+        self._think_in_progress = False
+        self._think_pending = ""
+        self._think_visible = ""
         self._render_pending = False
 
         self._messages: list[tuple[str, str]] = []
@@ -153,10 +157,13 @@ class OneShotPromptOverlay(QDialog):
         self.chat_view.anchorClicked.connect(self._on_anchor_clicked)
         self.chat_view.setStyleSheet(
             "QTextBrowser {"
-            "  border: 1px solid rgba(0,0,0,0.18);"
+            "  border: 1px solid #1f1f1f;"
             "  border-radius: 10px;"
             "  padding: 8px;"
             "  font-size: 12px;"
+            "  background: #0b0b0b;"
+            "  color: #d6f5d6;"
+            "  font-family: \"Courier New\", monospace;"
             "}"
         )
         layout.addWidget(self.chat_view, 1)
@@ -164,7 +171,13 @@ class OneShotPromptOverlay(QDialog):
         input_row = QHBoxLayout()
         self.input = OneShotChatInput(self)
         self.input.setFixedHeight(54)
-        self.input.setStyleSheet("font-size: 12px; padding: 6px;")
+        self.input.setStyleSheet(
+            "font-size: 12px;"
+            " padding: 6px;"
+            " background: #111;"
+            " color: #d6f5d6;"
+            " border: 1px solid #1f1f1f;"
+        )
         self.input.sendRequested.connect(self._send_input)
         self.input.acceptRequested.connect(self._accept_last_message)
         input_row.addWidget(self.input, 1)
@@ -182,7 +195,7 @@ class OneShotPromptOverlay(QDialog):
 
         self.setStyleSheet(
             "QDialog { background: transparent; }"
-            "QFrame#OneShotCard { background: palette(base); border-radius: 14px; }"
+            "QFrame#OneShotCard { background: #0b0b0b; border-radius: 14px; }"
         )
         self.resize(680, 480)
 
@@ -251,6 +264,65 @@ class OneShotPromptOverlay(QDialog):
         self._messages.append(("assistant", ""))
         self._schedule_render()
 
+    def _strip_think_blocks(self, text: str) -> str:
+        if not text:
+            return ""
+        cleaned = re.sub(r"<think\b[^>]*>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(r"<think\b[^>]*/>", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"<think\b[^>]*>.*", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+        return cleaned
+
+    def _extract_think_pending(self, tail: str, marker: str) -> str:
+        if not tail:
+            return ""
+        max_len = len(marker) - 1
+        snippet = tail[-max_len:] if len(tail) > max_len else tail
+        last_lt = snippet.rfind("<")
+        if last_lt == -1:
+            return snippet if marker.startswith(snippet) else ""
+        candidate = snippet[last_lt:]
+        return candidate if marker.startswith(candidate) else ""
+
+    def _apply_think_chunk(self, chunk: str) -> str:
+        text = f"{self._think_pending}{chunk}"
+        self._think_pending = ""
+        visible_append = ""
+        i = 0
+        while i < len(text):
+            if self._think_in_progress:
+                end = text.find("</think>", i)
+                if end == -1:
+                    self._think_pending = self._extract_think_pending(text[i:], "</think>")
+                    break
+                i = end + len("</think>")
+                self._think_in_progress = False
+                continue
+            start = text.find("<think", i)
+            if start == -1:
+                trailing = text[i:]
+                pending = self._extract_think_pending(trailing, "<think")
+                if pending:
+                    visible_append += trailing[: -len(pending)]
+                    self._think_pending = pending
+                else:
+                    visible_append += trailing
+                break
+            visible_append += text[i:start]
+            tag_end = text.find(">", start)
+            if tag_end == -1:
+                self._think_pending = text[start:]
+                break
+            tag_text = text[start : tag_end + 1]
+            if tag_text.endswith("/>"):
+                i = tag_end + 1
+                continue
+            self._think_in_progress = True
+            i = tag_end + 1
+        self._think_visible = f"{self._think_visible}{visible_append}"
+        if self._think_in_progress:
+            return f"{self._think_visible}\\n\\nThinking..." if self._think_visible.strip() else "Thinking..."
+        return self._think_visible
+
     def _update_last_assistant(self, new_text: str) -> None:
         for idx in range(len(self._messages) - 1, -1, -1):
             role, _ = self._messages[idx]
@@ -287,6 +359,9 @@ class OneShotPromptOverlay(QDialog):
         self._cancel_worker()
         self._streaming = True
         self._stream_buffer = ""
+        self._think_in_progress = False
+        self._think_pending = ""
+        self._think_visible = ""
         self._append_assistant_placeholder()
         # Keep the refine box enabled/focused so the user can type the next message
         # while streaming (sending is still blocked until streaming finishes).
@@ -304,13 +379,14 @@ class OneShotPromptOverlay(QDialog):
     def _on_chunk(self, chunk: str) -> None:
         if not self._streaming:
             return
-        self._stream_buffer += chunk
+        self._stream_buffer = self._apply_think_chunk(chunk)
         self._update_last_assistant(self._stream_buffer)
 
     def _on_finished(self, full: str) -> None:
         if not self._streaming:
             return
-        final = full or self._stream_buffer
+        fallback = self._think_visible
+        final = self._strip_think_blocks(full or fallback)
         self._streaming = False
         self._worker = None
         self._stream_buffer = final
@@ -339,15 +415,15 @@ class OneShotPromptOverlay(QDialog):
         self._render_timer.start()
 
     def _render(self) -> None:
-        base_color = self.palette().color(QPalette.Base).name()
-        text_color = self.palette().color(QPalette.Text).name()
-        accent = self.palette().color(QPalette.Highlight).name()
+        base_color = "#0b0b0b"
+        text_color = "#d6f5d6"
+        accent = "#7fd4a7"
         parts: list[str] = []
         parts.append(
             f"<style>"
-            f"body {{ background:{base_color}; color:{text_color}; font-family: sans-serif; }}"
+            f"body {{ background:{base_color}; color:{text_color}; font-family: \"Courier New\", monospace; }}"
             f".bubble {{ border-radius:8px; padding:8px 10px; margin:8px 0; }}"
-            f".user {{ background:rgba(80,120,200,0.10); }}"
+            f".user {{ background:rgba(80,160,220,0.10); }}"
             f".assistant {{ background:rgba(60,200,140,0.10); }}"
             f".role {{ font-weight:bold; color:{accent}; }}"
             f".actions {{ margin-top:8px; }}"
@@ -408,9 +484,10 @@ class OneShotPromptOverlay(QDialog):
         if self._streaming:
             return
         text = self._last_assistant_text()
-        if text.strip():
+        clean = self._strip_think_blocks(text)
+        if clean.strip():
             try:
-                self._on_accept(text)
+                self._on_accept(clean)
             except Exception:
                 pass
         self.accept()

@@ -31,11 +31,30 @@ class VectorIndexManager:
     def delete_text(self, root: Path, page_ref: str, kind: str, attachment: Optional[str] = None) -> None:
         self._get(root).delete_text(page_ref, kind=kind, attachment=attachment)
 
-    def query(self, root: Path, query_text: str, page_refs: Optional[Iterable[str]] = None, limit: int = 4) -> List[RetrievedChunk]:
-        return self._get(root).query(query_text, page_refs=list(page_refs) if page_refs else None, limit=limit)
+    def query(
+        self,
+        root: Path,
+        query_text: str,
+        page_refs: Optional[Iterable[str]] = None,
+        limit: int = 4,
+        kind: Optional[str] = None,
+    ) -> List[RetrievedChunk]:
+        return self._get(root).query(
+            query_text,
+            page_refs=list(page_refs) if page_refs else None,
+            limit=limit,
+            kind=kind,
+        )
 
-    def query_attachments(self, root: Path, query_text: str, attachment_names: Iterable[str], limit: int = 4) -> List[RetrievedChunk]:
-        return self._get(root).query_attachments(query_text, list(attachment_names), limit=limit)
+    def query_attachments(
+        self,
+        root: Path,
+        query_text: str,
+        attachment_names: Iterable[str],
+        limit: int = 4,
+        kind: Optional[str] = None,
+    ) -> List[RetrievedChunk]:
+        return self._get(root).query_attachments(query_text, list(attachment_names), limit=limit, kind=kind)
 
 
 vector_manager = VectorIndexManager()

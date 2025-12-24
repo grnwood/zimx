@@ -48,6 +48,7 @@ from PySide6.QtGui import (
     QDesktopServices,
     QTextFormat,
     QDrag,
+    QCursor,
     QIcon,
     QPainter,
     QPixmap,
@@ -1302,6 +1303,21 @@ class MainWindow(QMainWindow):
         self._dirty_status_label.setToolTip("Unsaved changes")
         self.statusBar().addPermanentWidget(self._dirty_status_label, 0)
 
+        self._filter_status_label = QLabel("")
+        self._filter_status_label.setObjectName("filterStatusLabel")
+        self._filter_status_label.setStyleSheet(
+            "QLabel { "
+            + self._badge_base_style
+            + " background-color: #c62828; margin-right: 6px; color: #ffffff; }"
+            + " QLabel a { color: #ffffff; text-decoration: none; }"
+            + " QLabel a:hover { text-decoration: underline; }"
+        )
+        self._filter_status_label.setToolTip("Navigation filtered (click to clear)")
+        self._filter_status_label.setCursor(QCursor(Qt.PointingHandCursor))
+        self._filter_status_label.mousePressEvent = lambda event: self._clear_nav_filter()
+        self._filter_status_label.hide()
+        self.statusBar().addPermanentWidget(self._filter_status_label, 0)
+
         self._vi_status_label = QLabel("INS")
         self._vi_status_label.setObjectName("viStatusLabel")
         self._vi_badge_base_style = self._badge_base_style
@@ -1318,6 +1334,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._update_dirty_indicator()
+        self._update_filter_indicator()
 
         # Startup vault selection is orchestrated by main.py via .startup()
         self.editor.set_ai_actions_enabled(config.load_enable_ai_chats())
@@ -2842,6 +2859,7 @@ class MainWindow(QMainWindow):
                 panel.set_navigation_filter(self._nav_filter_path, refresh=False)
             except Exception:
                 pass
+        self._sync_detached_task_filters(self._nav_filter_path)
         self._populate_vault_tree()
         try:
             self.tree_view.expandToDepth(1)
@@ -2870,6 +2888,7 @@ class MainWindow(QMainWindow):
                 panel.set_navigation_filter(None, refresh=False)
             except Exception:
                 pass
+        self._sync_detached_task_filters(None)
         self._populate_vault_tree()
         self.tree_view.collapseAll()
         self._apply_nav_filter_style()
@@ -2877,6 +2896,20 @@ class MainWindow(QMainWindow):
     def _apply_nav_filter_style(self) -> None:
         """Refresh focus borders to reflect filter state."""
         self._apply_focus_borders()
+        self._update_filter_indicator()
+
+    def _sync_detached_task_filters(self, filter_path: Optional[str]) -> None:
+        """Ensure detached task windows stay in sync with navigation filtering."""
+        for window in list(getattr(self, "_detached_panels", [])):
+            if window.windowTitle() != "Tasks":
+                continue
+            panel = window.centralWidget()
+            if not hasattr(panel, "set_navigation_filter"):
+                continue
+            try:
+                panel.set_navigation_filter(filter_path, refresh=False)
+            except Exception:
+                pass
 
     def _sanitize_find_query(self, text: Optional[str]) -> str:
         """Strip control/sentinel characters from seeded find queries."""
@@ -3187,13 +3220,16 @@ class MainWindow(QMainWindow):
 
             # No synthetic root - just show actual folders directly
             if self._nav_filter_path:
-                banner = QStandardItem("Filtered (Remove)")
+                banner = QStandardItem("Filtered")
                 font = banner.font()
                 font.setBold(True)
                 banner.setFont(font)
                 banner.setEditable(False)
                 banner.setForeground(QBrush(QColor("#ffffff")))
                 banner.setBackground(QBrush(QColor("#c62828")))
+                display_path = path_to_colon(self._nav_filter_path) or self._nav_filter_path
+                if display_path:
+                    banner.setToolTip(f"{display_path} (click to clear)")
                 banner.setData(FILTER_BANNER, PATH_ROLE)
                 self.tree_model.invisibleRootItem().appendRow(banner)
     
@@ -3464,7 +3500,6 @@ class MainWindow(QMainWindow):
             return
         open_target = current.data(OPEN_ROLE) or current.data(PATH_ROLE)
         if open_target == FILTER_BANNER:
-            self._clear_nav_filter()
             return
         # Skip selection changes for folders - let rowClicked handle page opening
         is_folder = current.data(TYPE_ROLE)
@@ -4060,6 +4095,7 @@ class MainWindow(QMainWindow):
 
     def _on_editor_focus_lost(self) -> None:
         """Handle editor focus loss - save if not moving to right panel."""
+        self._exit_vi_insert_on_activate()
         # Check where focus is going
         from PySide6.QtWidgets import QApplication
         new_focus = QApplication.focusWidget()
@@ -4708,6 +4744,7 @@ class MainWindow(QMainWindow):
             return
         panel = TaskPanel(font_size_key="task_font_size_detached")
         panel.set_vault_root(self.vault_root or "")
+        panel.set_filter_clear_enabled(False)
         try:
             panel.set_navigation_filter(self._nav_filter_path, refresh=False)
         except Exception:
@@ -4784,7 +4821,7 @@ class MainWindow(QMainWindow):
         if self.vault_root:
             panel.set_vault_root(self.vault_root)
         if self.current_path:
-            panel.set_current_page(self._normalize_editor_path(self.current_path))
+            panel.open_chat_for_page(self._normalize_editor_path(self.current_path))
         panel.chatNavigateRequested.connect(self._on_ai_chat_navigate)
         window = QMainWindow(None)
         self._prepare_top_level_window(window)
@@ -5089,6 +5126,7 @@ class MainWindow(QMainWindow):
         """Handle link activations from the editor (main or popup)."""
         if not link:
             return
+        self._exit_vi_insert_on_activate()
         if "\x00" in link:
             link = link.split("\x00", 1)[0]
         if link.startswith(("http://", "https://")):
@@ -5761,13 +5799,14 @@ class MainWindow(QMainWindow):
         tree_has = focused is self.tree_view or self.tree_view.isAncestorOf(focused)
         right_has = focused is self.right_panel or self.right_panel.isAncestorOf(focused)
         # Styles: subtle border with accent color; remove when unfocused. Reset any filter tint to default background.
-        editor_style = "QTextEdit { border: 1px solid #4A90E2; border-radius:3px; }" if editor_has else "QTextEdit { border: 1px solid transparent; }"
+        focus_border = "#D9534F" if getattr(self, "_nav_filter_path", None) else "#4A90E2"
+        editor_style = f"QTextEdit {{ border: 1px solid {focus_border}; border-radius:3px; }}" if editor_has else "QTextEdit { border: 1px solid transparent; }"
         tree_style = (
-            "QTreeView { border: 1px solid #4A90E2; border-radius:3px; background: palette(base); }"
+            f"QTreeView {{ border: 1px solid {focus_border}; border-radius:3px; background: palette(base); }}"
             if tree_has
             else "QTreeView { border: 1px solid transparent; background: palette(base); }"
         )
-        right_style = "QTabWidget::pane { border: 1px solid #4A90E2; border-radius:3px; }" if right_has else ""
+        right_style = f"QTabWidget::pane {{ border: 1px solid {focus_border}; border-radius:3px; }}" if right_has else ""
         # Preserve existing styles by appending (simple approach)
         try:
             self.editor.setStyleSheet(editor_style)
@@ -7160,6 +7199,7 @@ class MainWindow(QMainWindow):
         """Navigate to previous page in history (Alt+Left)."""
         if not self.page_history or self.history_index <= 0:
             return
+        self._exit_vi_insert_on_activate()
         self._remember_history_cursor()
         self.history_index -= 1
         target_path = self.page_history[self.history_index]
@@ -7176,6 +7216,7 @@ class MainWindow(QMainWindow):
         """Navigate to next page in history (Alt+Right)."""
         if not self.page_history or self.history_index >= len(self.page_history) - 1:
             return
+        self._exit_vi_insert_on_activate()
         self._remember_history_cursor()
         self.history_index += 1
         target_path = self.page_history[self.history_index]
@@ -7398,6 +7439,8 @@ class MainWindow(QMainWindow):
 
     def _cycle_popup(self, mode: str, reverse: bool = False) -> None:
         if mode == "history":
+            self._exit_vi_insert_on_activate()
+        if mode == "history":
             items = self._recent_history_candidates()
         elif mode == "heading":
             items = self._heading_popup_candidates()
@@ -7426,6 +7469,7 @@ class MainWindow(QMainWindow):
         mode = self._popup_mode
         self._hide_history_popup()
         if mode == "history" and target:
+            self._exit_vi_insert_on_activate()
             saved_pos = self._history_cursor_positions.get(target)
             self._remember_history_cursor()
             self._open_file(target, add_to_history=False, force=True, restore_history_cursor=True)
@@ -7640,6 +7684,7 @@ class MainWindow(QMainWindow):
 
     def _navigate_hierarchy_up(self) -> None:
         """Navigate up in page hierarchy (Alt+Up): Move up one level, stop at root."""
+        self._exit_vi_insert_on_activate()
         if not self.current_path:
             return
         colon_path = path_to_colon(self.current_path)
@@ -7669,6 +7714,7 @@ class MainWindow(QMainWindow):
 
     def _navigate_hierarchy_down(self) -> None:
         """Navigate down in page hierarchy (Alt+Down): Open first child page."""
+        self._exit_vi_insert_on_activate()
         if not self.current_path:
             return
         # Get current folder path
@@ -8121,6 +8167,21 @@ class MainWindow(QMainWindow):
             )
             self._dirty_status_label.setToolTip("All changes saved")
 
+    def _update_filter_indicator(self) -> None:
+        """Refresh the filter badge next to the dirty indicator."""
+        if not hasattr(self, "_filter_status_label"):
+            return
+        filter_path = getattr(self, "_nav_filter_path", None)
+        if filter_path:
+            display_path = path_to_colon(filter_path) or filter_path
+            self._filter_status_label.setText("Filtered")
+            self._filter_status_label.setToolTip(f"{display_path} (click to clear)")
+            self._filter_status_label.show()
+        else:
+            self._filter_status_label.hide()
+            self._filter_status_label.setText("")
+            self._filter_status_label.setToolTip("")
+
     def _on_document_modified(self, modified: bool) -> None:
         """Lightweight dirty flag updater (avoid full markdown diff)."""
         if getattr(self, "_suspend_dirty_tracking", False):
@@ -8183,6 +8244,17 @@ class MainWindow(QMainWindow):
         else:
             style += " background-color: transparent;"
         self._vi_status_label.setStyleSheet(style)
+
+    def _exit_vi_insert_on_activate(self) -> None:
+        if not (self._vi_enabled and self._vi_insert_active):
+            return
+        try:
+            self.editor._enter_vi_navigation_mode()  # type: ignore[attr-defined]
+        except Exception:
+            try:
+                self.editor._handle_vi_escape()  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
     # (Removed move/resize overlays; not used)
 

@@ -130,6 +130,8 @@ class TabbedRightPanel(QWidget):
         self.attachments_panel.set_remote_mode(remote_mode, api_base)
         if auth_prompt is not None:
             self.attachments_panel.set_auth_prompt(auth_prompt)
+        if self.ai_chat_panel:
+            self.ai_chat_panel.set_api_client(http_client)
     
     def refresh_tasks(self) -> None:
         """Refresh the task panel."""

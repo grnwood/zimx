@@ -41,15 +41,23 @@ class ChromaRAG:
         query_text: str,
         page_refs: Optional[list[str]] = None,
         limit: int = 4,
+        kind: Optional[str] = None,
     ) -> list[RetrievedChunk]:
         if not query_text.strip():
             return []
+        where: dict | None = None
+        if page_refs and kind:
+            where = {"$and": [{"page_ref": {"$in": page_refs}}, {"kind": kind}]}
+        elif page_refs:
+            where = {"page_ref": {"$in": page_refs}}
+        elif kind:
+            where = {"kind": kind}
         try:
             results = self.collection.query(
                 query_texts=[query_text],
                 n_results=limit,
                 include=["documents", "metadatas", "distances"],
-                where={"page_ref": {"$in": page_refs}} if page_refs else None,
+                where=where,
             )
         except Exception as exc:
             print(f"[Chroma] Query failed: {exc}")
@@ -70,15 +78,24 @@ class ChromaRAG:
             chunks.append(chunk)
         return chunks
 
-    def query_attachments(self, query_text: str, attachment_names: list[str], limit: int = 4) -> list[RetrievedChunk]:
+    def query_attachments(
+        self,
+        query_text: str,
+        attachment_names: list[str],
+        limit: int = 4,
+        kind: Optional[str] = None,
+    ) -> list[RetrievedChunk]:
         if not query_text.strip() or not attachment_names:
             return []
+        where: dict = {"attachment_name": {"$in": attachment_names}}
+        if kind:
+            where = {"$and": [where, {"kind": kind}]}
         try:
             results = self.collection.query(
                 query_texts=[query_text],
                 n_results=limit,
                 include=["documents", "metadatas", "distances"],
-                where={"attachment_name": {"$in": attachment_names}},
+                where=where,
             )
         except Exception as exc:
             print(f"[Chroma] Attachment query failed: {exc}")
@@ -111,28 +128,52 @@ class ChromaRAG:
             return f"{page_ref}:{attachment}"
         return f"{page_ref}:{kind}"
 
+    def _chunk_text(self, text: str, max_chars: int = 1200, overlap: int = 200) -> list[str]:
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return []
+        chunks: list[str] = []
+        start = 0
+        length = len(cleaned)
+        while start < length:
+            end = min(start + max_chars, length)
+            chunk = cleaned[start:end]
+            if chunk.strip():
+                chunks.append(chunk)
+            if end >= length:
+                break
+            start = max(0, end - overlap)
+        return chunks
+
+    def _delete_scope(self, page_ref: str, kind: str, attachment: Optional[str] = None) -> None:
+        where = {"page_ref": page_ref, "kind": kind}
+        if attachment:
+            where["attachment_name"] = attachment
+        try:
+            self.collection.delete(where=where)
+            print(f"[Chroma] Delete request for {page_ref} ({kind})")
+        except Exception as exc:
+            print(f"[Chroma] Failed to delete {page_ref} ({kind}): {exc}")
+
     def index_text(self, page_ref: str, text: str, kind: str, attachment: Optional[str] = None) -> None:
         if not text.strip():
             print(f"[Chroma] Skipping empty text for {page_ref}")
             return
-        doc_id = self._doc_id(page_ref, kind, attachment)
+        self._delete_scope(page_ref, kind, attachment)
+        base_id = self._doc_id(page_ref, kind, attachment)
         metadata = {"page_ref": page_ref, "kind": kind}
         if attachment:
             metadata["attachment_name"] = attachment
-        self.collection.upsert(
-            ids=[doc_id],
-            documents=[text],
-            metadatas=[metadata],
-        )
-        print(f"[Chroma] Indexed {kind} context {doc_id}")
+        chunks = self._chunk_text(text)
+        if not chunks:
+            return
+        ids = [f"{base_id}:{idx}" for idx in range(len(chunks))]
+        metadatas = [dict(metadata, chunk_index=idx) for idx in range(len(chunks))]
+        self.collection.upsert(ids=ids, documents=chunks, metadatas=metadatas)
+        print(f"[Chroma] Indexed {kind} context {base_id} chunks={len(chunks)}")
 
     def delete_text(self, page_ref: str, kind: str, attachment: Optional[str] = None) -> None:
-        doc_id = self._doc_id(page_ref, kind, attachment)
-        try:
-            self.collection.delete(ids=[doc_id])
-            print(f"[Chroma] Delete request for {doc_id}")
-        except Exception as exc:
-            print(f"[Chroma] Failed to delete {doc_id}: {exc}")
+        self._delete_scope(page_ref, kind, attachment)
 
     def close(self) -> None:
         self.client.persist()
