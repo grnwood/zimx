@@ -219,6 +219,128 @@ def delete_known_vault(path: str) -> None:
     _update_global_config(updates)
 
 
+def load_remote_auth(server_key: str) -> dict[str, str]:
+    """Return stored remote auth metadata for a server key."""
+    payload = _read_global_config()
+    auth_map = payload.get("remote_auth", {})
+    if not isinstance(auth_map, dict):
+        return {}
+    entry = auth_map.get(server_key)
+    return entry if isinstance(entry, dict) else {}
+
+
+def save_remote_auth(server_key: str, refresh_token: Optional[str], username: Optional[str] = None) -> None:
+    """Persist or clear the refresh token for a remote server."""
+    payload = _read_global_config()
+    auth_map = payload.get("remote_auth")
+    if not isinstance(auth_map, dict):
+        auth_map = {}
+    if refresh_token:
+        entry = {"refresh_token": refresh_token}
+        if username:
+            entry["username"] = username
+        auth_map[server_key] = entry
+    else:
+        auth_map.pop(server_key, None)
+    _update_global_config({"remote_auth": auth_map})
+
+
+def load_remote_servers() -> list[dict[str, str]]:
+    """Load configured remote servers."""
+    payload = _read_global_config()
+    servers = payload.get("remote_servers", [])
+    result: list[dict[str, str]] = []
+    if isinstance(servers, list):
+        for entry in servers:
+            if not isinstance(entry, dict):
+                continue
+            host = entry.get("host")
+            port = entry.get("port")
+            scheme = entry.get("scheme") or "http"
+            verify_ssl = entry.get("verify_ssl", True)
+            selected_vaults = entry.get("selected_vaults", [])
+            if not host or not port:
+                continue
+            try:
+                port_val = int(port)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(selected_vaults, list):
+                selected_vaults = []
+            result.append(
+                {
+                    "host": str(host),
+                    "port": str(port_val),
+                    "scheme": str(scheme),
+                    "verify_ssl": bool(verify_ssl),
+                    "selected_vaults": [str(p) for p in selected_vaults if p],
+                }
+            )
+    return result
+
+
+def save_remote_servers(servers: list[dict[str, str]]) -> None:
+    """Persist the configured remote servers list."""
+    _update_global_config({"remote_servers": servers})
+
+
+def add_remote_server(
+    host: str,
+    port: int,
+    scheme: str = "http",
+    verify_ssl: bool = True,
+    selected_vaults: Optional[list[str]] = None,
+) -> None:
+    """Add or update a remote server entry."""
+    host = host.strip()
+    scheme = scheme.strip() or "http"
+    payload = _read_global_config()
+    servers = payload.get("remote_servers", [])
+    if not isinstance(servers, list):
+        servers = []
+    filtered: list[dict[str, str]] = []
+    for entry in servers:
+        if not isinstance(entry, dict):
+            continue
+        if (
+            entry.get("host") == host
+            and str(entry.get("port")) == str(port)
+            and entry.get("scheme") == scheme
+        ):
+            continue
+        filtered.append(entry)
+    filtered.append(
+        {
+            "host": host,
+            "port": str(port),
+            "scheme": scheme,
+            "verify_ssl": bool(verify_ssl),
+            "selected_vaults": selected_vaults or [],
+        }
+    )
+    _update_global_config({"remote_servers": filtered})
+
+
+def delete_remote_server(host: str, port: int, scheme: str = "http") -> None:
+    """Remove a remote server entry."""
+    payload = _read_global_config()
+    servers = payload.get("remote_servers", [])
+    if not isinstance(servers, list):
+        return
+    filtered: list[dict[str, str]] = []
+    for entry in servers:
+        if not isinstance(entry, dict):
+            continue
+        if (
+            entry.get("host") == host
+            and str(entry.get("port")) == str(port)
+            and entry.get("scheme") == scheme
+        ):
+            continue
+        filtered.append(entry)
+    _update_global_config({"remote_servers": filtered})
+
+
 def load_default_vault() -> Optional[str]:
     payload = _read_global_config()
     default_path = payload.get("default_vault")

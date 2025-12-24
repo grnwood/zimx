@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Callable
 import errno
+import hashlib
 import json
 import os
 import shutil
@@ -84,6 +85,8 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QPushButton,
     QTabWidget,
+    QCheckBox,
+    QFormLayout,
 )
 
 from zimx.app import config, indexer
@@ -190,6 +193,160 @@ class PageRenameDialog(QDialog):
                 result[src] = dst
         return result
 
+
+class RemoteLoginDialog(QDialog):
+    """Prompt for remote server credentials."""
+
+    def __init__(self, parent=None, username: str = "", remember_default: bool = True) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Server Login")
+        self.setModal(True)
+        self.resize(360, 180)
+
+        self._username = ""
+        self._password = ""
+        self._remember = remember_default
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.username_edit = QLineEdit()
+        self.username_edit.setText(username)
+        form.addRow("Username:", self.username_edit)
+
+        self.password_edit = QLineEdit()
+        self.password_edit.setEchoMode(QLineEdit.Password)
+        form.addRow("Password:", self.password_edit)
+
+        layout.addLayout(form)
+
+        self.remember_checkbox = QCheckBox("Remember on this device")
+        self.remember_checkbox.setChecked(remember_default)
+        layout.addWidget(self.remember_checkbox)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def accept(self) -> None:  # type: ignore[override]
+        username = self.username_edit.text().strip()
+        password = self.password_edit.text()
+        if not username or not password:
+            QMessageBox.warning(self, "Missing Info", "Please enter both username and password.")
+            return
+        self._username = username
+        self._password = password
+        self._remember = bool(self.remember_checkbox.isChecked())
+        super().accept()
+
+    def credentials(self) -> tuple[str, str, bool]:
+        return self._username, self._password, self._remember
+
+
+class AddRemoteDialog(QDialog):
+    """Prompt for remote server host/port."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Add Remote Server")
+        self.setModal(True)
+        self.resize(360, 180)
+
+        self._host = ""
+        self._port = 443
+        self._use_https = True
+        self._no_verify = False
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.host_edit = QLineEdit()
+        self.host_edit.setPlaceholderText("example.com or 192.168.1.77")
+        form.addRow("Server:", self.host_edit)
+
+        self.port_edit = QLineEdit()
+        self.port_edit.setText("443")
+        form.addRow("Port:", self.port_edit)
+
+        layout.addLayout(form)
+
+        self.https_checkbox = QCheckBox("Use HTTPS")
+        self.https_checkbox.setChecked(True)
+        layout.addWidget(self.https_checkbox)
+
+        self.no_verify_checkbox = QCheckBox("Do not verify SSL")
+        self.no_verify_checkbox.setChecked(False)
+        layout.addWidget(self.no_verify_checkbox)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def accept(self) -> None:  # type: ignore[override]
+        host = self.host_edit.text().strip()
+        port_str = self.port_edit.text().strip()
+        if not host or not port_str:
+            QMessageBox.warning(self, "Missing Info", "Please enter both server and port.")
+            return
+        try:
+            port = int(port_str)
+        except ValueError:
+            QMessageBox.warning(self, "Invalid Port", "Port must be a number.")
+            return
+        self._host = host
+        self._port = port
+        self._use_https = bool(self.https_checkbox.isChecked())
+        self._no_verify = bool(self.no_verify_checkbox.isChecked())
+        super().accept()
+
+    def values(self) -> tuple[str, int, bool, bool]:
+        return self._host, self._port, self._use_https, self._no_verify
+
+
+class RemoteVaultSelectDialog(QDialog):
+    """Prompt to select a vault from a remote server."""
+
+    def __init__(self, vaults: list[dict[str, str]], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Select Remote Vault")
+        self.setModal(True)
+        self.resize(480, 360)
+        self._selected_path: Optional[str] = None
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Choose a vault to add from the remote server:"))
+
+        self.list_widget = QListWidget()
+        for vault in vaults:
+            item = QListWidgetItem()
+            name = vault.get("name") or Path(vault.get("path") or "").name
+            item.setText(name)
+            item.setData(Qt.UserRole, vault)
+            self.list_widget.addItem(item)
+        layout.addWidget(self.list_widget, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def accept(self) -> None:  # type: ignore[override]
+        item = self.list_widget.currentItem()
+        if not item:
+            QMessageBox.warning(self, "No Selection", "Please select a vault.")
+            return
+        vault = item.data(Qt.UserRole)
+        if not vault or not vault.get("path"):
+            QMessageBox.warning(self, "No Selection", "Please select a vault.")
+            return
+        self._selected_path = vault["path"]
+        super().accept()
+
+    def selected_path(self) -> Optional[str]:
+        return self._selected_path
+
 from .markdown_editor import MarkdownEditor
 from .tabbed_right_panel import TabbedRightPanel
 from .task_panel import TaskPanel
@@ -221,6 +378,32 @@ TREE_LAZY_LOAD_THRESHOLD = 500  # Load full tree if vault has fewer than 500 fol
 _DETAILED_LOGGING = os.getenv("ZIMX_DETAILED_LOGGING", "0") not in ("0", "false", "False", "", None)
 _ANSI_BLUE = "\033[94m"
 _ANSI_RESET = "\033[0m"
+
+
+class RemoteTokenAuth(httpx.Auth):
+    """Attach bearer tokens and refresh on 401 for remote servers."""
+
+    def __init__(self, get_access, refresh_tokens) -> None:
+        self._get_access = get_access
+        self._refresh_tokens = refresh_tokens
+
+    def auth_flow(self, request):
+        access = self._get_access()
+        if access:
+            request.headers["Authorization"] = f"Bearer {access}"
+        response = yield request
+        if response.status_code != 401:
+            return
+        try:
+            response.read()
+        except Exception:
+            pass
+        if not self._refresh_tokens():
+            return
+        access = self._get_access()
+        if access:
+            request.headers["Authorization"] = f"Bearer {access}"
+            yield request
 class InlineNameEdit(QLineEdit):
     submitted = Signal(str)
     cancelled = Signal()
@@ -508,13 +691,26 @@ def logNav(message: str) -> None:
 
 class MainWindow(QMainWindow):
 
-    def __init__(self, api_base: str, local_auth_token: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        api_base: str,
+        local_auth_token: Optional[str] = None,
+    ) -> None:
         super().__init__()
         self.setWindowTitle("ZimX Desktop")
         # Ensure standard window controls (including maximize) are present.
         self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint)
-        self.api_base = api_base.rstrip("/")
+        self._local_api_base = api_base.rstrip("/")
+        self.api_base = self._local_api_base
+        self._remote_mode = False
+        self._server_url: Optional[str] = None
+        self._verify_tls = True
+        self._remote_cache_root: Optional[Path] = None
         self._local_auth_token = local_auth_token
+        self._access_token: Optional[str] = None
+        self._refresh_token: Optional[str] = None
+        self._remember_refresh: bool = False
+        self._remote_username: Optional[str] = None
         def _log_request(request):
             try:
                 path = request.url.raw_path.decode("utf-8") if hasattr(request.url, "raw_path") else request.url.path
@@ -529,12 +725,11 @@ class MainWindow(QMainWindow):
                 path = str(response.request.url)
             print(f"{_ANSI_BLUE}[API] {response.status_code} {path}{_ANSI_RESET}")
 
-        headers = {"X-Local-UI-Token": local_auth_token} if local_auth_token else None
-        self.http = httpx.Client(
+        self.http = self._build_http_client(
             base_url=self.api_base,
-            timeout=10.0,
-            event_hooks={"request": [_log_request], "response": [_log_response]},
-            headers=headers,
+            is_remote=False,
+            local_auth_token=local_auth_token,
+            request_hooks=(_log_request, _log_response),
         )
         self.vault_root: Optional[str] = None
         self.vault_root_name: Optional[str] = None
@@ -789,6 +984,7 @@ class MainWindow(QMainWindow):
             enable_ai_chats=config.load_enable_ai_chats(),
             ai_chat_font_size=ai_font_size,
             http_client=self.http,
+            auth_prompt=self._prompt_remote_login,
         )
         try:
             self.right_panel.setMinimumWidth(0)
@@ -946,10 +1142,18 @@ class MainWindow(QMainWindow):
         open_vault_new_win_action.setToolTip("Launch a separate ZimX process for a vault")
         open_vault_new_win_action.triggered.connect(lambda checked=False: self._select_vault(spawn_new_process=True))
         vault_menu.addAction(open_vault_new_win_action)
-        new_vault_action = QAction("New Vault", self)
-        new_vault_action.setToolTip("Create a new vault")
-        new_vault_action.triggered.connect(self._create_vault)
-        vault_menu.addAction(new_vault_action)
+        self._action_server_login = QAction("Server Login", self)
+        self._action_server_login.setToolTip("Authenticate to the remote server")
+        self._action_server_login.triggered.connect(self._prompt_remote_login)
+        vault_menu.addAction(self._action_server_login)
+        self._action_server_logout = QAction("Server Logout", self)
+        self._action_server_logout.setToolTip("Clear stored server credentials")
+        self._action_server_logout.triggered.connect(self._logout_remote)
+        vault_menu.addAction(self._action_server_logout)
+        self._action_new_vault = QAction("New Vault", self)
+        self._action_new_vault.setToolTip("Create a new vault")
+        self._action_new_vault.triggered.connect(self._create_vault)
+        vault_menu.addAction(self._action_new_vault)
         view_vault_disk_action = QAction("View Vault on Disk", self)
         view_vault_disk_action.setToolTip("Open the vault folder in your system file manager")
         view_vault_disk_action.triggered.connect(self._open_vault_on_disk)
@@ -992,6 +1196,20 @@ class MainWindow(QMainWindow):
         webserver_action.setToolTip("Start local web server to serve vault as HTML")
         webserver_action.triggered.connect(self._open_webserver_dialog)
         tools_menu.addAction(webserver_action)
+        self._action_view_vault_disk = view_vault_disk_action
+        self._action_zim_import = zim_import_action
+        self._action_rebuild_index = rebuild_index_action
+        self._action_webserver = webserver_action
+        self._action_tooltips = {
+            self._action_new_vault: self._action_new_vault.toolTip(),
+            self._action_view_vault_disk: self._action_view_vault_disk.toolTip(),
+            self._action_zim_import: self._action_zim_import.toolTip(),
+            self._action_rebuild_index: self._action_rebuild_index.toolTip(),
+            self._action_webserver: self._action_webserver.toolTip(),
+            self._action_server_login: self._action_server_login.toolTip(),
+            self._action_server_logout: self._action_server_logout.toolTip(),
+        }
+        self._apply_remote_mode_ui()
 
         go_menu = self.menuBar().addMenu("&Go")
         home_action = QAction("(H)ome", self)
@@ -1214,6 +1432,8 @@ class MainWindow(QMainWindow):
 
     def _open_vault_on_disk(self):
         """Open the vault folder in the system file manager."""
+        if not self._require_local_mode("Open the vault folder on disk"):
+            return
         vault_path = self.vault_root
         if not vault_path:
             self.statusBar().showMessage("No vault selected.")
@@ -1400,17 +1620,168 @@ class MainWindow(QMainWindow):
         return self._select_vault(startup=True)
 
     # --- Vault actions -------------------------------------------------
+    def _fetch_remote_vaults(self) -> list[dict[str, str]]:
+        """Load available vaults from configured remote servers."""
+        results: list[dict[str, str]] = []
+        for entry in config.load_remote_servers():
+            host = entry.get("host")
+            port = entry.get("port")
+            scheme = entry.get("scheme") or "http"
+            if not host or not port:
+                continue
+            base_url = f"{scheme}://{host}:{port}"
+            verify_ssl = entry.get("verify_ssl", True)
+            selected_vaults = entry.get("selected_vaults") or []
+            try:
+                resp = httpx.get(f"{base_url}/api/vaults", timeout=10.0, verify=verify_ssl)
+                if resp.status_code != 200:
+                    continue
+                payload = resp.json()
+                vaults = payload.get("vaults", [])
+                if not isinstance(vaults, list):
+                    continue
+                for vault in vaults:
+                    if not isinstance(vault, dict) or not vault.get("path"):
+                        continue
+                    if selected_vaults and vault.get("path") not in selected_vaults:
+                        continue
+                    results.append(
+                        {
+                            "kind": "remote",
+                            "name": vault.get("name") or Path(vault["path"]).name,
+                            "path": vault["path"],
+                            "server_url": base_url,
+                            "verify_ssl": verify_ssl,
+                            "id": f"remote::{base_url}::{vault['path']}",
+                        }
+                    )
+            except Exception:
+                continue
+        return results
+
+    def _build_local_vault_entries(self, seed_vault: Optional[str]) -> list[dict[str, str]]:
+        local_vaults = config.load_known_vaults()
+        if seed_vault and not any(v.get("path") == seed_vault for v in local_vaults):
+            local_vaults.append({"name": Path(seed_vault).name, "path": seed_vault})
+        for vault in local_vaults:
+            vault.setdefault("kind", "local")
+            vault["id"] = vault.get("path")
+        return local_vaults
+
+    def _decode_vault_ref(self, value: Optional[str]) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """Return (kind, server_url, path) for a saved vault reference."""
+        if not value:
+            return None, None, None
+        if value.startswith("remote::"):
+            parts = value.split("::", 2)
+            if len(parts) == 3:
+                _, server_url, path = parts
+                return "remote", server_url, path
+        return "local", None, value
+
+    def _encode_remote_ref(self, server_url: str, path: str) -> str:
+        return f"remote::{server_url}::{path}"
+
+    def _add_remote_server(self) -> Optional[list[dict[str, str]]]:
+        """Prompt for a remote server and verify it before adding."""
+        dlg = AddRemoteDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        host, port, use_https, no_verify = dlg.values()
+        scheme = "https" if use_https else "http"
+        verify_ssl = not no_verify
+        base_url = f"{scheme}://{host}:{port}"
+        try:
+            resp = httpx.get(f"{base_url}/api/health", timeout=10.0, verify=verify_ssl)
+            if resp.status_code != 200:
+                raise RuntimeError(f"Health check failed (HTTP {resp.status_code})")
+        except Exception as exc:
+            self._alert(f"Could not verify server {base_url}: {exc}")
+            return None
+        access_token = None
+        try:
+            resp = httpx.get(f"{base_url}/api/vaults", timeout=10.0, verify=verify_ssl)
+            if resp.status_code == 401:
+                if not self._prompt_remote_login_for_server(base_url, verify_ssl):
+                    return None
+                access_token = self._access_token
+                headers = {"Authorization": f"Bearer {access_token}"} if access_token else None
+                resp = httpx.get(f"{base_url}/api/vaults", headers=headers, timeout=10.0, verify=verify_ssl)
+            if resp.status_code != 200:
+                raise RuntimeError(f"Failed to list vaults (HTTP {resp.status_code})")
+            payload = resp.json()
+            vaults = payload.get("vaults", [])
+            if not isinstance(vaults, list) or not vaults:
+                raise RuntimeError("No vaults found on server")
+        except Exception as exc:
+            self._alert(f"Could not load vaults from {base_url}: {exc}")
+            return None
+
+        select_dialog = RemoteVaultSelectDialog(vaults, parent=self)
+        if select_dialog.exec() != QDialog.Accepted:
+            return None
+        selected_path = select_dialog.selected_path()
+        if not selected_path:
+            return None
+
+        existing = None
+        for entry in config.load_remote_servers():
+            if (
+                entry.get("host") == host
+                and str(entry.get("port")) == str(port)
+                and entry.get("scheme") == scheme
+            ):
+                existing = entry
+                break
+        selected_vaults = list(existing.get("selected_vaults", [])) if existing else []
+        if selected_path not in selected_vaults:
+            selected_vaults.append(selected_path)
+        config.add_remote_server(
+            host,
+            port,
+            scheme=scheme,
+            verify_ssl=verify_ssl,
+            selected_vaults=selected_vaults,
+        )
+        vaults = self._build_local_vault_entries(self.vault_root if not self._remote_mode else None)
+        vaults.extend(self._fetch_remote_vaults())
+        return vaults
+
     def _select_vault(self, checked: bool | None = None, startup: bool = False, spawn_new_process: bool = False) -> bool:  # noqa: ARG002
         seed_vault = self.vault_root or config.load_last_vault()
-        dialog = OpenVaultDialog(self, current_vault=seed_vault)
+        if self._remote_mode and self._server_url and self.vault_root:
+            seed_vault = self._encode_remote_ref(self._server_url, self.vault_root)
+        kind, server_url, path = self._decode_vault_ref(seed_vault)
+        seed_path = path if kind == "local" else None
+        select_id = f"remote::{server_url}::{path}" if kind == "remote" and server_url and path else seed_path
+        vaults = self._build_local_vault_entries(seed_path)
+        vaults.extend(self._fetch_remote_vaults())
+        dialog = OpenVaultDialog(
+            self,
+            current_vault=seed_path,
+            vaults=vaults,
+            select_id=select_id,
+            on_add_remote=self._add_remote_server,
+        )
         if dialog.exec() != QDialog.Accepted:
             return False
         selection = dialog.selected_vault()
         if not selection:
             return False
         if spawn_new_process or dialog.selected_vault_new_window():
-            self._launch_vault_process(selection["path"])
+            if selection.get("kind") == "remote":
+                self._launch_new_window()
+                self.statusBar().showMessage("Opened new window. Select the remote vault there.", 4000)
+            else:
+                self._launch_vault_process(selection["path"])
             return True
+        if selection.get("kind") == "remote":
+            server_url = selection.get("server_url")
+            verify_ssl = selection.get("verify_ssl", True)
+            if server_url:
+                self._switch_api_base(server_url, is_remote=True, verify_tls=verify_ssl)
+        else:
+            self._switch_api_base(self._local_api_base, is_remote=False, verify_tls=True)
         if self._set_vault(selection["path"], vault_name=selection.get("name")):
             self._restore_recent_history()
             QTimer.singleShot(100, self._auto_load_initial_file)
@@ -1434,7 +1805,8 @@ class MainWindow(QMainWindow):
         """Launch a new ZimX process targeting the given vault."""
         try:
             cmd = self._build_launch_command()
-            cmd.extend(["--vault", vault_path, "--port", "0"])
+            cmd.extend(["--vault", vault_path])
+            cmd.extend(["--port", "0"])
             subprocess.Popen(cmd, start_new_session=True)
             self.statusBar().showMessage(f"Opening {vault_path} in a new window...", 3000)
         except Exception as exc:
@@ -1445,9 +1817,11 @@ class MainWindow(QMainWindow):
         """Return the command to start a new ZimX instance using the current runtime."""
         if getattr(sys, "frozen", False):
             # Packaged app: the executable already bootstraps ZimX
-            return [sys.executable]
-        # Dev/venv: use the same interpreter to launch the module
-        return [sys.executable, "-m", "zimx.app.main"]
+            cmd = [sys.executable]
+        else:
+            # Dev/venv: use the same interpreter to launch the module
+            cmd = [sys.executable, "-m", "zimx.app.main"]
+        return cmd
 
     def _find_help_vault_template(self) -> Optional[Path]:
         """Return the bundled help-vault directory if present."""
@@ -1502,6 +1876,8 @@ class MainWindow(QMainWindow):
 
     def _open_help_documentation(self) -> None:
         """Open the built-in help vault in a new ZimX window."""
+        if not self._require_local_mode("Open help documentation"):
+            return
         try:
             vault_path = self._ensure_user_help_vault()
             self._launch_vault_process(str(vault_path))
@@ -1509,6 +1885,8 @@ class MainWindow(QMainWindow):
             self._alert(f"Failed to open documentation: {exc}")
 
     def _create_vault(self) -> None:
+        if not self._require_local_mode("Create a new vault"):
+            return
         target_path = QFileDialog.getExistingDirectory(self, "Select Folder for Vault", str(Path.home()))
         if not target_path:
             return
@@ -1577,6 +1955,285 @@ class MainWindow(QMainWindow):
                 self._alert(f"Vault is read-only because another ZimX window holds the lock.\nCannot {action}.")
             return False
         return True
+
+    def _require_local_mode(self, action: str) -> bool:
+        """Block local-only features when connected to a remote server."""
+        if not self._remote_mode:
+            return True
+        self._alert(f"{action} is not available when connected to a remote server.")
+        return False
+
+    def _disable_remote_action(self, action: QAction, label: str) -> None:
+        """Disable UI actions that are local-only in remote mode."""
+        if not self._remote_mode:
+            return
+        action.setEnabled(False)
+        action.setToolTip(f"{label} is not available when connected to a remote server.")
+
+    def _apply_remote_mode_ui(self) -> None:
+        """Toggle UI actions based on whether we're connected to a remote server."""
+        guarded = [
+            (self._action_new_vault, "Create a new vault"),
+            (self._action_view_vault_disk, "View vault on disk"),
+            (self._action_zim_import, "Import from Zim"),
+            (self._action_rebuild_index, "Rebuild vault index"),
+            (self._action_webserver, "Start web server"),
+        ]
+        for action, label in guarded:
+            if self._remote_mode:
+                action.setEnabled(False)
+                action.setToolTip(f"{label} is not available when connected to a remote server.")
+            else:
+                action.setEnabled(True)
+                action.setToolTip(self._action_tooltips.get(action, label))
+        if self._remote_mode:
+            self._action_server_login.setEnabled(True)
+            self._action_server_login.setToolTip(self._action_tooltips.get(self._action_server_login, ""))
+            self._action_server_logout.setEnabled(True)
+            self._action_server_logout.setToolTip(self._action_tooltips.get(self._action_server_logout, ""))
+        else:
+            self._action_server_login.setEnabled(False)
+            self._action_server_login.setToolTip("Available when connected to a remote server.")
+            self._action_server_logout.setEnabled(False)
+            self._action_server_logout.setToolTip("Available when connected to a remote server.")
+
+    def _build_http_client(self, base_url: str, is_remote: bool, local_auth_token: Optional[str], request_hooks) -> httpx.Client:
+        if is_remote:
+            self._load_remote_auth()
+            auth = RemoteTokenAuth(self._get_access_token, self._attempt_refresh)
+            headers = None
+        else:
+            auth = None
+            headers = {"X-Local-UI-Token": local_auth_token} if local_auth_token else None
+        return httpx.Client(
+            base_url=base_url,
+            timeout=10.0,
+            event_hooks={"request": [request_hooks[0]], "response": [request_hooks[1]]},
+            headers=headers,
+            verify=self._verify_tls,
+            auth=auth,
+        )
+
+    def _switch_api_base(self, base_url: str, is_remote: bool, verify_tls: Optional[bool] = None) -> None:
+        """Swap the active API base URL and rebuild the HTTP client."""
+        self.api_base = base_url.rstrip("/")
+        self._remote_mode = is_remote
+        self._server_url = self.api_base if is_remote else None
+        self._remote_cache_root = None
+        if verify_tls is not None:
+            self._verify_tls = bool(verify_tls)
+        self._access_token = None
+        self._refresh_token = None
+        self._remember_refresh = False
+        self._remote_username = None
+        try:
+            self.http.close()
+        except Exception:
+            pass
+        def _log_request(request):
+            try:
+                path = request.url.raw_path.decode("utf-8") if hasattr(request.url, "raw_path") else request.url.path
+            except Exception:
+                path = str(request.url)
+            print(f"{_ANSI_BLUE}[API] {request.method} {path}{_ANSI_RESET}")
+
+        def _log_response(response):
+            try:
+                path = response.request.url.raw_path.decode("utf-8") if hasattr(response.request.url, "raw_path") else response.request.url.path
+            except Exception:
+                path = str(response.request.url)
+            print(f"{_ANSI_BLUE}[API] {response.status_code} {path}{_ANSI_RESET}")
+
+        self.http = self._build_http_client(
+            base_url=self.api_base,
+            is_remote=is_remote,
+            local_auth_token=self._local_auth_token,
+            request_hooks=(_log_request, _log_response),
+        )
+        self._apply_remote_mode_ui()
+        try:
+            self.right_panel.set_http_client(
+                self.http,
+                api_base=self.api_base,
+                remote_mode=self._remote_mode,
+                auth_prompt=self._prompt_remote_login if self._remote_mode else None,
+            )
+        except Exception:
+            pass
+        try:
+            self._refresh_editor_context(self.current_path)
+        except Exception:
+            pass
+
+    def _refresh_editor_context(self, path: Optional[str]) -> None:
+        self.editor.set_context(self.vault_root, path)
+        self.editor.set_remote_context(
+            remote_mode=self._remote_mode,
+            api_base=self.api_base if self._remote_mode else None,
+            cache_root=self._ensure_remote_cache_root() if self._remote_mode else None,
+            http_client=self.http if self._remote_mode else None,
+            auth_prompt=self._prompt_remote_login if self._remote_mode else None,
+        )
+
+    def _ensure_remote_cache_root(self) -> Path:
+        """Create a local cache root for remote vault metadata."""
+        if self._remote_cache_root is not None:
+            return self._remote_cache_root
+        from urllib.parse import urlparse
+
+        parsed = urlparse(self.api_base)
+        host = parsed.hostname or "remote"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        key = f"{parsed.scheme}://{host}:{port}"
+        digest = hashlib.sha1(key.encode("ascii", errors="ignore")).hexdigest()[:12]
+        cache_root = Path.home() / ".zimx" / "remote" / f"{host}-{port}-{digest}"
+        cache_root.mkdir(parents=True, exist_ok=True)
+        self._remote_cache_root = cache_root
+        return cache_root
+
+    def _remote_server_key(self) -> str:
+        """Normalize the server URL into a stable config key."""
+        return self._server_key_for_url(self.api_base)
+
+    @staticmethod
+    def _server_key_for_url(url: str) -> str:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        scheme = parsed.scheme or "http"
+        host = parsed.hostname or url
+        port = parsed.port or (443 if scheme == "https" else 80)
+        return f"{scheme}://{host}:{port}"
+
+    def _load_remote_auth(self) -> None:
+        """Load stored refresh token for the remote server."""
+        entry = config.load_remote_auth(self._remote_server_key())
+        token = entry.get("refresh_token")
+        if token:
+            self._refresh_token = token
+            self._remember_refresh = True
+        username = entry.get("username")
+        if isinstance(username, str) and username:
+            self._remote_username = username
+
+    def _set_auth_tokens(self, access: str, refresh: str, remember: bool, username: Optional[str]) -> None:
+        self._access_token = access
+        self._refresh_token = refresh
+        self._remember_refresh = remember
+        if remember:
+            config.save_remote_auth(self._remote_server_key(), refresh, username=username)
+        else:
+            config.save_remote_auth(self._remote_server_key(), None, username=None)
+
+    def _clear_auth_tokens(self) -> None:
+        self._access_token = None
+        self._refresh_token = None
+        self._remember_refresh = False
+        config.save_remote_auth(self._remote_server_key(), None, username=None)
+
+    def _get_access_token(self) -> Optional[str]:
+        return self._access_token
+
+    def _attempt_refresh(self) -> bool:
+        """Try to refresh the access token using the stored refresh token."""
+        if not self._refresh_token:
+            return False
+        try:
+            resp = httpx.post(
+                f"{self.api_base}/auth/refresh",
+                headers={"Authorization": f"Bearer {self._refresh_token}"},
+                timeout=10.0,
+                verify=self._verify_tls,
+            )
+            if resp.status_code != 200:
+                if resp.status_code == 401:
+                    self._clear_auth_tokens()
+                return False
+            payload = resp.json()
+            access = payload.get("access_token")
+            refresh = payload.get("refresh_token") or self._refresh_token
+            if not access or not refresh:
+                return False
+            self._set_auth_tokens(access, refresh, self._remember_refresh, self._remote_username)
+            return True
+        except Exception:
+            return False
+
+    def _login_remote(self, username: str, password: str, remember: bool) -> bool:
+        try:
+            resp = httpx.post(
+                f"{self.api_base}/auth/login",
+                json={"username": username, "password": password},
+                timeout=10.0,
+                verify=self._verify_tls,
+            )
+            if resp.status_code != 200:
+                detail = None
+                try:
+                    data = resp.json()
+                    if isinstance(data, dict):
+                        detail = data.get("detail") or data.get("message")
+                except Exception:
+                    pass
+                raise RuntimeError(detail or f"HTTP {resp.status_code}")
+            payload = resp.json()
+            access = payload.get("access_token")
+            refresh = payload.get("refresh_token")
+            if not access or not refresh:
+                raise RuntimeError("Missing tokens in response")
+            self._remote_username = username
+            self._set_auth_tokens(access, refresh, remember, username)
+            self.statusBar().showMessage("Server login successful.", 3000)
+            return True
+        except Exception as exc:
+            self._alert(f"Login failed: {exc}")
+            return False
+
+    def _prompt_remote_login(self) -> bool:
+        if not self._remote_mode:
+            return False
+        remember_default = self._remember_refresh or bool(self._refresh_token)
+        dlg = RemoteLoginDialog(self, username=self._remote_username or "", remember_default=remember_default)
+        if dlg.exec() != QDialog.Accepted:
+            return False
+        username, password, remember = dlg.credentials()
+        return self._login_remote(username, password, remember)
+
+    def _prompt_remote_login_for_server(self, base_url: str, verify_ssl: bool) -> bool:
+        dlg = RemoteLoginDialog(self, username=self._remote_username or "", remember_default=True)
+        if dlg.exec() != QDialog.Accepted:
+            return False
+        username, password, remember = dlg.credentials()
+        try:
+            resp = httpx.post(
+                f"{base_url}/auth/login",
+                json={"username": username, "password": password},
+                timeout=10.0,
+                verify=verify_ssl,
+            )
+            if resp.status_code != 200:
+                raise RuntimeError(f"HTTP {resp.status_code}")
+            payload = resp.json()
+            access = payload.get("access_token")
+            refresh = payload.get("refresh_token")
+            if not access or not refresh:
+                raise RuntimeError("Missing tokens in response")
+            self._access_token = access
+            self._refresh_token = refresh
+            self._remote_username = username
+            if remember:
+                server_key = self._server_key_for_url(base_url)
+                config.save_remote_auth(server_key, refresh, username=username)
+            return True
+        except Exception as exc:
+            self._alert(f"Login failed: {exc}")
+            return False
+
+    def _logout_remote(self) -> None:
+        if not self._remote_mode:
+            return
+        self._clear_auth_tokens()
+        self.statusBar().showMessage("Server credentials cleared.", 3000)
 
     def _check_and_acquire_vault_lock(self, directory: str, prefer_read_only: bool = False) -> bool:
         """Create a simple lockfile in the vault; prompt if locked or forced read-only."""
@@ -1717,11 +2374,19 @@ class MainWindow(QMainWindow):
             # Persist history before clearing
             self._persist_recent_history()
             prefer_read_only = False
-            try:
-                config.set_active_vault(directory)
-                prefer_read_only = config.load_vault_force_read_only()
-            except Exception:
-                prefer_read_only = False
+            if self._remote_mode:
+                try:
+                    cache_root = self._ensure_remote_cache_root()
+                    config.set_active_vault(str(cache_root))
+                    prefer_read_only = config.load_vault_force_read_only()
+                except Exception:
+                    prefer_read_only = False
+            else:
+                try:
+                    config.set_active_vault(directory)
+                    prefer_read_only = config.load_vault_force_read_only()
+                except Exception:
+                    prefer_read_only = False
             try:
                 self._ai_chat_store = AIChatStore(vault_root=directory)
                 if self._ai_badge_icon is None:
@@ -1729,11 +2394,20 @@ class MainWindow(QMainWindow):
                     self._ai_badge_icon = self._load_icon(ai_path, QColor("#4A90E2"), size=14)
             except Exception:
                 self._ai_chat_store = None
-            if not self._check_and_acquire_vault_lock(directory, prefer_read_only=prefer_read_only):
-                return False
+            if self._remote_mode:
+                self._read_only = prefer_read_only
+                self._vault_lock_path = None
+                self._vault_lock_owner = None
+                self._apply_read_only_state()
+            else:
+                if not self._check_and_acquire_vault_lock(directory, prefer_read_only=prefer_read_only):
+                    return False
             self.right_panel.clear_tasks()
             try:
                 resp = self.http.post("/api/vault/select", json={"path": directory})
+                if resp.status_code == 401 and self._remote_mode:
+                    if self._prompt_remote_login():
+                        resp = self.http.post("/api/vault/select", json={"path": directory})
                 resp.raise_for_status()
             except httpx.HTTPError as exc:
                 self._alert_api_error(exc, "Failed to set vault")
@@ -1742,7 +2416,7 @@ class MainWindow(QMainWindow):
             self.vault_root = resp.json().get("root")
             self.vault_root_name = Path(self.vault_root).name if self.vault_root else None
             index_dir_missing = False
-            if self.vault_root:
+            if self.vault_root and not self._remote_mode:
                 index_dir = Path(self.vault_root) / ".zimx"
                 if not index_dir.exists():
                     reply = QMessageBox.question(
@@ -1759,11 +2433,15 @@ class MainWindow(QMainWindow):
                         return False
                     index_dir_missing = True
             if self.vault_root:
-                # ensure DB connection is set (may already be set above)
-                config.set_active_vault(self.vault_root)
-                config.save_last_vault(self.vault_root)
-                display_name = vault_name or Path(self.vault_root).name
-                config.remember_vault(self.vault_root, display_name)
+                if not self._remote_mode:
+                    # ensure DB connection is set (may already be set above)
+                    config.set_active_vault(self.vault_root)
+                if self._remote_mode:
+                    config.save_last_vault(self._encode_remote_ref(self.api_base, self.vault_root))
+                else:
+                    config.save_last_vault(self.vault_root)
+                    display_name = vault_name or Path(self.vault_root).name
+                    config.remember_vault(self.vault_root, display_name)
                 try:
                     self.refresh_tree_button.setEnabled(True)
                 except Exception:
@@ -1790,35 +2468,35 @@ class MainWindow(QMainWindow):
                 # Respect globally persisted editor font size (not per-vault)
                 self.font_size = config.load_global_editor_font_size(self.font_size)
                 self.editor.set_font_point_size(self.font_size)
-            self.editor.set_context(self.vault_root, None)
-            self._suspend_dirty_tracking = True
-            try:
-                self.editor.set_markdown("")
-            finally:
-                self._suspend_dirty_tracking = False
-                self._dirty_flag = False
-            self._vi_initial_page_loaded = False
-            if self._vi_enabled:
-                self._vi_enable_pending = True
-                self.editor.set_vi_mode_enabled(False)
-            self.current_path = None
-            self.right_panel.set_current_page(None, None)
-            self.statusBar().showMessage(f"Vault: {self.vault_root}")
-            self._update_window_title()
-            self._populate_vault_tree()
-            
-            # Check if index is empty and rebuild if needed
-            needs_index = index_dir_missing or config.is_vault_index_empty()
-            if needs_index:
-                self._reindex_vault(show_progress=True)
+                self._refresh_editor_context(None)
+                self._suspend_dirty_tracking = True
+                try:
+                    self.editor.set_markdown("")
+                finally:
+                    self._suspend_dirty_tracking = False
+                    self._dirty_flag = False
+                self._vi_initial_page_loaded = False
+                if self._vi_enabled:
+                    self._vi_enable_pending = True
+                    self.editor.set_vi_mode_enabled(False)
+                self.current_path = None
+                self.right_panel.set_current_page(None, None)
+                self.statusBar().showMessage(f"Vault: {self.vault_root}")
+                self._update_window_title()
+                self._populate_vault_tree()
 
-            self._load_bookmarks()
-            if self.vault_root:
-                self.right_panel.set_vault_root(self.vault_root)
-            
-            # Restore window geometry and splitter positions
-            self._restore_geometry()
-            return True
+                # Check if index is empty and rebuild if needed
+                needs_index = index_dir_missing or config.is_vault_index_empty()
+                if needs_index:
+                    self._reindex_vault(show_progress=True)
+
+                self._load_bookmarks()
+                if self.vault_root:
+                    self.right_panel.set_vault_root(self.vault_root)
+
+                # Restore window geometry and splitter positions
+                self._restore_geometry()
+                return True
         finally:
             try:
                 self.editor._pop_paint_block()
@@ -2870,7 +3548,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 content_len = len(content or "")
             tracer.mark(f"api read complete bytes={content_len}")
-        self.editor.set_context(self.vault_root, path)
+        self._refresh_editor_context(path)
         if tracer:
             tracer.mark("editor context set")
         # Hand logger to the editor so rendering steps are captured
@@ -3083,6 +3761,9 @@ class MainWindow(QMainWindow):
         payload = {"path": self.current_path, "content": payload_content}
         try:
             resp = self.http.post("/api/file/write", json=payload)
+            if resp.status_code == 401 and self._remote_mode:
+                if self._prompt_remote_login():
+                    resp = self.http.post("/api/file/write", json=payload)
             resp.raise_for_status()
         except httpx.HTTPError as exc:
             if not auto:
@@ -4163,6 +4844,9 @@ class MainWindow(QMainWindow):
         """Open a lightweight editor window for a single page (shared server)."""
         if not path or not self.vault_root:
             return
+        if self._remote_mode:
+            self._alert("Popup editor windows are not available in remote mode yet.")
+            return
         rel_path = self._normalize_editor_path(path)
         try:
             window = PageEditorWindow(
@@ -4504,7 +5188,7 @@ class MainWindow(QMainWindow):
             content = f"# {target_date.strftime('%A %d %B %Y')}\n\n"
         
         # Set up editor without saving to disk
-        self.editor.set_context(self.vault_root, rel_path)
+        self._refresh_editor_context(rel_path)
         self.current_path = rel_path
         self._suspend_autosave = True
         self._suspend_dirty_tracking = True
@@ -5969,6 +6653,8 @@ class MainWindow(QMainWindow):
         return folder or "/"
 
     def _import_zim_wiki(self) -> None:
+        if not self._require_local_mode("Import a Zim wiki"):
+            return
         if not self.vault_root or not config.has_active_vault():
             self._alert("Select a vault before importing.")
             return
@@ -6382,7 +7068,7 @@ class MainWindow(QMainWindow):
             new_current = path_map[self.current_path]
             self.current_path = new_current
             try:
-                self.editor.set_context(self.vault_root, new_current)
+                self._refresh_editor_context(new_current)
             except Exception:
                 pass
             self._pending_selection = new_current
@@ -7033,6 +7719,8 @@ class MainWindow(QMainWindow):
 
     def _rebuild_vault_index_from_disk(self) -> None:
         """Drop and rebuild vault index from source files, preserving bookmarks/kv/ai tables."""
+        if not self._require_local_mode("Rebuild the vault index from disk"):
+            return
         if not self.vault_root or not config.has_active_vault():
             self._alert("Select a vault before rebuilding the index.")
             return
@@ -7070,6 +7758,8 @@ class MainWindow(QMainWindow):
 
     def _open_webserver_dialog(self) -> None:
         """Open the web server control dialog."""
+        if not self._require_local_mode("Start the web server"):
+            return
         if not self.vault_root or not config.has_active_vault():
             self._alert("Select a vault before starting the web server.")
             return
@@ -7326,6 +8016,8 @@ class MainWindow(QMainWindow):
                     detail = data.get("detail") or data.get("message")
             except Exception:
                 pass
+            if resp.status_code == 401 and self._remote_mode:
+                detail = detail or "Not authenticated. Use Vault → Server Login to sign in."
             if not detail:
                 try:
                     text = resp.text

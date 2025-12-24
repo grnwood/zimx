@@ -6,7 +6,7 @@ import os
 import shutil
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable, Any
 
 import httpx
 
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QInputDialog,
     QDialog,
+    QMessageBox,
 )
 
 from .page_load_logger import PAGE_LOGGING_ENABLED
@@ -59,11 +60,19 @@ class AttachmentsPanel(QWidget):
     # Signal emitted when user wants to open a .puml file in the PlantUML editor
     plantumlEditorRequested = Signal(str)  # file_path
 
-    def __init__(self, parent=None, api_client: Optional[httpx.Client] = None) -> None:
+    def __init__(
+        self,
+        parent=None,
+        api_client: Optional[httpx.Client] = None,
+        auth_prompt: Optional[Callable[[], bool]] = None,
+    ) -> None:
         super().__init__(parent)
         self.vault_root: Optional[Path] = None
         self._page_attachment_cache: dict[str, set[str]] = {}
         self._http_client = api_client
+        self._remote_mode = False
+        self._api_base: Optional[str] = None
+        self._auth_prompt = auth_prompt
         
         self.current_page_path: Optional[Path] = None
         self.zoom_level = 0  # 0=list, 1=small icons, 2=medium icons, 3=large icons
@@ -157,11 +166,31 @@ class AttachmentsPanel(QWidget):
         """Track the active vault root so attachments can be normalized."""
         self.vault_root = Path(vault_root) if vault_root else None
         self._page_attachment_cache.clear()
+
+    def set_http_client(self, api_client: Optional[httpx.Client]) -> None:
+        """Update the API client used for remote attachment operations."""
+        self._http_client = api_client
+
+    def set_remote_mode(self, remote_mode: bool, api_base: Optional[str]) -> None:
+        """Toggle remote mode for attachments."""
+        self._remote_mode = bool(remote_mode)
+        self._api_base = api_base.rstrip("/") if api_base else None
+        if self._remote_mode:
+            self.open_folder_button.setEnabled(False)
+        self._page_attachment_cache.clear()
+
+    def set_auth_prompt(self, auth_prompt: Optional[Callable[[], bool]]) -> None:
+        """Set a callback to prompt for auth when needed."""
+        self._auth_prompt = auth_prompt
     
     def _refresh_attachments(self) -> None:
         """Refresh the list of attachments for the current page."""
         t0 = time.perf_counter()
         self.attachments_list.clear()
+
+        if self._remote_mode:
+            self._refresh_remote_attachments(t0)
+            return
         
         if not self.current_page_path:
             self.open_folder_button.setEnabled(False)
@@ -228,9 +257,61 @@ class AttachmentsPanel(QWidget):
             self._sync_with_server(attachments)
         self._update_remove_button_state()
 
+    def _refresh_remote_attachments(self, t0: float) -> None:
+        if not self.current_page_path:
+            self.open_folder_button.setEnabled(False)
+            self.refresh_button.setEnabled(False)
+            self.add_button.setEnabled(False)
+            return
+        if not self._http_client:
+            self.open_folder_button.setEnabled(False)
+            self.refresh_button.setEnabled(False)
+            self.add_button.setEnabled(False)
+            return
+        page_key = self._current_page_key()
+        if not page_key:
+            return
+        self.open_folder_button.setEnabled(False)
+        self.refresh_button.setEnabled(True)
+        self.add_button.setEnabled(True)
+        self._update_view_mode()
+        try:
+            resp = self._http_client.get("/files/", params={"page_path": page_key})
+            if resp.status_code == 401 and self._auth_prompt:
+                if self._auth_prompt():
+                    resp = self._http_client.get("/files/", params={"page_path": page_key})
+            resp.raise_for_status()
+            payload = resp.json()
+            attachments = payload.get("attachments", [])
+            if not isinstance(attachments, list):
+                attachments = []
+        except httpx.HTTPError as exc:
+            print(f"[Attachments] failed to list remote attachments: {exc}")
+            return
+        for entry in attachments:
+            if not isinstance(entry, dict):
+                continue
+            attachment_path = entry.get("attachment_path") or entry.get("stored_path")
+            if not attachment_path:
+                continue
+            item = QListWidgetItem()
+            name = Path(str(attachment_path)).name
+            item.setText(name)
+            item.setData(Qt.UserRole, {"kind": "remote", "path": str(attachment_path)})
+            icon = self.icon_provider.icon(QFileIconProvider.File)
+            if icon:
+                item.setIcon(icon)
+            self.attachments_list.addItem(item)
+        if PAGE_LOGGING_ENABLED:
+            print(f"[PageLoadAndRender] attachments refresh remote total={(time.perf_counter()-t0)*1000:.1f}ms")
+        self._update_remove_button_state()
+
     def _add_attachments(self) -> None:
         """Prompt user to add attachments via the OS file picker."""
         if not self.current_page_path:
+            return
+        if self._remote_mode:
+            self._add_remote_attachments()
             return
         page_folder = self.current_page_path.parent
         if not page_folder.exists():
@@ -255,6 +336,48 @@ class AttachmentsPanel(QWidget):
                 print(f"[Attachments] Failed to copy {src}: {exc}")
         self._refresh_attachments()
 
+    def _add_remote_attachments(self) -> None:
+        if not self._http_client:
+            return
+        page_key = self._current_page_key()
+        if not page_key:
+            return
+        options = QFileDialog.Options()
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Add Attachments",
+            str(Path.home()),
+            options=options,
+        )
+        if not files:
+            return
+        multipart = []
+        handles = []
+        try:
+            for file_path in files:
+                src = Path(file_path)
+                if not src.exists():
+                    continue
+                handle = open(src, "rb")
+                handles.append(handle)
+                multipart.append(("files", (src.name, handle, "application/octet-stream")))
+            if not multipart:
+                return
+            resp = self._http_client.post("/files/attach", data={"page_path": page_key}, files=multipart)
+            if resp.status_code == 401 and self._auth_prompt:
+                if self._auth_prompt():
+                    resp = self._http_client.post("/files/attach", data={"page_path": page_key}, files=multipart)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            print(f"[Attachments] failed to upload remote attachments: {exc}")
+        finally:
+            for handle in handles:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+        self._refresh_attachments()
+
     def _unique_destination(self, folder: Path, name: str) -> Path:
         base = Path(name)
         candidate = folder / name
@@ -271,18 +394,24 @@ class AttachmentsPanel(QWidget):
             return
         to_delete: set[str] = set()
         for item in selected:
-            file_path_str = item.data(Qt.UserRole)
-            if not file_path_str:
+            data: Any = item.data(Qt.UserRole)
+            if not data:
                 continue
-            path = Path(file_path_str)
-            try:
-                if path.exists():
-                    path.unlink()
-            except OSError as exc:
-                print(f"[Attachments] Failed to delete {path}: {exc}")
-            rel = self._attachment_relative_path(path)
-            if rel:
-                to_delete.add(rel)
+            if self._remote_mode and isinstance(data, dict):
+                rel = data.get("path")
+                if rel:
+                    to_delete.add(rel)
+                continue
+            if isinstance(data, str):
+                path = Path(data)
+                try:
+                    if path.exists():
+                        path.unlink()
+                except OSError as exc:
+                    print(f"[Attachments] Failed to delete {path}: {exc}")
+                rel = self._attachment_relative_path(path)
+                if rel:
+                    to_delete.add(rel)
         if to_delete:
             self._delete_removed_attachments(to_delete)
         self._refresh_attachments()
@@ -344,6 +473,9 @@ class AttachmentsPanel(QWidget):
                 return False
             try:
                 resp = self._http_client.post("/files/attach", data={"page_path": page_key}, files=multipart)
+                if resp.status_code == 401 and self._auth_prompt:
+                    if self._auth_prompt():
+                        resp = self._http_client.post("/files/attach", data={"page_path": page_key}, files=multipart)
                 resp.raise_for_status()
                 print(f"[Attachments] uploaded {len(multipart)} attachment(s) for {page_key}")
                 return True
@@ -359,6 +491,9 @@ class AttachmentsPanel(QWidget):
             return True
         try:
             resp = self._http_client.post("/files/delete", json={"paths": sorted(removed)})
+            if resp.status_code == 401 and self._auth_prompt:
+                if self._auth_prompt():
+                    resp = self._http_client.post("/files/delete", json={"paths": sorted(removed)})
             resp.raise_for_status()
             print(f"[Attachments] deleted {len(removed)} attachment(s) for panel")
             return True
@@ -437,17 +572,31 @@ class AttachmentsPanel(QWidget):
     
     def _open_attachment(self, item: QListWidgetItem) -> None:
         """Open the selected attachment. .puml files open in PlantUML editor, others use default handler."""
-        file_path_str = item.data(Qt.UserRole)
-        if file_path_str:
-            file_path = Path(file_path_str)
+        data = item.data(Qt.UserRole)
+        if self._remote_mode and isinstance(data, dict):
+            rel_path = data.get("path")
+            if not rel_path or not self._api_base:
+                return
+            if str(rel_path).lower().endswith(".puml"):
+                QMessageBox.information(self, "Not Available", "PlantUML editor is not available for remote attachments.")
+                return
+            try:
+                from urllib.parse import quote
+                url = f"{self._api_base}/api/file/raw?path={quote(str(rel_path))}"
+                QDesktopServices.openUrl(QUrl(url))
+            except Exception:
+                return
+            return
+        if isinstance(data, str):
+            file_path = Path(data)
             if file_path.exists():
                 # Check if it's a PlantUML file
                 if file_path.suffix.lower() == ".puml":
-                    print(f"[Attachments] Double-click .puml -> open editor: {file_path_str}")
-                    self.plantumlEditorRequested.emit(file_path_str)
+                    print(f"[Attachments] Double-click .puml -> open editor: {data}")
+                    self.plantumlEditorRequested.emit(data)
                 else:
                     # Open with default system handler
-                    print(f"[Attachments] Double-click non-puml -> open default: {file_path_str}")
+                    print(f"[Attachments] Double-click non-puml -> open default: {data}")
                     QDesktopServices.openUrl(QUrl.fromLocalFile(str(file_path)))
     
     def refresh(self) -> None:
@@ -467,6 +616,9 @@ class AttachmentsPanel(QWidget):
 
     def _create_new_plantuml(self) -> None:
         """Create a new .puml file in the attachments folder."""
+        if self._remote_mode:
+            QMessageBox.information(self, "Not Available", "PlantUML creation is not available for remote attachments.")
+            return
         if not self.current_page_path:
             return
         
@@ -520,4 +672,3 @@ class AttachmentsPanel(QWidget):
         except Exception as exc:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.critical(self, "Error", f"Failed to create file: {exc}")
-
