@@ -48,6 +48,7 @@ ZIMX_VERSION = os.getenv('ZIMX_VERSION','0.1.0')
 _datas = [
     (os.path.join(ROOT, 'zimx', 'templates'), 'zimx/templates'),
     (os.path.join(ROOT, 'zimx', 'app', 'puml_shortcuts.json'), 'zimx/app'),
+    (os.path.join(ROOT, 'zimx', 'app', 'calendar-day-insight-prompt.txt'), 'zimx/app'),
     (os.path.join(ROOT, 'zimx', 'help-vault'), 'zimx/help-vault'),
 ]
 

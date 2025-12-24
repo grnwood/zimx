@@ -1341,9 +1341,21 @@ def vector_query(payload: VectorQueryPayload) -> dict:
         if payload.kind == "attachment":
             if not payload.attachment_names:
                 raise HTTPException(status_code=400, detail="Attachment names required for attachment query")
-            chunks = vector_manager.query_attachments(root, payload.query_text, payload.attachment_names, limit=payload.limit)
+            chunks = vector_manager.query_attachments(
+                root,
+                payload.query_text,
+                payload.attachment_names,
+                limit=payload.limit,
+                kind="attachment",
+            )
         else:
-            chunks = vector_manager.query(root, payload.query_text, page_refs=payload.page_refs, limit=payload.limit)
+            chunks = vector_manager.query(
+                root,
+                payload.query_text,
+                page_refs=payload.page_refs,
+                limit=payload.limit,
+                kind="page",
+            )
         _log_vector(
             f"Queried {payload.kind} context limit={payload.limit} "
             f"pages={payload.page_refs or 'any'} "
@@ -1353,7 +1365,49 @@ def vector_query(payload: VectorQueryPayload) -> dict:
         raise
     except Exception as exc:
         _handle_vector_exception("querying vector data", exc)
+    if payload.kind != "attachment":
+        chunks = _apply_exact_match_fallback(root, payload, chunks)
     return {"chunks": [_chunk_to_dict(chunk) for chunk in chunks]}
+
+
+def _apply_exact_match_fallback(
+    root: Path,
+    payload: VectorQueryPayload,
+    chunks: list[RetrievedChunk],
+) -> list[RetrievedChunk]:
+    query = (payload.query_text or "").strip()
+    if not query or " " in query:
+        return chunks
+    lowered = query.lower()
+    if any(lowered in (chunk.content or "").lower() for chunk in chunks):
+        return chunks
+    if not payload.page_refs:
+        return chunks
+    matches: list[RetrievedChunk] = []
+    for page_ref in payload.page_refs:
+        try:
+            content = files.read_file(root, page_ref)
+        except Exception:
+            continue
+        lines = []
+        for line in content.splitlines():
+            if lowered in line.lower():
+                lines.append(line.strip())
+        if not lines:
+            continue
+        snippet = "\n".join(lines[:6])
+        matches.append(
+            RetrievedChunk(
+                page_ref=page_ref,
+                content=snippet,
+                score=0.0,
+                attachment_name=None,
+            )
+        )
+    if matches:
+        _log_vector(f"Exact-match fallback added {len(matches)} chunk(s) for {query!r}")
+        return matches + chunks
+    return chunks
 
 
 def _sort_tree_nodes(nodes: list[dict], order_map: dict[str, int]) -> None:

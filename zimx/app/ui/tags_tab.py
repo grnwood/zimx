@@ -329,7 +329,6 @@ class TagsTab(QWidget):
             
             # Create chicklets for each tag
             for tag, count in rows:
-                print(f"[TagsTab] Creating chicklet for tag: {tag} ({count} pages)")
                 chicklet = TagChicklet(tag, self.tags_container)
                 chicklet.setToolTip(f"@{tag} ({count} pages)")
                 chicklet.clicked.connect(lambda checked, t=tag: self._on_tag_clicked(t, checked))

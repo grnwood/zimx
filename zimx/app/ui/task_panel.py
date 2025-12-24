@@ -143,6 +143,7 @@ class TaskPanel(QWidget):
         self._header_save_timer.setInterval(200)
         self._header_save_timer.setSingleShot(True)
         self._header_save_timer.timeout.connect(self._save_header_state)
+        self._allow_filter_clear = True
 
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search tasks…")
@@ -374,6 +375,8 @@ class TaskPanel(QWidget):
 
     def _on_filter_label_clicked(self, event) -> None:
         """Request clearing the navigation filter when the label is clicked."""
+        if not self._allow_filter_clear:
+            return
         self.filterClearRequested.emit()
 
     def _on_journal_checkbox_toggled(self, checked: bool) -> None:
@@ -402,6 +405,13 @@ class TaskPanel(QWidget):
             self._nav_filter_enabled = True
             self._include_journal = True
             return
+        display_path = path_to_colon(self._nav_filter_prefix) or self._nav_filter_prefix
+        if self._allow_filter_clear:
+            self.filter_label.setToolTip(f"{display_path} (click to clear)")
+            self.filter_label.setCursor(Qt.PointingHandCursor)
+        else:
+            self.filter_label.setToolTip(display_path)
+            self.filter_label.setCursor(Qt.ArrowCursor)
         self.filter_checkbox.blockSignals(True)
         self.filter_checkbox.setChecked(self._nav_filter_enabled)
         self.filter_checkbox.blockSignals(False)
@@ -415,6 +425,10 @@ class TaskPanel(QWidget):
             )
         else:
             self.filter_label.setStyleSheet("")
+
+    def set_filter_clear_enabled(self, enabled: bool) -> None:
+        self._allow_filter_clear = bool(enabled)
+        self._update_filter_indicator()
 
     def _adjust_font_size(self, delta: int) -> None:
         """Bump panel font size (Ctrl +/-) in tabs or popouts."""
