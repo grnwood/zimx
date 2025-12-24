@@ -5,6 +5,7 @@ import os
 import re
 from pathlib import Path
 from typing import Optional, Callable
+import httpx
 from html.parser import HTMLParser
 
 from PySide6.QtCore import QEvent, QMimeData, Qt, QRegularExpression, Signal, QUrl, QPoint, QTimer, QSignalBlocker
@@ -1213,6 +1214,11 @@ class MarkdownEditor(QTextEdit):
         # should not trigger autosave writes (e.g., one-shot prompt overlay).
         self._focus_lost_suppression_depth: int = 0
         self._vault_root: Optional[Path] = None
+        self._remote_mode = False
+        self._remote_cache_root: Optional[Path] = None
+        self._api_base: Optional[str] = None
+        self._http_client: Optional[httpx.Client] = None
+        self._auth_prompt: Optional[Callable[[], bool]] = None
         self._vi_mode_active: bool = False
         self._vi_block_cursor_enabled: bool = True  # default on, controlled by preferences
         self._vi_saved_flash_time: Optional[int] = None
@@ -1522,6 +1528,20 @@ class MarkdownEditor(QTextEdit):
     def set_context(self, vault_root: Optional[str], relative_path: Optional[str]) -> None:
         self._vault_root = Path(vault_root) if vault_root else None
         self._current_path = relative_path
+
+    def set_remote_context(
+        self,
+        remote_mode: bool,
+        api_base: Optional[str],
+        cache_root: Optional[Path],
+        http_client: Optional[httpx.Client],
+        auth_prompt: Optional[Callable[[], bool]],
+    ) -> None:
+        self._remote_mode = bool(remote_mode)
+        self._api_base = api_base.rstrip("/") if api_base else None
+        self._remote_cache_root = cache_root
+        self._http_client = http_client
+        self._auth_prompt = auth_prompt
 
     def setDocument(self, document: QTextDocument) -> None:  # type: ignore[override]
         self._push_paint_block()
@@ -5951,6 +5971,8 @@ class MarkdownEditor(QTextEdit):
         raw_path = raw_path.strip()
         if raw_path.startswith("http://") or raw_path.startswith("https://"):
             return None
+        if self._remote_mode:
+            return self._resolve_remote_image_path(raw_path)
         base_dir: Optional[Path] = None
         if self._vault_root and self._current_path:
             base_dir = (self._vault_root / self._current_path.lstrip("/")).parent
@@ -5968,6 +5990,41 @@ class MarkdownEditor(QTextEdit):
         if base_dir:
             return (base_dir / raw_path).resolve()
         return Path(raw_path).resolve()
+
+    def _resolve_remote_image_path(self, raw_path: str) -> Optional[Path]:
+        if not self._current_path or not self._api_base or not self._remote_cache_root:
+            return None
+        virtual_path = self._virtual_image_path(raw_path)
+        if not virtual_path:
+            return None
+        cache_path = (self._remote_cache_root / "attachments" / virtual_path.lstrip("/")).resolve()
+        if cache_path.exists():
+            return cache_path
+        if not self._http_client:
+            return None
+        try:
+            resp = self._http_client.get("/api/file/raw", params={"path": virtual_path})
+            if resp.status_code == 401 and self._auth_prompt:
+                if self._auth_prompt():
+                    resp = self._http_client.get("/api/file/raw", params={"path": virtual_path})
+            resp.raise_for_status()
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_bytes(resp.content)
+            return cache_path
+        except httpx.HTTPError:
+            return None
+
+    def _virtual_image_path(self, raw_path: str) -> Optional[str]:
+        raw_path = raw_path.strip()
+        if not raw_path or raw_path.startswith("http://") or raw_path.startswith("https://"):
+            return None
+        if raw_path.startswith("/"):
+            return raw_path
+        base_dir = Path(self._current_path).parent if self._current_path else Path("/")
+        rel_path = raw_path
+        if rel_path.startswith("./"):
+            rel_path = rel_path[2:]
+        return f"/{(base_dir / rel_path).as_posix()}"
 
     def _normalize_image_path(self, path: str) -> str:
         path = (path or "").strip()

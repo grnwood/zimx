@@ -46,6 +46,7 @@ class TabbedRightPanel(QWidget):
         enable_ai_chats: bool = False,
         ai_chat_font_size: int = 13,
         http_client: Optional[httpx.Client] = None,
+        auth_prompt=None,
     ) -> None:
         super().__init__(parent)
         
@@ -74,7 +75,7 @@ class TabbedRightPanel(QWidget):
         self.tabs.addTab(self.calendar_panel, "Calendar")
         
         # Create Attachments tab
-        self.attachments_panel = AttachmentsPanel(api_client=http_client)
+        self.attachments_panel = AttachmentsPanel(api_client=http_client, auth_prompt=auth_prompt)
         self.tabs.addTab(self.attachments_panel, "Attachments")
 
         # Create Link Navigator tab
@@ -113,6 +114,22 @@ class TabbedRightPanel(QWidget):
         layout.addWidget(self.tabs)
         self.setLayout(layout)
         self._focus_current_tab()
+
+    def set_http_client(
+        self,
+        http_client: Optional[httpx.Client],
+        api_base: Optional[str],
+        remote_mode: bool,
+        auth_prompt=None,
+    ) -> None:
+        self._http_client = http_client
+        self.calendar_panel.http = http_client
+        if api_base:
+            self.calendar_panel.api_base = api_base
+        self.attachments_panel.set_http_client(http_client)
+        self.attachments_panel.set_remote_mode(remote_mode, api_base)
+        if auth_prompt is not None:
+            self.attachments_panel.set_auth_prompt(auth_prompt)
     
     def refresh_tasks(self) -> None:
         """Refresh the task panel."""

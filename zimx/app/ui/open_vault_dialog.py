@@ -87,17 +87,26 @@ class AddVaultDialog(QDialog):
 class OpenVaultDialog(QDialog):
     """Dialog for selecting, adding, and managing vaults."""
 
-    def __init__(self, parent=None, current_vault: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        parent=None,
+        current_vault: Optional[str] = None,
+        vaults: Optional[list[dict[str, str]]] = None,
+        select_id: Optional[str] = None,
+        on_add_remote=None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Open Vault")
         self.setModal(True)
         self.resize(520, 520)
 
-        self.vaults: list[dict[str, str]] = config.load_known_vaults()
+        self._on_add_remote = on_add_remote
+        self.vaults: list[dict[str, str]] = vaults if vaults is not None else config.load_known_vaults()
         if not self.vaults and current_vault:
             self.vaults.append({"name": Path(current_vault).name, "path": current_vault})
         self.default_vault: Optional[str] = config.load_default_vault()
         self._selected: Optional[dict[str, str]] = None
+        self._select_id = select_id
 
         layout = QVBoxLayout(self)
         intro_row = QHBoxLayout()
@@ -122,9 +131,14 @@ class OpenVaultDialog(QDialog):
         controls = QHBoxLayout()
         self.add_btn = QPushButton("Add Vault")
         self.add_btn.clicked.connect(self._add_vault)
+        self.add_remote_btn = QPushButton("Add Remote")
+        self.add_remote_btn.clicked.connect(self._add_remote)
+        if not self._on_add_remote:
+            self.add_remote_btn.setEnabled(False)
         self.remove_btn = QPushButton("Remove Selected")
         self.remove_btn.clicked.connect(self._remove_selected)
         controls.addWidget(self.add_btn)
+        controls.addWidget(self.add_remote_btn)
         controls.addWidget(self.remove_btn)
         controls.addStretch(1)
         layout.addLayout(controls)
@@ -156,6 +170,8 @@ class OpenVaultDialog(QDialog):
     def _refresh_list(self, select_path: Optional[str] = None) -> None:
         self.list_widget.clear()
         for vault in self.vaults:
+            if "id" not in vault:
+                vault["id"] = vault.get("path")
             item = QListWidgetItem()
             item.setData(Qt.UserRole, vault)
             widget = self._build_item_widget(vault)
@@ -164,11 +180,11 @@ class OpenVaultDialog(QDialog):
             self.list_widget.setItemWidget(item, widget)
 
         if self.vaults:
-            target_path = select_path or self.vaults[0]["path"]
+            target_id = self._select_id or select_path or self.vaults[0].get("path")
             for idx in range(self.list_widget.count()):
                 item = self.list_widget.item(idx)
                 data = item.data(Qt.UserRole)
-                if data and data.get("path") == target_path:
+                if data and data.get("id") == target_id:
                     self.list_widget.setCurrentItem(item)
                     break
         self._refresh_default_combo()
@@ -179,6 +195,8 @@ class OpenVaultDialog(QDialog):
         self.default_combo.clear()
         self.default_combo.addItem("No default", None)
         for vault in self.vaults:
+            if vault.get("kind") == "remote":
+                continue
             self.default_combo.addItem(vault["name"], vault["path"])
         idx = self.default_combo.findData(self.default_vault)
         if idx != -1:
@@ -202,7 +220,7 @@ class OpenVaultDialog(QDialog):
         name_label.setFont(name_font)
         layout.addWidget(name_label)
 
-        path_label = QLabel(vault["path"])
+        path_label = QLabel(self._format_vault_path(vault))
         path_label.setWordWrap(True)
         path_font = path_label.font()
         path_font.setPointSize(max(path_font.pointSize() - 2, 8))
@@ -212,12 +230,27 @@ class OpenVaultDialog(QDialog):
 
         return container
 
+    @staticmethod
+    def _format_vault_path(vault: dict[str, str]) -> str:
+        if vault.get("kind") == "remote":
+            server = vault.get("server_url") or ""
+            display = server.replace("http://", "").replace("https://", "")
+            path = vault.get("path") or ""
+            if path and not path.startswith("/"):
+                path = f"/{path}"
+            return f"{display}{path}"
+        return vault.get("path") or ""
+
     def _on_selection_changed(self, current, previous) -> None:  # noqa: ARG002
         self._update_buttons()
 
     def _update_buttons(self) -> None:
         has_selection = self.list_widget.currentItem() is not None
-        self.remove_btn.setEnabled(has_selection)
+        can_remove = False
+        if has_selection:
+            data = self.list_widget.currentItem().data(Qt.UserRole)
+            can_remove = bool(data) and data.get("kind") != "remote"
+        self.remove_btn.setEnabled(can_remove)
         ok_button = self.button_box.button(QDialogButtonBox.Ok)
         if ok_button:
             ok_button.setEnabled(has_selection)
@@ -229,7 +262,7 @@ class OpenVaultDialog(QDialog):
         vault = item.data(Qt.UserRole)
         if not vault:
             return
-        self._selected = {"name": vault.get("name") or Path(vault["path"]).name, "path": vault["path"]}
+        self._selected = dict(vault)
         self._open_new_window = False
         self.accept()
 
@@ -240,7 +273,7 @@ class OpenVaultDialog(QDialog):
         vault = item.data(Qt.UserRole)
         if not vault:
             return
-        self._selected = {"name": vault.get("name") or Path(vault["path"]).name, "path": vault["path"]}
+        self._selected = dict(vault)
         self._open_new_window = True
         self.accept()
 
@@ -256,12 +289,24 @@ class OpenVaultDialog(QDialog):
         config.remember_vault(result["path"], result["name"])
         self._refresh_list(select_path=result["path"])
 
+    def _add_remote(self) -> None:
+        if not self._on_add_remote:
+            return
+        updated = self._on_add_remote()
+        if not updated:
+            return
+        self.vaults = updated
+        self._select_id = None
+        self._refresh_list()
+
     def _remove_selected(self) -> None:
         item = self.list_widget.currentItem()
         if not item:
             return
         vault = item.data(Qt.UserRole)
         if not vault:
+            return
+        if vault.get("kind") == "remote":
             return
         path = vault.get("path")
         self.vaults = [v for v in self.vaults if v.get("path") != path]
