@@ -6,7 +6,7 @@ set -e
 
 export ZIMX_VAULTS_ROOT="/home/grnwood/Desktop/ZimXServerVaults"
 
-uvicorn zimx.server.api:app \
+venv/bin/uvicorn zimx.server.api:app \
   --host 0.0.0.0 \
   --port 8443 \
   --ssl-keyfile dev-assets/certs/local-key.pem \
