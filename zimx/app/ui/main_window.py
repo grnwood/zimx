@@ -3775,10 +3775,20 @@ class MainWindow(QMainWindow):
             return None
         mtime_ns = info.get("mtime_ns")
         if mtime_ns is not None:
-            return {"If-Match": f"mtime:{mtime_ns}"}
+            try:
+                mtime_val = int(mtime_ns)
+            except (TypeError, ValueError):
+                mtime_val = None
+            if mtime_val is not None:
+                return {"If-Match": f"mtime:{mtime_val}"}
         rev = info.get("rev")
         if rev is not None:
-            return {"If-Match": f"rev:{rev}"}
+            try:
+                rev_val = int(rev)
+            except (TypeError, ValueError):
+                rev_val = None
+            if rev_val is not None:
+                return {"If-Match": f"rev:{rev_val}"}
         return None
 
     def _update_page_revision(self, path: str, payload: dict) -> None:
@@ -3786,7 +3796,15 @@ class MainWindow(QMainWindow):
         mtime_ns = payload.get("mtime_ns") if isinstance(payload, dict) else None
         if rev is None and mtime_ns is None:
             return
-        self._page_revisions[path] = {"rev": rev, "mtime_ns": mtime_ns}
+        try:
+            rev_val = int(rev) if rev is not None else None
+        except (TypeError, ValueError):
+            rev_val = None
+        try:
+            mtime_val = int(mtime_ns) if mtime_ns is not None else None
+        except (TypeError, ValueError):
+            mtime_val = None
+        self._page_revisions[path] = {"rev": rev_val, "mtime_ns": mtime_val}
 
     def _extract_conflict_payload(self, resp: httpx.Response) -> Optional[dict]:
         try:
@@ -3848,9 +3866,15 @@ class MainWindow(QMainWindow):
         current_rev = conflict.get("current_rev")
         current_mtime = conflict.get("current_mtime_ns")
         if current_mtime is not None:
-            headers = {"If-Match": f"mtime:{current_mtime}"}
+            try:
+                headers = {"If-Match": f"mtime:{int(current_mtime)}"}
+            except (TypeError, ValueError):
+                headers = None
         elif current_rev is not None:
-            headers = {"If-Match": f"rev:{current_rev}"}
+            try:
+                headers = {"If-Match": f"rev:{int(current_rev)}"}
+            except (TypeError, ValueError):
+                headers = None
         try:
             resp = self.http.post("/api/file/write", json={"path": path, "content": merged}, headers=headers)
             if resp.status_code == 401 and self._remote_mode:

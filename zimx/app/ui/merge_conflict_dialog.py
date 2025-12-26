@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSplitter,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -196,7 +197,7 @@ class MergeConflictDialog(QDialog):
         cursor.setPosition(end_block.position() + end_block.length() - 1, QTextCursor.KeepAnchor)
         fmt = QTextCharFormat()
         fmt.setBackground(color)
-        selection = QPlainTextEdit.ExtraSelection()
+        selection = QTextEdit.ExtraSelection()
         selection.cursor = cursor
         selection.format = fmt
         editor.setExtraSelections([selection])

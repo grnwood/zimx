@@ -783,48 +783,50 @@ def file_write(
                 )
         elif if_match.startswith("rev:"):
             if_match = if_match.split(":", 1)[1]
-        db_path = config._vault_db_path()
-        if db_path:
-            import sqlite3
-            conn = sqlite3.connect(db_path, check_same_thread=False)
-            try:
-                row = conn.execute(
-                    "SELECT rev, title FROM pages WHERE path = ?",
-                    (payload.path,)
-                ).fetchone()
-                
-                if row:
-                    current_rev = row[0] or 0
-                    try:
-                        expected_rev = int(if_match)
-                    except ValueError:
-                        conn.close()
-                        raise HTTPException(status_code=400, detail="Invalid If-Match header format")
+            db_path = config._vault_db_path()
+            if db_path:
+                import sqlite3
+                conn = sqlite3.connect(db_path, check_same_thread=False)
+                try:
+                    row = conn.execute(
+                        "SELECT rev, title FROM pages WHERE path = ?",
+                        (payload.path,)
+                    ).fetchone()
                     
-                    if current_rev != expected_rev:
-                        # Conflict: return current state
+                    if row:
+                        current_rev = row[0] or 0
                         try:
-                            current_content = files.read_file(root, payload.path)
-                        except FileAccessError:
-                            current_content = ""
-                        try:
-                            current_mtime = file_path.stat().st_mtime_ns
-                        except OSError:
-                            current_mtime = 0
+                            expected_rev = int(if_match)
+                        except ValueError:
+                            conn.close()
+                            raise HTTPException(status_code=400, detail="Invalid If-Match header format")
                         
-                        conn.close()
-                        raise HTTPException(
-                            status_code=409,
-                            detail={
-                                "error": "Conflict",
-                                "current_rev": current_rev,
-                                "current_mtime_ns": current_mtime,
-                                "current_content": current_content,
-                                "current_title": row[1]
-                            }
-                        )
-            finally:
-                conn.close()
+                        if current_rev != expected_rev:
+                            # Conflict: return current state
+                            try:
+                                current_content = files.read_file(root, payload.path)
+                            except FileAccessError:
+                                current_content = ""
+                            try:
+                                current_mtime = file_path.stat().st_mtime_ns
+                            except OSError:
+                                current_mtime = 0
+                            
+                            conn.close()
+                            raise HTTPException(
+                                status_code=409,
+                                detail={
+                                    "error": "Conflict",
+                                    "current_rev": current_rev,
+                                    "current_mtime_ns": current_mtime,
+                                    "current_content": current_content,
+                                    "current_title": row[1]
+                                }
+                            )
+                finally:
+                    conn.close()
+        else:
+            raise HTTPException(status_code=400, detail="Invalid If-Match header format")
     
     try:
         files.write_file(root, payload.path, payload.content)
