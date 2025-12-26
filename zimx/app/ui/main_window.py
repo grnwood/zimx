@@ -5131,16 +5131,19 @@ class MainWindow(QMainWindow):
         if not remote_path:
             return
         try:
-            resp = self.http.post("/api/file/read", json={"path": remote_path})
+            resp = self.http.get("/api/file/raw", params={"path": remote_path})
             if resp.status_code == 401 and self._remote_mode:
                 if self._prompt_remote_login():
-                    resp = self.http.post("/api/file/read", json={"path": remote_path})
+                    resp = self.http.get("/api/file/raw", params={"path": remote_path})
             resp.raise_for_status()
         except httpx.HTTPError as exc:
             self._alert_api_error(exc, f"Failed to load {remote_path}")
             return
-        payload = resp.json()
-        content = payload.get("content", "")
+        try:
+            content = resp.content.decode("utf-8")
+        except Exception as exc:
+            self._alert(f"Failed to decode {remote_path}: {exc}")
+            return
         cache_root = self._ensure_remote_cache_root()
         cache_path = (cache_root / "attachments" / remote_path.lstrip("/")).resolve()
         try:
