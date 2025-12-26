@@ -120,6 +120,15 @@ def _qt_message_handler(mode: QtMsgType, context, message: str) -> None:
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ZimX desktop entry point.")
     parser.add_argument("--vault", help="Path to a vault to open at startup.")
+    parser.add_argument(
+        "--vault-ref",
+        help="Encoded vault reference, e.g. remote::https://host:port::/vault/path",
+    )
+    parser.add_argument(
+        "--select-vault",
+        action="store_true",
+        help="Show the vault picker on startup instead of auto-opening the default vault.",
+    )
     parser.add_argument("--port", type=int, help="Preferred API port (0 = auto-select).")
     parser.add_argument("--host", default=os.getenv("ZIMX_HOST", "127.0.0.1"), help="Host/interface to bind the API server.")
     parser.add_argument("--webserver", nargs="?", const="127.0.0.1:0", help="Start web server mode [bind:port]. Default: 127.0.0.1:0")
@@ -442,9 +451,9 @@ def main() -> None:
     windows = getattr(qt_app, "_zimx_windows", [])
     windows.append(window)
     qt_app._zimx_windows = windows
-    vault_hint = args.vault or _parse_vault_arg(sys.argv[1:])
+    vault_hint = args.vault_ref or args.vault or _parse_vault_arg(sys.argv[1:])
     try:
-        if window.startup(vault_hint=vault_hint):
+        if window.startup(vault_hint=vault_hint, force_select=args.select_vault):
             window.show()
             _diag("Main window shown; entering Qt event loop.")
             rc = qt_app.exec()

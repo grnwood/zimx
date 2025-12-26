@@ -1626,9 +1626,20 @@ class MainWindow(QMainWindow):
             return
         self.editor.search_replace_all(search_query, replacement, case_sensitive=case_sensitive)
 
-    def startup(self, vault_hint: Optional[str] = None) -> bool:
+    def startup(self, vault_hint: Optional[str] = None, force_select: bool = False) -> bool:
         """Handle initial vault selection before the window is shown."""
+        if force_select:
+            return self._select_vault(startup=True)
         default_vault = vault_hint or config.load_default_vault()
+        if default_vault:
+            kind, server_url, path = self._decode_vault_ref(default_vault)
+            if kind == "remote" and server_url and path:
+                verify_ssl = self._remote_verify_ssl(server_url)
+                self._switch_api_base(server_url, is_remote=True, verify_tls=verify_ssl)
+                if self._set_vault(path):
+                    QTimer.singleShot(100, self._auto_load_initial_file)
+                    return True
+                return self._select_vault(startup=True)
         if default_vault:
             if self._set_vault(default_vault):
                 QTimer.singleShot(100, self._auto_load_initial_file)
@@ -1698,6 +1709,19 @@ class MainWindow(QMainWindow):
 
     def _encode_remote_ref(self, server_url: str, path: str) -> str:
         return f"remote::{server_url}::{path}"
+
+    def _remote_verify_ssl(self, server_url: str) -> bool:
+        server_key = self._server_key_for_url(server_url)
+        for entry in config.load_remote_servers():
+            host = entry.get("host")
+            port = entry.get("port")
+            scheme = entry.get("scheme") or "http"
+            if not host or not port:
+                continue
+            candidate = f"{scheme}://{host}:{port}"
+            if self._server_key_for_url(candidate) == server_key:
+                return bool(entry.get("verify_ssl", True))
+        return True
 
     def _add_remote_server(self) -> Optional[list[dict[str, str]]]:
         """Prompt for a remote server and verify it before adding."""
@@ -1787,8 +1811,14 @@ class MainWindow(QMainWindow):
             return False
         if spawn_new_process or dialog.selected_vault_new_window():
             if selection.get("kind") == "remote":
-                self._launch_new_window()
-                self.statusBar().showMessage("Opened new window. Select the remote vault there.", 4000)
+                server_url = selection.get("server_url")
+                path = selection.get("path")
+                if server_url and path:
+                    self._launch_remote_vault_process(server_url, path)
+                    self.statusBar().showMessage("Opened remote vault in a new window.", 4000)
+                else:
+                    self._launch_new_window(select_vault=True)
+                    self.statusBar().showMessage("Opened new window. Select the remote vault there.", 4000)
             else:
                 self._launch_vault_process(selection["path"])
             return True
@@ -1805,11 +1835,13 @@ class MainWindow(QMainWindow):
             return True
         return False
 
-    def _launch_new_window(self) -> None:
+    def _launch_new_window(self, select_vault: bool = False) -> None:
         """Spawn a fresh ZimX process so it gets its own API server and vault."""
         try:
             cmd = self._build_launch_command()
-            if self.vault_root:
+            if select_vault:
+                cmd.append("--select-vault")
+            if self.vault_root and not select_vault:
                 cmd.extend(["--vault", self.vault_root])
             # Ask the new process to pick an ephemeral port to avoid clashes
             cmd.extend(["--port", "0"])
@@ -1817,6 +1849,17 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Launching new window...", 2000)
         except Exception as exc:  # pragma: no cover - UI path
             self._alert(f"Failed to launch new window: {exc}")
+
+    def _launch_remote_vault_process(self, server_url: str, path: str) -> None:
+        """Launch a new ZimX process and open the given remote vault."""
+        try:
+            cmd = self._build_launch_command()
+            cmd.extend(["--vault-ref", self._encode_remote_ref(server_url, path)])
+            cmd.extend(["--port", "0"])
+            subprocess.Popen(cmd, start_new_session=True)
+            self.statusBar().showMessage("Opening remote vault in a new window...", 3000)
+        except Exception as exc:
+            self._alert(f"Failed to open remote vault in new window: {exc}")
 
     def _launch_vault_process(self, vault_path: str) -> None:
         """Launch a new ZimX process targeting the given vault."""
