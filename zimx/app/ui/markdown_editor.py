@@ -3,12 +3,25 @@ from __future__ import annotations
 import logging
 import os
 import re
+import itertools
 from pathlib import Path
 from typing import Optional, Callable
 import httpx
 from html.parser import HTMLParser
 
-from PySide6.QtCore import QEvent, QMimeData, Qt, QRegularExpression, Signal, QUrl, QPoint, QTimer, QSignalBlocker
+from PySide6.QtCore import (
+    QBuffer,
+    QByteArray,
+    QEvent,
+    QMimeData,
+    Qt,
+    QRegularExpression,
+    Signal,
+    QUrl,
+    QPoint,
+    QTimer,
+    QSignalBlocker,
+)
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -2089,6 +2102,14 @@ class MarkdownEditor(QTextEdit):
         if source.hasImage() and self._vault_root and self._current_path:
             image = source.imageData()
             if isinstance(image, QImage):
+                if self._remote_mode:
+                    filename = self._next_remote_paste_image_name()
+                    payload = self._encode_image_png(image)
+                    if filename and payload and self._upload_remote_bytes(filename, payload):
+                        self._cache_remote_bytes(filename, payload)
+                        self._insert_image_from_path(filename, alt=Path(filename).stem)
+                        self.imageSaved.emit(filename)
+                        return
                 saved = self._save_image(image)
                 if saved:
                     self._insert_image_from_path(saved.name, alt=saved.stem)
@@ -2257,6 +2278,143 @@ class MarkdownEditor(QTextEdit):
         if image.save(str(candidate), "PNG"):
             return candidate
         return None
+
+    def _encode_image_png(self, image: QImage) -> Optional[bytes]:
+        data = QByteArray()
+        buffer = QBuffer(data)
+        if not buffer.open(QBuffer.WriteOnly):
+            return None
+        try:
+            if not image.save(buffer, "PNG"):
+                return None
+        finally:
+            buffer.close()
+        return bytes(data)
+
+    def _remote_page_key(self) -> Optional[str]:
+        if not self._current_path:
+            return None
+        if self._current_path.startswith("/"):
+            return self._current_path
+        return f"/{self._current_path}"
+
+    def _list_remote_attachment_names(self) -> set[str]:
+        if not self._http_client:
+            return set()
+        page_key = self._remote_page_key()
+        if not page_key:
+            return set()
+        try:
+            resp = self._http_client.get("/files/", params={"page_path": page_key})
+            if resp.status_code == 401 and self._auth_prompt:
+                if self._auth_prompt():
+                    resp = self._http_client.get("/files/", params={"page_path": page_key})
+            resp.raise_for_status()
+            payload = resp.json()
+            attachments = payload.get("attachments", [])
+        except httpx.HTTPError:
+            return set()
+        names: set[str] = set()
+        if isinstance(attachments, list):
+            for entry in attachments:
+                if not isinstance(entry, dict):
+                    continue
+                attachment_path = entry.get("attachment_path") or entry.get("stored_path")
+                if attachment_path:
+                    names.add(Path(str(attachment_path)).name)
+        return names
+
+    def _unique_remote_name(self, desired: str) -> str:
+        existing = self._list_remote_attachment_names()
+        if desired not in existing:
+            return desired
+        base = Path(desired)
+        for idx in itertools.count(1):
+            candidate = f"{base.stem} ({idx}){base.suffix}"
+            if candidate not in existing:
+                return candidate
+        return desired
+
+    def _next_remote_paste_image_name(self) -> Optional[str]:
+        existing = self._list_remote_attachment_names()
+        pattern = re.compile(r"^paste_image_(\d{3})\.png$", re.IGNORECASE)
+        highest = 0
+        for name in existing:
+            match = pattern.match(name)
+            if match:
+                try:
+                    highest = max(highest, int(match.group(1)))
+                except ValueError:
+                    continue
+        return f"paste_image_{highest + 1:03d}.png"
+
+    def _upload_remote_bytes(self, filename: str, payload: bytes) -> bool:
+        if not self._http_client:
+            return False
+        page_key = self._remote_page_key()
+        if not page_key:
+            return False
+        try:
+            resp = self._http_client.post(
+                "/files/attach",
+                data={"page_path": page_key},
+                files={"files": (filename, payload, "application/octet-stream")},
+            )
+            if resp.status_code == 401 and self._auth_prompt:
+                if self._auth_prompt():
+                    resp = self._http_client.post(
+                        "/files/attach",
+                        data={"page_path": page_key},
+                        files={"files": (filename, payload, "application/octet-stream")},
+                    )
+            resp.raise_for_status()
+            return True
+        except httpx.HTTPError:
+            return False
+
+    def _upload_remote_file(self, filename: str, file_path: Path) -> bool:
+        if not self._http_client:
+            return False
+        page_key = self._remote_page_key()
+        if not page_key:
+            return False
+        try:
+            with file_path.open("rb") as handle:
+                resp = self._http_client.post(
+                    "/files/attach",
+                    data={"page_path": page_key},
+                    files={"files": (filename, handle, "application/octet-stream")},
+                )
+                if resp.status_code == 401 and self._auth_prompt:
+                    if self._auth_prompt():
+                        try:
+                            handle.seek(0)
+                        except OSError:
+                            pass
+                        resp = self._http_client.post(
+                            "/files/attach",
+                            data={"page_path": page_key},
+                            files={"files": (filename, handle, "application/octet-stream")},
+                        )
+                resp.raise_for_status()
+            return True
+        except httpx.HTTPError:
+            return False
+        except OSError:
+            return False
+
+    def _cache_remote_bytes(self, raw_path: str, payload: bytes) -> None:
+        if not self._remote_cache_root:
+            return
+        virtual_path = self._virtual_image_path(raw_path)
+        if not virtual_path:
+            return
+        cache_path = (self._remote_cache_root / "attachments" / virtual_path.lstrip("/")).resolve()
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_bytes(payload)
+        except OSError:
+            return
     
     
     # (Removed old _copy_link_to_location; newer implementation exists later in file)
@@ -3326,6 +3484,27 @@ class MarkdownEditor(QTextEdit):
         
         if file_path and file_path.exists() and file_path.is_file():
             print(f"[Drop] Processing file: {file_path}")
+            if self._remote_mode:
+                upload_name = self._unique_remote_name(file_path.name)
+                if file_path.suffix.lower() in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg']:
+                    payload = file_path.read_bytes()
+                    if self._upload_remote_bytes(upload_name, payload):
+                        self._cache_remote_bytes(upload_name, payload)
+                        self._insert_image_from_path(upload_name, alt=Path(upload_name).stem)
+                        event.acceptProposedAction()
+                        if not dropped_path_text:
+                            self.attachmentDropped.emit(upload_name)
+                        return
+                else:
+                    if self._upload_remote_file(upload_name, file_path):
+                        cursor = self.cursorForPosition(event.pos())
+                        self.setTextCursor(cursor)
+                        link_text = f"[{upload_name}](./{upload_name})"
+                        cursor.insertText(link_text)
+                        event.acceptProposedAction()
+                        if not dropped_path_text:
+                            self.attachmentDropped.emit(upload_name)
+                        return
             # Check if it's an image
             if file_path.suffix.lower() in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg']:
                 # Insert as image

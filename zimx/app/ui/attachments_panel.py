@@ -306,6 +306,32 @@ class AttachmentsPanel(QWidget):
             print(f"[PageLoadAndRender] attachments refresh remote total={(time.perf_counter()-t0)*1000:.1f}ms")
         self._update_remove_button_state()
 
+    def _remote_attachment_names(self) -> set[str]:
+        if not self._http_client:
+            return set()
+        page_key = self._current_page_key()
+        if not page_key:
+            return set()
+        try:
+            resp = self._http_client.get("/files/", params={"page_path": page_key})
+            if resp.status_code == 401 and self._auth_prompt:
+                if self._auth_prompt():
+                    resp = self._http_client.get("/files/", params={"page_path": page_key})
+            resp.raise_for_status()
+            payload = resp.json()
+            attachments = payload.get("attachments", [])
+        except httpx.HTTPError:
+            return set()
+        names: set[str] = set()
+        if isinstance(attachments, list):
+            for entry in attachments:
+                if not isinstance(entry, dict):
+                    continue
+                attachment_path = entry.get("attachment_path") or entry.get("stored_path")
+                if attachment_path:
+                    names.add(Path(str(attachment_path)).name)
+        return names
+
     def _add_attachments(self) -> None:
         """Prompt user to add attachments via the OS file picker."""
         if not self.current_page_path:
@@ -616,46 +642,74 @@ class AttachmentsPanel(QWidget):
 
     def _create_new_plantuml(self) -> None:
         """Create a new .puml file in the attachments folder."""
-        if self._remote_mode:
-            QMessageBox.information(self, "Not Available", "PlantUML creation is not available for remote attachments.")
-            return
         if not self.current_page_path:
             return
-        
-        page_folder = self.current_page_path.parent
-        if not page_folder.exists() or not page_folder.is_dir():
-            return
-        
+
         # Prompt user for file name
         name, ok = QInputDialog.getText(
             self,
             "New PlantUML Diagram",
             "Enter diagram name (without .puml extension):",
-            text="diagram"
+            text="diagram",
         )
-        
+
         if not ok or not name.strip():
             return
-        
-        # Sanitize the name
+
         name = name.strip()
         if not name:
             return
-        
-        # Add .puml extension if not present
+
         if not name.lower().endswith(".puml"):
             name = name + ".puml"
-        
-        # Create the file path
+
+        if self._remote_mode:
+            if not self._http_client:
+                return
+            page_key = self._current_page_key()
+            if not page_key:
+                return
+            if name in self._remote_attachment_names():
+                QMessageBox.warning(self, "File Exists", f"File {name} already exists.")
+                return
+            template = """@startuml
+' PlantUML diagram
+' https://plantuml.com/
+
+' Add your diagram here
+
+@enduml
+"""
+            try:
+                resp = self._http_client.post(
+                    "/files/attach",
+                    data={"page_path": page_key},
+                    files={"files": (name, template.encode("utf-8"), "text/plain")},
+                )
+                if resp.status_code == 401 and self._auth_prompt:
+                    if self._auth_prompt():
+                        resp = self._http_client.post(
+                            "/files/attach",
+                            data={"page_path": page_key},
+                            files={"files": (name, template.encode("utf-8"), "text/plain")},
+                        )
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                QMessageBox.critical(self, "Error", f"Failed to create file: {exc}")
+                return
+            self._refresh_attachments()
+            return
+
+        page_folder = self.current_page_path.parent
+        if not page_folder.exists() or not page_folder.is_dir():
+            return
+
         file_path = page_folder / name
-        
-        # Check if file already exists
+
         if file_path.exists():
-            from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "File Exists", f"File {name} already exists.")
             return
-        
-        # Create empty PlantUML file with basic template
+
         template = """@startuml
 ' PlantUML diagram
 ' https://plantuml.com/
