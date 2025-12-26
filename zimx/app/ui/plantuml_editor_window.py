@@ -637,10 +637,11 @@ def _generate_error_svg(error_msg: str, line_num: int = 0) -> str:
 class PlantUMLEditorWindow(QMainWindow):
     """Non-modal editor window for PlantUML diagrams with split editor/preview."""
 
-    def __init__(self, file_path: str, parent=None) -> None:
+    def __init__(self, file_path: str, parent=None, on_save=None) -> None:
         super().__init__(parent)
         
         self.file_path = Path(file_path)
+        self._on_save = on_save
         self.renderer = PlantUMLRenderer()
         self._ai_prompt_history: list[str] = []
         self._vi_enabled: bool = config.load_vi_mode_enabled()
@@ -1818,6 +1819,11 @@ class PlantUMLEditorWindow(QMainWindow):
         """Save editor content to file."""
         try:
             content = self.editor.toPlainText()
+            if self._on_save is not None:
+                ok, message = self._on_save(content)
+                if not ok:
+                    QMessageBox.critical(self, "Error", message or "Failed to save file.")
+                    return
             self.file_path.write_text(content, encoding="utf-8")
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to save file: {exc}")

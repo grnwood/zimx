@@ -58,7 +58,7 @@ class AttachmentsPanel(QWidget):
     """Panel showing attachments (files) in the current page's folder."""
     
     # Signal emitted when user wants to open a .puml file in the PlantUML editor
-    plantumlEditorRequested = Signal(str)  # file_path
+    plantumlEditorRequested = Signal(object)  # file_path or payload
 
     def __init__(
         self,
@@ -604,7 +604,7 @@ class AttachmentsPanel(QWidget):
             if not rel_path or not self._api_base:
                 return
             if str(rel_path).lower().endswith(".puml"):
-                QMessageBox.information(self, "Not Available", "PlantUML editor is not available for remote attachments.")
+                self.plantumlEditorRequested.emit({"kind": "remote", "path": str(rel_path)})
                 return
             try:
                 from urllib.parse import quote

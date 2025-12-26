@@ -764,6 +764,7 @@ class MainWindow(QMainWindow):
         self.page_history: list[str] = []
         self.history_index: int = -1
         self._page_revisions: dict[str, dict[str, int | None]] = {}
+        self._merge_dialog_open = False
         # Guard to suppress auto-open on tree selection during programmatic navigation
         self._suspend_selection_open: bool = False
         # Remember cursor positions for history navigation
@@ -3855,13 +3856,19 @@ class MainWindow(QMainWindow):
         conflict: dict,
         auto: bool,
     ) -> bool:
+        if self._merge_dialog_open:
+            return False
         remote_content = conflict.get("current_content", "")
         dialog = MergeConflictDialog(local_content, remote_content, path, parent=self)
-        if dialog.exec() != QDialog.Accepted:
-            return False
-        merged = dialog.merged_text()
-        if merged is None:
-            return False
+        self._merge_dialog_open = True
+        try:
+            if dialog.exec() != QDialog.Accepted:
+                return False
+            merged = dialog.merged_text()
+            if merged is None:
+                return False
+        finally:
+            self._merge_dialog_open = False
         headers = None
         current_rev = conflict.get("current_rev")
         current_mtime = conflict.get("current_mtime_ns")
@@ -3881,9 +3888,9 @@ class MainWindow(QMainWindow):
                 if self._prompt_remote_login():
                     resp = self.http.post("/api/file/write", json={"path": path, "content": merged}, headers=headers)
             if resp.status_code == 409:
-                conflict_payload = self._extract_conflict_payload(resp)
-                if conflict_payload:
-                    return self._resolve_conflict_and_save(path, merged, conflict_payload, auto)
+                if not auto:
+                    self._alert("Save failed: the server changed again. Please retry.")
+                return False
             resp.raise_for_status()
         except httpx.HTTPError as exc:
             if not auto:
@@ -3903,6 +3910,8 @@ class MainWindow(QMainWindow):
     def _save_current_file(self, auto: bool = False) -> None:
         if getattr(self, "_heading_picker_active", False):
             # Skip saves triggered while the heading picker popup is active (vi 't')
+            return
+        if self._merge_dialog_open:
             return
         if self._suspend_autosave:
             self._debug("Autosave suppressed (suspend flag set).")
