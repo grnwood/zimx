@@ -3773,12 +3773,12 @@ class MainWindow(QMainWindow):
         info = self._page_revisions.get(path)
         if not info:
             return None
-        rev = info.get("rev")
-        if rev is not None:
-            return {"If-Match": f"rev:{rev}"}
         mtime_ns = info.get("mtime_ns")
         if mtime_ns is not None:
             return {"If-Match": f"mtime:{mtime_ns}"}
+        rev = info.get("rev")
+        if rev is not None:
+            return {"If-Match": f"rev:{rev}"}
         return None
 
     def _update_page_revision(self, path: str, payload: dict) -> None:
@@ -3847,10 +3847,10 @@ class MainWindow(QMainWindow):
         headers = None
         current_rev = conflict.get("current_rev")
         current_mtime = conflict.get("current_mtime_ns")
-        if current_rev is not None:
-            headers = {"If-Match": f"rev:{current_rev}"}
-        elif current_mtime is not None:
+        if current_mtime is not None:
             headers = {"If-Match": f"mtime:{current_mtime}"}
+        elif current_rev is not None:
+            headers = {"If-Match": f"rev:{current_rev}"}
         try:
             resp = self.http.post("/api/file/write", json={"path": path, "content": merged}, headers=headers)
             if resp.status_code == 401 and self._remote_mode:
