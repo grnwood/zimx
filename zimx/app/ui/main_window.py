@@ -360,6 +360,7 @@ from .heading_utils import heading_slug
 from .preferences_dialog import PreferencesDialog
 from .insert_link_dialog import InsertLinkDialog
 from .new_page_dialog import NewPageDialog
+from .merge_conflict_dialog import MergeConflictDialog
 from .path_utils import colon_to_path, path_to_colon, ensure_root_colon_link
 from .date_insert_dialog import DateInsertDialog
 from .open_vault_dialog import OpenVaultDialog
@@ -762,6 +763,7 @@ class MainWindow(QMainWindow):
         # Page navigation history
         self.page_history: list[str] = []
         self.history_index: int = -1
+        self._page_revisions: dict[str, dict[str, int | None]] = {}
         # Guard to suppress auto-open on tree selection during programmatic navigation
         self._suspend_selection_open: bool = False
         # Remember cursor positions for history navigation
@@ -3617,7 +3619,12 @@ class MainWindow(QMainWindow):
                 tracer.mark(f"api read failed ({exc})")
             self._alert_api_error(exc, f"Failed to open {path}")
             return
-        content = resp.json().get("content", "")
+        payload = resp.json()
+        content = payload.get("content", "")
+        rev = payload.get("rev")
+        mtime_ns = payload.get("mtime_ns")
+        if path:
+            self._page_revisions[path] = {"rev": rev, "mtime_ns": mtime_ns}
         if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
             print(f"[DEBUG load] Loaded from API: {len(content)} chars, ends_with_newline={content.endswith('\\n')}, last_20_chars={repr(content[-20:])}")
         if tracer:
@@ -3760,6 +3767,115 @@ class MainWindow(QMainWindow):
                 ),
             )
 
+    def _if_match_headers(self, path: str) -> Optional[dict[str, str]]:
+        if not self._remote_mode:
+            return None
+        info = self._page_revisions.get(path)
+        if not info:
+            return None
+        rev = info.get("rev")
+        if rev is not None:
+            return {"If-Match": f"rev:{rev}"}
+        mtime_ns = info.get("mtime_ns")
+        if mtime_ns is not None:
+            return {"If-Match": f"mtime:{mtime_ns}"}
+        return None
+
+    def _update_page_revision(self, path: str, payload: dict) -> None:
+        rev = payload.get("rev") if isinstance(payload, dict) else None
+        mtime_ns = payload.get("mtime_ns") if isinstance(payload, dict) else None
+        if rev is None and mtime_ns is None:
+            return
+        self._page_revisions[path] = {"rev": rev, "mtime_ns": mtime_ns}
+
+    def _extract_conflict_payload(self, resp: httpx.Response) -> Optional[dict]:
+        try:
+            data = resp.json()
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        detail = data.get("detail")
+        if isinstance(detail, dict) and "current_content" in detail:
+            return detail
+        return None
+
+    def _finalize_save(self, path: str, content: str, resp_payload: dict, message: str) -> None:
+        if config.has_active_vault():
+            indexer.index_page(path, content)
+            self.right_panel.refresh_tasks()
+            self.right_panel.refresh_links(path)
+        self._last_saved_content = content
+        self._update_page_revision(path, resp_payload)
+        try:
+            self._history_cursor_positions[path] = self.editor.textCursor().position()
+            self._persist_recent_history()
+        except Exception:
+            pass
+        try:
+            self.editor.document().setModified(False)
+        except Exception:
+            pass
+        self._dirty_flag = False
+        self._update_dirty_indicator()
+
+        was_virtual = path in self.virtual_pages
+        if was_virtual:
+            self.virtual_pages.discard(path)
+            self.virtual_page_original_content.pop(path, None)
+            self._populate_vault_tree()
+            self.right_panel.refresh_calendar()
+
+        self.autosave_timer.stop()
+        display_path = path_to_colon(path) if path else ""
+        self.statusBar().showMessage(f"{message} {display_path}", 2000 if "Auto" in message else 4000)
+
+    def _resolve_conflict_and_save(
+        self,
+        path: str,
+        local_content: str,
+        conflict: dict,
+        auto: bool,
+    ) -> bool:
+        remote_content = conflict.get("current_content", "")
+        dialog = MergeConflictDialog(local_content, remote_content, path, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return False
+        merged = dialog.merged_text()
+        if merged is None:
+            return False
+        headers = None
+        current_rev = conflict.get("current_rev")
+        current_mtime = conflict.get("current_mtime_ns")
+        if current_rev is not None:
+            headers = {"If-Match": f"rev:{current_rev}"}
+        elif current_mtime is not None:
+            headers = {"If-Match": f"mtime:{current_mtime}"}
+        try:
+            resp = self.http.post("/api/file/write", json={"path": path, "content": merged}, headers=headers)
+            if resp.status_code == 401 and self._remote_mode:
+                if self._prompt_remote_login():
+                    resp = self.http.post("/api/file/write", json={"path": path, "content": merged}, headers=headers)
+            if resp.status_code == 409:
+                conflict_payload = self._extract_conflict_payload(resp)
+                if conflict_payload:
+                    return self._resolve_conflict_and_save(path, merged, conflict_payload, auto)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            if not auto:
+                self._alert_api_error(exc, f"Failed to save {path}")
+            return False
+        self._suspend_autosave = True
+        self._suspend_dirty_tracking = True
+        try:
+            self.editor.set_markdown(merged)
+        finally:
+            self._suspend_dirty_tracking = False
+            self._suspend_autosave = False
+        message = "Auto-saved" if auto else "Merged and saved"
+        self._finalize_save(path, merged, resp.json(), message)
+        return True
+
     def _save_current_file(self, auto: bool = False) -> None:
         if getattr(self, "_heading_picker_active", False):
             # Skip saves triggered while the heading picker popup is active (vi 't')
@@ -3835,49 +3951,26 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         
-        # Ensure the first non-empty line is a page title; if missing, inject one using leaf name
         payload = {"path": self.current_path, "content": payload_content}
+        headers = self._if_match_headers(self.current_path)
         try:
-            resp = self.http.post("/api/file/write", json=payload)
+            resp = self.http.post("/api/file/write", json=payload, headers=headers)
             if resp.status_code == 401 and self._remote_mode:
                 if self._prompt_remote_login():
-                    resp = self.http.post("/api/file/write", json=payload)
+                    resp = self.http.post("/api/file/write", json=payload, headers=headers)
+            if resp.status_code == 409:
+                conflict_payload = self._extract_conflict_payload(resp)
+                if conflict_payload:
+                    self._resolve_conflict_and_save(self.current_path, payload_content, conflict_payload, auto)
+                    return
             resp.raise_for_status()
         except httpx.HTTPError as exc:
             if not auto:
                 self._alert_api_error(exc, f"Failed to save {self.current_path}")
             return
-        
-        if config.has_active_vault():
-            indexer.index_page(self.current_path, payload["content"])
-            self.right_panel.refresh_tasks()
-            self.right_panel.refresh_links(self.current_path)
-        self._last_saved_content = payload["content"]
-        # Persist latest cursor position along with the save so reloads restore it
-        try:
-            self._history_cursor_positions[self.current_path] = self.editor.textCursor().position()
-            self._persist_recent_history()
-        except Exception:
-            pass
-        try:
-            self.editor.document().setModified(False)
-        except Exception:
-            pass
-        self._dirty_flag = False
-        self._update_dirty_indicator()
-        
-        # Mark page as saved (remove from virtual pages)
-        was_virtual = self.current_path in self.virtual_pages
-        if was_virtual:
-            self.virtual_pages.discard(self.current_path)
-            self.virtual_page_original_content.pop(self.current_path, None)
-            self._populate_vault_tree()  # Refresh to remove italics
-            self.right_panel.refresh_calendar()  # Update calendar bold dates
-        
-        self.autosave_timer.stop()
+
         message = "Auto-saved" if auto else "Saved"
-        display_path = path_to_colon(self.current_path) if self.current_path else ""
-        self.statusBar().showMessage(f"{message} {display_path}", 2000 if auto else 4000)
+        self._finalize_save(self.current_path, payload_content, resp.json(), message)
         # Refresh any popup editors on the same page
         try:
             for win in list(getattr(self, "_page_windows", [])):
