@@ -38,11 +38,27 @@ class MergeConflictDialog(QDialog):
         self._diffs: list[tuple[str, int, int, int, int]] = [
             opcode for opcode in self._opcodes if opcode[0] != "equal"
         ]
-        self._decisions: list[Optional[bool]] = [None] * len(self._diffs)
+        self._decisions: list[Optional[str]] = [None] * len(self._diffs)
         self._current_diff = 0 if self._diffs else -1
         self._merged_text = self._local_text
         self._merged_ranges: dict[int, tuple[int, int]] = {}
 
+        self.setStyleSheet(
+            """
+            QDialog { background-color: #0b0b0b; }
+            QLabel { color: #e8e8e8; }
+            QPushButton {
+                background-color: #1a1a1a;
+                color: #e8e8e8;
+                border: 1px solid #2a2a2a;
+                padding: 6px 12px;
+            }
+            QPushButton:disabled {
+                color: #777;
+                border-color: #222;
+            }
+            """
+        )
         layout = QVBoxLayout(self)
         title = QLabel(f"Resolve conflict for {path}" if path else "Resolve conflict")
         title.setStyleSheet("font-weight: bold;")
@@ -56,6 +72,9 @@ class MergeConflictDialog(QDialog):
         left_label = QLabel("Current (local)")
         self._left_edit = QPlainTextEdit()
         self._left_edit.setReadOnly(True)
+        self._left_edit.setStyleSheet(
+            "QPlainTextEdit { background-color: #101010; color: #e6e6e6; border: 1px solid #222; }"
+        )
         left_layout.addWidget(left_label)
         left_layout.addWidget(self._left_edit)
 
@@ -75,6 +94,9 @@ class MergeConflictDialog(QDialog):
         right_label = QLabel("Server revision")
         self._right_edit = QPlainTextEdit()
         self._right_edit.setReadOnly(True)
+        self._right_edit.setStyleSheet(
+            "QPlainTextEdit { background-color: #101010; color: #e6e6e6; border: 1px solid #222; }"
+        )
         right_layout.addWidget(right_label)
         right_layout.addWidget(self._right_edit)
 
@@ -101,8 +123,11 @@ class MergeConflictDialog(QDialog):
         self._reject_button.clicked.connect(self._reject_current_change)
         self._accept_button = QPushButton("Accept Change")
         self._accept_button.clicked.connect(self._accept_current_change)
+        self._accept_both_button = QPushButton("Accept Both")
+        self._accept_both_button.clicked.connect(self._accept_both_change)
         nav_layout.addWidget(self._reject_button)
         nav_layout.addWidget(self._accept_button)
+        nav_layout.addWidget(self._accept_both_button)
         layout.addLayout(nav_layout)
 
         action_layout = QHBoxLayout()
@@ -139,8 +164,10 @@ class MergeConflictDialog(QDialog):
                 line_cursor += i2 - i1
                 continue
             decision = self._decisions[diff_index]
-            if decision is True:
+            if decision == "remote":
                 segment = self._remote_lines[j1:j2]
+            elif decision == "both":
+                segment = self._local_lines[i1:i2] + self._remote_lines[j1:j2]
             else:
                 segment = self._local_lines[i1:i2]
             merged_ranges[diff_index] = (line_cursor, line_cursor + len(segment))
@@ -178,8 +205,8 @@ class MergeConflictDialog(QDialog):
             return
         tag, i1, i2, j1, j2 = self._diffs[self._current_diff]
         left_range = self._merged_ranges.get(self._current_diff, (i1, i2))
-        self._highlight_range(self._left_edit, left_range[0], left_range[1], QColor("#fff3b0"))
-        self._highlight_range(self._right_edit, j1, j2, QColor("#b7e4c7"))
+        self._highlight_range(self._left_edit, left_range[0], left_range[1], QColor("#f6d365"))
+        self._highlight_range(self._right_edit, j1, j2, QColor("#a8dadc"))
 
     def _highlight_range(self, editor: QPlainTextEdit, start: int, end: int, color: QColor) -> None:
         doc = editor.document()
@@ -197,6 +224,7 @@ class MergeConflictDialog(QDialog):
         cursor.setPosition(end_block.position() + end_block.length() - 1, QTextCursor.KeepAnchor)
         fmt = QTextCharFormat()
         fmt.setBackground(color)
+        fmt.setForeground(QColor("#111111"))
         selection = QTextEdit.ExtraSelection()
         selection.cursor = cursor
         selection.format = fmt
@@ -220,13 +248,19 @@ class MergeConflictDialog(QDialog):
     def _accept_current_change(self) -> None:
         if not self._diffs or self._current_diff < 0:
             return
-        self._decisions[self._current_diff] = True
+        self._decisions[self._current_diff] = "remote"
         self._refresh_views()
 
     def _reject_current_change(self) -> None:
         if not self._diffs or self._current_diff < 0:
             return
-        self._decisions[self._current_diff] = False
+        self._decisions[self._current_diff] = "local"
+        self._refresh_views()
+
+    def _accept_both_change(self) -> None:
+        if not self._diffs or self._current_diff < 0:
+            return
+        self._decisions[self._current_diff] = "both"
         self._refresh_views()
 
     def _accept_merge(self) -> None:
