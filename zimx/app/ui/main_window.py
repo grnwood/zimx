@@ -1014,6 +1014,9 @@ class MainWindow(QMainWindow):
         self.right_panel.openLinkWindowRequested.connect(self._open_link_panel_window)
         self.right_panel.openAiWindowRequested.connect(self._open_ai_chat_window)
         self.right_panel.filterClearRequested.connect(self._clear_nav_filter)
+        self.right_panel.linkBackRequested.connect(self._navigate_history_back)
+        self.right_panel.linkForwardRequested.connect(self._navigate_history_forward)
+        self.right_panel.linkHomeRequested.connect(self._go_home)
         try:
             self.right_panel.attachments_panel.plantumlEditorRequested.connect(self._open_plantuml_editor)
             print("[MainWindow] Connected PlantUML editor request signal")

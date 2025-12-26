@@ -39,6 +39,9 @@ class TabbedRightPanel(QWidget):
     filterClearRequested = Signal()
     pageAboutToBeDeleted = Signal(str)  # page about to be deleted (for editor unload)
     pageDeleted = Signal(str)  # page path deleted from calendar panel
+    linkBackRequested = Signal()
+    linkForwardRequested = Signal()
+    linkHomeRequested = Signal()
     
     def __init__(
         self,
@@ -106,6 +109,9 @@ class TabbedRightPanel(QWidget):
         self.calendar_panel.pageDeleted.connect(self.pageDeleted)
         self.link_panel.pageActivated.connect(self.linkActivated)
         self.link_panel.openInWindowRequested.connect(self.openInWindowRequested)
+        self.link_panel.backRequested.connect(self.linkBackRequested)
+        self.link_panel.forwardRequested.connect(self.linkForwardRequested)
+        self.link_panel.homeRequested.connect(self.linkHomeRequested)
         
         # Layout
         from PySide6.QtWidgets import QVBoxLayout

@@ -2490,6 +2490,11 @@ def set_active_vault(root: Optional[str]) -> None:
     _prime_page_cache()
 
 
+
+def get_active_vault() -> Optional[str]:
+    return str(_ACTIVE_ROOT) if _ACTIVE_ROOT else None
+
+
 def has_active_vault() -> bool:
     return _ACTIVE_CONN is not None
 
