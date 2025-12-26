@@ -3849,6 +3849,19 @@ class MainWindow(QMainWindow):
         display_path = path_to_colon(path) if path else ""
         self.statusBar().showMessage(f"{message} {display_path}", 2000 if "Auto" in message else 4000)
 
+    def _accept_noop_conflict(self, path: str, content: str, conflict: dict, auto: bool) -> bool:
+        remote_content = conflict.get("current_content", "")
+        if remote_content != content:
+            return False
+        print("[Conflict] 409 received, no changes; accepting remote revision.")
+        payload = {
+            "rev": conflict.get("current_rev"),
+            "mtime_ns": conflict.get("current_mtime_ns"),
+        }
+        message = "Auto-saved" if auto else "Saved"
+        self._finalize_save(path, content, payload, message)
+        return True
+
     def _resolve_conflict_and_save(
         self,
         path: str,
@@ -3888,6 +3901,9 @@ class MainWindow(QMainWindow):
                 if self._prompt_remote_login():
                     resp = self.http.post("/api/file/write", json={"path": path, "content": merged}, headers=headers)
             if resp.status_code == 409:
+                conflict_payload = self._extract_conflict_payload(resp)
+                if conflict_payload and self._accept_noop_conflict(path, merged, conflict_payload, auto):
+                    return True
                 if not auto:
                     self._alert("Save failed: the server changed again. Please retry.")
                 return False
@@ -3994,6 +4010,8 @@ class MainWindow(QMainWindow):
             if resp.status_code == 409:
                 conflict_payload = self._extract_conflict_payload(resp)
                 if conflict_payload:
+                    if self._accept_noop_conflict(self.current_path, payload_content, conflict_payload, auto):
+                        return
                     self._resolve_conflict_and_save(self.current_path, payload_content, conflict_payload, auto)
                     return
             resp.raise_for_status()
@@ -5077,16 +5095,19 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._alert(f"Failed to open editor window: {exc}")
 
-    def _open_plantuml_editor(self, file_path: str) -> None:
+    def _open_plantuml_editor(self, file_path) -> None:
         """Open a PlantUML editor window for the given .puml file."""
         if not file_path:
             return
         
         try:
             from .plantuml_editor_window import PlantUMLEditorWindow
+            if isinstance(file_path, dict) and file_path.get("kind") == "remote":
+                self._open_remote_plantuml_editor(file_path.get("path", ""), file_path.get("page_path"))
+                return
             print(f"[MainWindow] Opening PlantUML editor for: {file_path}")
             
-            window = PlantUMLEditorWindow(file_path, parent=None)
+            window = PlantUMLEditorWindow(str(file_path), parent=None)
             try:
                 window.setWindowFlag(Qt.Window, True)
                 window.setWindowFlag(Qt.Tool, False)
@@ -5095,6 +5116,77 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             # Keep a strong reference so the window isn't GC'd immediately
+            if not hasattr(self, "_plantuml_windows"):
+                self._plantuml_windows: list[QMainWindow] = []
+            self._plantuml_windows.append(window)
+            try:
+                window.destroyed.connect(lambda: self._plantuml_windows.remove(window) if window in self._plantuml_windows else None)
+            except Exception:
+                pass
+            window.show()
+        except Exception as exc:
+            self._alert(f"Failed to open PlantUML editor: {exc}")
+
+    def _open_remote_plantuml_editor(self, remote_path: str, page_key: Optional[str]) -> None:
+        if not remote_path:
+            return
+        try:
+            resp = self.http.post("/api/file/read", json={"path": remote_path})
+            if resp.status_code == 401 and self._remote_mode:
+                if self._prompt_remote_login():
+                    resp = self.http.post("/api/file/read", json={"path": remote_path})
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            self._alert_api_error(exc, f"Failed to load {remote_path}")
+            return
+        payload = resp.json()
+        content = payload.get("content", "")
+        cache_root = self._ensure_remote_cache_root()
+        cache_path = (cache_root / "attachments" / remote_path.lstrip("/")).resolve()
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            self._alert(f"Failed to cache remote file: {exc}")
+            return
+
+        def _save_remote(content_text: str):
+            if not page_key:
+                return False, "Missing page context for attachment save."
+            try:
+                write_resp = self.http.post(
+                    "/files/attach",
+                    data={"page_path": page_key},
+                    files={"files": (Path(remote_path).name, content_text.encode("utf-8"), "text/plain")},
+                )
+                if write_resp.status_code == 401 and self._remote_mode:
+                    if self._prompt_remote_login():
+                        write_resp = self.http.post(
+                            "/files/attach",
+                            data={"page_path": page_key},
+                            files={"files": (Path(remote_path).name, content_text.encode("utf-8"), "text/plain")},
+                        )
+                if write_resp.status_code == 409:
+                    return False, "Save failed: server version changed. Reopen to merge."
+                write_resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                return False, str(exc)
+            try:
+                cache_path.write_text(content_text, encoding="utf-8")
+            except Exception:
+                pass
+            return True, None
+
+        try:
+            from .plantuml_editor_window import PlantUMLEditorWindow
+            window = PlantUMLEditorWindow(str(cache_path), parent=None, on_save=_save_remote)
+            try:
+                window.setWindowFlag(Qt.Window, True)
+                window.setWindowFlag(Qt.Tool, False)
+                window.setAttribute(Qt.WA_NativeWindow, True)
+                window.setWindowModality(Qt.NonModal)
+            except Exception:
+                pass
             if not hasattr(self, "_plantuml_windows"):
                 self._plantuml_windows: list[QMainWindow] = []
             self._plantuml_windows.append(window)

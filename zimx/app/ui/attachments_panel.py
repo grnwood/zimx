@@ -604,7 +604,13 @@ class AttachmentsPanel(QWidget):
             if not rel_path or not self._api_base:
                 return
             if str(rel_path).lower().endswith(".puml"):
-                self.plantumlEditorRequested.emit({"kind": "remote", "path": str(rel_path)})
+                self.plantumlEditorRequested.emit(
+                    {
+                        "kind": "remote",
+                        "path": str(rel_path),
+                        "page_path": self._current_page_key(),
+                    }
+                )
                 return
             try:
                 from urllib.parse import quote
