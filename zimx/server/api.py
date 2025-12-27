@@ -967,6 +967,10 @@ def api_search(
         import sqlite3
         conn = sqlite3.connect(db_path, check_same_thread=False)
         results = search_index.search_pages(conn, q, subtree, limit)
+        preview = [item.get("path") for item in results[:5]]
+        print(
+            f"{_ANSI_BLUE}[API] /api/search q={q} results={len(results)} sample={preview}{_ANSI_RESET}"
+        )
         conn.close()
         return {"results": results}
     except Exception as e:

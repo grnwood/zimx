@@ -31,11 +31,19 @@ if TYPE_CHECKING:
 
 class SearchResultItem:
     """Data holder for a search result node."""
-    def __init__(self, path: str = "", snippet: str = "", is_page: bool = True, line: int = 0):
+    def __init__(
+        self,
+        path: str = "",
+        snippet: str = "",
+        is_page: bool = True,
+        line: int = 0,
+        position: int = -1,
+    ):
         self.path = path
         self.snippet = snippet
         self.is_page = is_page  # True for page nodes, False for snippet nodes
         self.line = line
+        self.position = position
         self.children = []
         self.parent = None
     
@@ -60,15 +68,28 @@ class SearchResultModel(QAbstractItemModel):
             path = result.get("path", "")
             snippet = result.get("snippet", "")
             line = result.get("line", 0)
+            position = result.get("pos", -1)
             
             leaf_name = path.rstrip("/").split("/")[-1] if "/" in path else path
             leaf_name = strip_page_suffix(leaf_name)
             
             # Create page item (both page and snippet use the same line number)
-            page_item = SearchResultItem(path=path, snippet=leaf_name, is_page=True, line=line)
+            page_item = SearchResultItem(
+                path=path,
+                snippet=leaf_name,
+                is_page=True,
+                line=line,
+                position=position,
+            )
             
             # Create snippet child
-            snippet_item = SearchResultItem(path=path, snippet=snippet, is_page=False, line=line)
+            snippet_item = SearchResultItem(
+                path=path,
+                snippet=snippet,
+                is_page=False,
+                line=line,
+                position=position,
+            )
             page_item.add_child(snippet_item)
             
             self.root_items.append(page_item)
@@ -142,6 +163,8 @@ class SearchResultModel(QAbstractItemModel):
             return item.line
         elif role == Qt.UserRole + 2:
             return item.is_page
+        elif role == Qt.UserRole + 3:
+            return item.position
         
         return None
     
@@ -231,9 +254,9 @@ class SearchTab(QWidget):
     """Widget for full-text search with FTS5."""
     
     # Signal emitted when user clicks a search result to navigate to that page
-    pageNavigationRequested = Signal(str, int)  # path, line_number
+    pageNavigationRequested = Signal(str, int, int)  # path, line_number, position
     # Signal emitted when user wants to navigate and focus editor (Ctrl+Enter)
-    pageNavigationWithEditorFocusRequested = Signal(str, int)  # path, line_number
+    pageNavigationWithEditorFocusRequested = Signal(str, int, int)  # path, line_number, position
     
     def __init__(self, parent=None, http_client: "httpx.Client" = None):
         super().__init__(parent)
@@ -241,6 +264,9 @@ class SearchTab(QWidget):
         self.current_subtree = None  # Optional path filter
         
         self._init_ui()
+
+    def set_http_client(self, http_client: "httpx.Client") -> None:
+        self.http = http_client
     
     def _init_ui(self):
         """Initialize the UI layout."""
@@ -483,8 +509,9 @@ class SearchTab(QWidget):
             if current_index.isValid():
                 path = current_index.data(Qt.UserRole)
                 line = current_index.data(Qt.UserRole + 1) or 0
+                position = current_index.data(Qt.UserRole + 3) or -1
                 if path:
-                    self.pageNavigationWithEditorFocusRequested.emit(path, line)
+                    self.pageNavigationWithEditorFocusRequested.emit(path, line, position)
                 event.accept()
                 return
         
@@ -530,8 +557,9 @@ class SearchTab(QWidget):
             return
         path = index.data(Qt.UserRole)
         line = index.data(Qt.UserRole + 1) or 0
+        position = index.data(Qt.UserRole + 3) or -1
         if path:
-            self.pageNavigationRequested.emit(path, line)
+            self.pageNavigationRequested.emit(path, line, position)
     
     def _is_vi_mode(self) -> bool:
         """Check if vi mode is enabled in parent main window."""

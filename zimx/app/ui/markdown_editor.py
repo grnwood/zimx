@@ -5235,7 +5235,17 @@ class MarkdownEditor(QTextEdit):
             symbol = _symbol_for("x" if match.group(2) == "☑" else " ")
             return _format_task_symbol(match.group(1), symbol, match.group("body"))
 
-        line = TASK_LINE_PATTERN.sub(md_repl, original)
+        line = original
+        shortcut_match = re.match(r"^(\s*)\((?P<state>[xX]?)\)\s*(?P<body>.*)$", line)
+        if shortcut_match:
+            symbol = _symbol_for(shortcut_match.group("state") or " ")
+            line = _format_task_symbol(
+                shortcut_match.group(1) or "",
+                symbol,
+                shortcut_match.group("body") or "",
+            )
+
+        line = TASK_LINE_PATTERN.sub(md_repl, line)
         line = SYMBOL_TASK_LINE_PATTERN.sub(symbol_repl, line)
 
         # 2) Heading marks: #'s → sentinel on this line only (unless actively editing)
@@ -5609,18 +5619,15 @@ class MarkdownEditor(QTextEdit):
         rel_from_end = len(text) - (cursor.position() - block.position())
 
         cursor.beginEditBlock()
-        cursor.select(QTextCursor.LineUnderCursor)
-        line_text = cursor.selectedText()
-        cursor.removeSelectedText()
         new_indent = indent + self.LIST_INDENT_UNIT
-        marker_len = 2  # '☐ '
-        new_line = new_indent + line_text[len(indent):]
-        cursor.insertText(new_line)
+        remainder = text[len(indent):]
+        new_line = self._rewrite_block_indent(block, new_indent, remainder)
         # Indent children (any list type)
         for child_block, _, child_indent, child_remainder in children_blocks:
             new_child_indent = child_indent + self.LIST_INDENT_UNIT
             self._rewrite_block_indent(child_block, new_child_indent, child_remainder)
 
+        marker_len = 3 if remainder.startswith(("☐  ", "☑  ")) else 2
         new_pos = block.position() + len(new_line) - rel_from_end
         cursor.setPosition(max(block.position() + len(new_indent) + marker_len, new_pos))
         self.setTextCursor(cursor)
@@ -5641,19 +5648,16 @@ class MarkdownEditor(QTextEdit):
         rel_from_end = len(text) - (cursor.position() - block.position())
 
         cursor.beginEditBlock()
-        cursor.select(QTextCursor.LineUnderCursor)
-        line_text = cursor.selectedText()
         dedent = indent[:-indent_unit_len]
-        cursor.removeSelectedText()
-        marker_len = 2
-        new_line = dedent + line_text[len(indent):]
-        cursor.insertText(new_line)
+        remainder = text[len(indent):]
+        new_line = self._rewrite_block_indent(block, dedent, remainder)
 
         for child_block, _, child_indent, child_remainder in children_blocks:
             if len(child_indent) >= indent_unit_len:
                 new_child_indent = child_indent[:-indent_unit_len]
                 self._rewrite_block_indent(child_block, new_child_indent, child_remainder)
 
+        marker_len = 3 if remainder.startswith(("☐  ", "☑  ")) else 2
         new_pos = block.position() + len(new_line) - rel_from_end
         cursor.setPosition(max(block.position() + len(dedent) + marker_len, new_pos))
         self.setTextCursor(cursor)

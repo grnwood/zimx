@@ -91,6 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 from zimx.app import config, indexer
+from zimx.server import search_index
 from zimx.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES, strip_page_suffix
 from zimx.app import zim_import
 
@@ -1207,6 +1208,10 @@ class MainWindow(QMainWindow):
         rebuild_index_action.setToolTip("Rebuild the vault database from disk (keeps bookmarks/kv/ai tables)")
         rebuild_index_action.triggered.connect(self._rebuild_vault_index_from_disk)
         tools_menu.addAction(rebuild_index_action)
+        rebuild_search_index_action = QAction("Rebuild Vault Search Index", self)
+        rebuild_search_index_action.setToolTip("Rebuild the full-text search index from disk")
+        rebuild_search_index_action.triggered.connect(self._rebuild_vault_search_index)
+        tools_menu.addAction(rebuild_search_index_action)
 
         webserver_action = QAction("Start Web Server", self)
         webserver_action.setToolTip("Start local web server to serve vault as HTML")
@@ -1215,12 +1220,14 @@ class MainWindow(QMainWindow):
         self._action_view_vault_disk = view_vault_disk_action
         self._action_zim_import = zim_import_action
         self._action_rebuild_index = rebuild_index_action
+        self._action_rebuild_search_index = rebuild_search_index_action
         self._action_webserver = webserver_action
         self._action_tooltips = {
             self._action_new_vault: self._action_new_vault.toolTip(),
             self._action_view_vault_disk: self._action_view_vault_disk.toolTip(),
             self._action_zim_import: self._action_zim_import.toolTip(),
             self._action_rebuild_index: self._action_rebuild_index.toolTip(),
+            self._action_rebuild_search_index: self._action_rebuild_search_index.toolTip(),
             self._action_webserver: self._action_webserver.toolTip(),
             self._action_server_login: self._action_server_login.toolTip(),
             self._action_server_logout: self._action_server_logout.toolTip(),
@@ -2131,6 +2138,7 @@ class MainWindow(QMainWindow):
             (self._action_view_vault_disk, "View vault on disk"),
             (self._action_zim_import, "Import from Zim"),
             (self._action_rebuild_index, "Rebuild vault index"),
+            (self._action_rebuild_search_index, "Rebuild vault search index"),
             (self._action_webserver, "Start web server"),
         ]
         for action, label in guarded:
@@ -2212,6 +2220,11 @@ class MainWindow(QMainWindow):
                 remote_mode=self._remote_mode,
                 auth_prompt=self._prompt_remote_login if self._remote_mode else None,
             )
+        except Exception:
+            pass
+        try:
+            if self.search_tab:
+                self.search_tab.set_http_client(self.http)
         except Exception:
             pass
         try:
@@ -4513,25 +4526,30 @@ class MainWindow(QMainWindow):
         self.left_tab_widget.setCurrentIndex(2)  # Search tab is now index 2 (Vault=0, Tags=1, Search=2)
         self.search_tab.focus_search()
     
-    def _on_search_result_selected(self, path: str, line: int) -> None:
+    def _on_search_result_selected(self, path: str, line: int, position: int = -1) -> None:
         """Handle navigation from search results to a specific page."""
         print(f"[SearchNav] Navigating to {path}, line {line}")
         self._open_file(path)
         
         # Scroll to the line with flash animation if line number is provided
-        if line > 0:
+        if position is not None and position >= 0:
+            print(f"[SearchNav] Scheduling scroll to position {position}")
+            QTimer.singleShot(50, lambda: self._scroll_to_position_with_flash(position))
+        elif line > 0:
             print(f"[SearchNav] Scheduling scroll to line {line}")
             QTimer.singleShot(50, lambda: self._scroll_to_line_with_flash(line))
         
         # Return focus to search results tree
         QTimer.singleShot(100, lambda: self.search_tab.results_tree.setFocus())
     
-    def _on_search_result_selected_with_editor_focus(self, path: str, line: int) -> None:
+    def _on_search_result_selected_with_editor_focus(self, path: str, line: int, position: int = -1) -> None:
         """Handle navigation from search results with editor focus (Ctrl+Enter)."""
         self._open_file(path)
         
         # Scroll to the line with flash animation if line number is provided
-        if line > 0:
+        if position is not None and position >= 0:
+            QTimer.singleShot(50, lambda: self._scroll_to_position_with_flash(position))
+        elif line > 0:
             QTimer.singleShot(50, lambda: self._scroll_to_line_with_flash(line))
         
         # Focus editor instead of returning to search results
@@ -4552,11 +4570,10 @@ class MainWindow(QMainWindow):
         # Note: Our search returns 1-indexed line numbers from enumerate(lines, 1)
         # QTextDocument.findBlockByLineNumber expects 0-indexed
         # So line 1 from search -> block 0, line 2 -> block 1, etc.
-        # But there seems to be an off-by-one, so let's use line directly instead of line-1
-        block = doc.findBlockByLineNumber(line)  # Try without subtracting 1
+        block = doc.findBlockByLineNumber(line - 1)
         if not block.isValid():
-            # Fallback to line-1 if that doesn't work
-            block = doc.findBlockByLineNumber(line - 1)
+            # Fallback to line if that doesn't work
+            block = doc.findBlockByLineNumber(line)
             if not block.isValid():
                 print(f"[SearchNav] Block at line {line} is not valid")
                 return
@@ -4566,6 +4583,19 @@ class MainWindow(QMainWindow):
         
         print(f"[SearchNav] Setting cursor to block {block.blockNumber()} (search line {line}) and animating")
         # Set the cursor position and scroll with animation and flash
+        self.editor.setTextCursor(cursor)
+        self._animate_or_flash_to_cursor(cursor)
+
+    def _scroll_to_position_with_flash(self, position: int) -> None:
+        """Scroll to a character offset and flash it."""
+        print(f"[SearchNav] _scroll_to_position_with_flash called with position {position}")
+        doc = self.editor.document()
+        if not doc:
+            return
+        max_pos = max(0, doc.characterCount() - 1)
+        safe_pos = max(0, min(position, max_pos))
+        cursor = QTextCursor(doc)
+        cursor.setPosition(safe_pos)
         self.editor.setTextCursor(cursor)
         self._animate_or_flash_to_cursor(cursor)
     
@@ -8272,6 +8302,89 @@ class MainWindow(QMainWindow):
         self._reindex_vault(show_progress=True)
         self.statusBar().showMessage("Reindex complete", 4000)
         print("[UI] Reindex from files complete")
+
+    def _rebuild_vault_search_index(self) -> None:
+        """Rebuild the full-text search index from source files."""
+        if not self._require_local_mode("Rebuild the vault search index"):
+            return
+        if not self.vault_root or not config.has_active_vault():
+            self._alert("Select a vault before rebuilding the search index.")
+            return
+        if not self._ensure_writable("rebuild the vault search index"):
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Rebuild Search Index",
+            "Rebuild full-text search index from files?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        db_path = config._vault_db_path()
+        if not db_path:
+            self._alert("No vault database found for search index.")
+            return
+        self.statusBar().showMessage("Rebuilding search index...", 0)
+
+        root = Path(self.vault_root)
+        txt_files = []
+        for suffix in PAGE_SUFFIXES:
+            for page_file in sorted(root.rglob(f"*{suffix}")):
+                if suffix == LEGACY_SUFFIX and page_file.with_suffix(PAGE_SUFFIX).exists():
+                    continue
+                txt_files.append(page_file)
+
+        progress = QProgressDialog("Indexing search...", None, 0, len(txt_files), self)
+        progress.setWindowTitle("Search Index")
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        import sqlite3
+
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pages_search_index (
+                    id INTEGER PRIMARY KEY,
+                    path TEXT NOT NULL UNIQUE,
+                    mtime INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_search_path ON pages_search_index(path)")
+            try:
+                conn.execute(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS pages_search_fts USING fts5(content, content_rowid='id')"
+                )
+            except sqlite3.OperationalError as exc:
+                self.statusBar().showMessage("Search index unavailable", 4000)
+                self._alert(f"Search index unavailable: {exc}")
+                return
+            conn.execute("DELETE FROM pages_search_fts")
+            conn.execute("DELETE FROM pages_search_index")
+            conn.commit()
+
+            for idx, txt_file in enumerate(txt_files, start=1):
+                rel_path = txt_file.relative_to(root)
+                path_str = f"/{rel_path.as_posix()}"
+                try:
+                    content = txt_file.read_text(encoding="utf-8")
+                    mtime = int(txt_file.stat().st_mtime)
+                    search_index.upsert_page(conn, path_str, mtime, content)
+                except Exception:
+                    continue
+                progress.setValue(idx)
+                QApplication.processEvents()
+        finally:
+            conn.close()
+            progress.close()
+
+        page_count = len(txt_files)
+        self.statusBar().showMessage(f"Search index rebuilt: {page_count} pages", 3000)
 
     def _open_webserver_dialog(self) -> None:
         """Open the web server control dialog."""

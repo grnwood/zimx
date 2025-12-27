@@ -98,13 +98,52 @@ def _find_snippet_line(full_content: str, snippet: str) -> int:
     # Extract just the matched terms from FTS5 markers
     matched_terms = re.findall(r'\[([^\]]+)\]', snippet)
     if matched_terms:
-        # Search for the first matched term
-        search_term = matched_terms[0]
-        for i, line in enumerate(content_lines, 1):
-            if search_term.lower() in line.lower():
-                return i
+        search_term = None
+        for term in matched_terms:
+            if re.search(r"[A-Za-z0-9]", term):
+                search_term = term
+                break
+        if search_term:
+            for i, line in enumerate(content_lines, 1):
+                if search_term.lower() in line.lower():
+                    return i
     
     return 0
+
+
+def _find_snippet_position(full_content: str, snippet: str) -> int:
+    """Return 0-based character offset of the best snippet match, or -1 if not found."""
+    if not full_content or not snippet:
+        return -1
+
+    clean_snippet = re.sub(r'\[([^\]]+)\]', r'\1', snippet)
+    clean_snippet = clean_snippet.replace('...', '').strip()
+    snippet_lines = [line.strip() for line in clean_snippet.split('\n') if line.strip()]
+    content_lines = full_content.split('\n')
+
+    for snippet_line in snippet_lines:
+        words = snippet_line.split()
+        if len(words) < 2:
+            continue
+        num_words = min(7, max(3, len(words)))
+        search_text = ' '.join(words[:num_words]).lower()
+        for i, content_line in enumerate(content_lines):
+            pos = content_line.lower().find(search_text)
+            if pos != -1:
+                return sum(len(l) + 1 for l in content_lines[:i]) + pos
+
+    matched_terms = re.findall(r'\[([^\]]+)\]', snippet)
+    search_term = None
+    for term in matched_terms:
+        if re.search(r"[A-Za-z0-9]", term):
+            search_term = term
+            break
+    if search_term:
+        pos = full_content.lower().find(search_term.lower())
+        if pos != -1:
+            return pos
+
+    return -1
 
 
 def _prepare_fts_query(query: str) -> str:
@@ -246,6 +285,7 @@ def search_pages(
             
             # Calculate line number by finding where snippet content appears
             line_num = _find_snippet_line(full_content, snippet)
+            position = _find_snippet_position(full_content, snippet)
             print(f"[SearchIndex] Path: {path}, Snippet: {snippet[:80]}..., Line: {line_num}")
             
             results.append({
@@ -253,6 +293,7 @@ def search_pages(
                 "snippet": snippet,
                 "rank": rank,
                 "line": line_num,
+                "pos": position,
             })
         
         return results
