@@ -1746,6 +1746,7 @@ class MainWindow(QMainWindow):
             self._alert(f"Could not verify server {base_url}: {exc}")
             return None
         access_token = None
+        selected_path = None
         try:
             resp = httpx.get(f"{base_url}/api/vaults", timeout=10.0, verify=verify_ssl)
             if resp.status_code == 401:
@@ -1758,18 +1759,58 @@ class MainWindow(QMainWindow):
                 raise RuntimeError(f"Failed to list vaults (HTTP {resp.status_code})")
             payload = resp.json()
             vaults = payload.get("vaults", [])
-            if not isinstance(vaults, list) or not vaults:
-                raise RuntimeError("No vaults found on server")
+            if not isinstance(vaults, list):
+                raise RuntimeError("Invalid vault list response")
+            if not vaults:
+                name = None
+                while not name:
+                    name, ok = QInputDialog.getText(
+                        self,
+                        "Create Remote Vault",
+                        "No vaults found. Enter a new vault name:",
+                    )
+                    if not ok:
+                        return None
+                    name = name.strip()
+                    if not name:
+                        QMessageBox.warning(self, "Missing Name", "Please enter a vault name.")
+                headers = {"Authorization": f"Bearer {access_token}"} if access_token else None
+                create_resp = httpx.post(
+                    f"{base_url}/api/vaults/create",
+                    json={"name": name},
+                    headers=headers,
+                    timeout=10.0,
+                    verify=verify_ssl,
+                )
+                if create_resp.status_code == 401:
+                    if not self._prompt_remote_login_for_server(base_url, verify_ssl):
+                        return None
+                    access_token = self._access_token
+                    headers = {"Authorization": f"Bearer {access_token}"} if access_token else None
+                    create_resp = httpx.post(
+                        f"{base_url}/api/vaults/create",
+                        json={"name": name},
+                        headers=headers,
+                        timeout=10.0,
+                        verify=verify_ssl,
+                    )
+                if create_resp.status_code != 200:
+                    raise RuntimeError(f"Failed to create vault (HTTP {create_resp.status_code})")
+                created = create_resp.json()
+                selected_path = created.get("path")
+                if not selected_path:
+                    raise RuntimeError("Failed to create vault (missing path)")
         except Exception as exc:
             self._alert(f"Could not load vaults from {base_url}: {exc}")
             return None
 
-        select_dialog = RemoteVaultSelectDialog(vaults, parent=self)
-        if select_dialog.exec() != QDialog.Accepted:
-            return None
-        selected_path = select_dialog.selected_path()
         if not selected_path:
-            return None
+            select_dialog = RemoteVaultSelectDialog(vaults, parent=self)
+            if select_dialog.exec() != QDialog.Accepted:
+                return None
+            selected_path = select_dialog.selected_path()
+            if not selected_path:
+                return None
 
         existing = None
         for entry in config.load_remote_servers():
