@@ -38,13 +38,13 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import indexer
-from . import file_ops
-from . import search_index
-from .adapters import files
-from .adapters.files import FileAccessError
-from .state import vault_state
-from .vector import vector_manager
+from zimx.server import indexer
+from zimx.server import file_ops
+from zimx.server import search_index
+from zimx.server.adapters import files
+from zimx.server.adapters.files import FileAccessError
+from zimx.server.state import vault_state
+from zimx.server.vector import vector_manager
 from zimx.rag.index import RetrievedChunk
 from zimx.app import config
 
