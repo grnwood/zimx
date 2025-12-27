@@ -2157,6 +2157,21 @@ class MainWindow(QMainWindow):
         self._remote_cache_root = cache_root
         return cache_root
 
+    def _remote_vault_cache_root(self, vault_path: str) -> Path:
+        """Create a per-remote-vault cache directory for local metadata."""
+        cache_root = self._ensure_remote_cache_root()
+        base_name = Path(vault_path).name or "vault"
+        digest = hashlib.sha1(vault_path.encode("utf-8", errors="ignore")).hexdigest()[:12]
+        return cache_root / "vaults" / f"{base_name}-{digest}"
+
+    def _local_vault_root(self) -> Optional[str]:
+        """Return a local path to use for per-vault metadata storage."""
+        if not self.vault_root:
+            return None
+        if self._remote_mode:
+            return str(self._remote_vault_cache_root(self.vault_root))
+        return self.vault_root
+
     def _remote_server_key(self) -> str:
         """Normalize the server URL into a stable config key."""
         return self._server_key_for_url(self.api_base)
@@ -2454,7 +2469,10 @@ class MainWindow(QMainWindow):
                 except Exception:
                     prefer_read_only = False
             try:
-                self._ai_chat_store = AIChatStore(vault_root=directory)
+                ai_root = directory
+                if self._remote_mode:
+                    ai_root = str(self._remote_vault_cache_root(directory))
+                self._ai_chat_store = AIChatStore(vault_root=ai_root)
                 if self._ai_badge_icon is None:
                     ai_path = self._find_asset("ai.svg")
                     self._ai_badge_icon = self._load_icon(ai_path, QColor("#4A90E2"), size=14)
@@ -2558,7 +2576,7 @@ class MainWindow(QMainWindow):
 
                 self._load_bookmarks()
                 if self.vault_root:
-                    self.right_panel.set_vault_root(self.vault_root)
+                    self.right_panel.set_vault_root(self._local_vault_root())
 
                 # Restore window geometry and splitter positions
                 self._restore_geometry()
@@ -4933,7 +4951,7 @@ class MainWindow(QMainWindow):
             self._alert("Open a vault first.")
             return
         panel = TaskPanel(font_size_key="task_font_size_detached")
-        panel.set_vault_root(self.vault_root or "")
+        panel.set_vault_root(self._local_vault_root() or "")
         panel.set_filter_clear_enabled(False)
         try:
             panel.set_navigation_filter(self._nav_filter_path, refresh=False)
@@ -4963,7 +4981,7 @@ class MainWindow(QMainWindow):
             panel.set_base_font_size(self.font_size)
         except Exception:
             pass
-        panel.set_vault_root(self.vault_root or "")
+        panel.set_vault_root(self._local_vault_root() or "")
         panel.dateActivated.connect(self.right_panel.calendar_panel.dateActivated.emit)
         panel.pageActivated.connect(self._open_calendar_page)
         panel.taskActivated.connect(self._open_task_from_panel)
@@ -5008,8 +5026,9 @@ class MainWindow(QMainWindow):
             self._alert("Enable AI Chat in settings to use this window.")
             return
         panel = AIChatPanel(font_size=self.right_panel.get_ai_font_size(), api_client=self.http)
-        if self.vault_root:
-            panel.set_vault_root(self.vault_root)
+        local_vault_root = self._local_vault_root()
+        if local_vault_root:
+            panel.set_vault_root(local_vault_root)
         if self.current_path:
             panel.open_chat_for_page(self._normalize_editor_path(self.current_path))
         panel.chatNavigateRequested.connect(self._on_ai_chat_navigate)
