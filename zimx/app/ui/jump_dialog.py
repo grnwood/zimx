@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
 )
 
 from zimx.app import config
-from zimx.server.adapters.files import PAGE_SUFFIX
 from .path_utils import path_to_colon
 import html
 import re

@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 
 from markdown import markdown as render_markdown
 from zimx.app import config
-from zimx.server.adapters.files import PAGE_SUFFIX
+from zimx.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from .ai_chat_panel import AIChatPanel, ApiWorker, ServerManager, VectorAPIClient
 from .path_utils import colon_to_path, path_to_colon
 
@@ -227,7 +227,7 @@ class TaskPanel(QWidget):
 
         self.show_future = _build_toggle(
             style.standardIcon(QStyle.SP_MediaSeekForward),
-            "Include tasks that start in the future (e.g., ( ) task >YYYY-mm-dd).",
+            "Include tasks that start in the future (e.g., - [ ] task >YYYY-mm-dd).",
             self._on_show_future_toggled,
         )
 
@@ -743,7 +743,7 @@ class TaskPanel(QWidget):
     def _replace_path_tokens(self, text: str) -> str:
         pattern = re.compile(
             rf"(^|[\s\(\[\"'])"
-            rf"(/[^\s`<>\"'()\]]+(?:{re.escape(PAGE_SUFFIX)})?)"
+            rf"(/[^\s`<>\"'()\]]+(?:{re.escape(PAGE_SUFFIX)}|{re.escape(LEGACY_SUFFIX)})?)"
         )
 
         def _replace(match: re.Match[str]) -> str:
@@ -776,7 +776,11 @@ class TaskPanel(QWidget):
         if not base.startswith("/"):
             base = "/" + base.lstrip("/")
         rel = Path(base.lstrip("/"))
-        if rel.suffix != PAGE_SUFFIX:
+        if rel.suffix.lower() in PAGE_SUFFIXES:
+            if rel.suffix.lower() == LEGACY_SUFFIX:
+                rel = rel.with_suffix(PAGE_SUFFIX)
+                base = "/" + rel.as_posix()
+        else:
             name = rel.name or ""
             if name:
                 rel = rel / f"{name}{PAGE_SUFFIX}"
@@ -834,7 +838,7 @@ class TaskPanel(QWidget):
         )
         lines: list[str] = []
         for task in tasks:
-            status = "(x)" if task.get("status") == "done" else "()"
+            status = "- [x]" if task.get("status") == "done" else "- [ ]"
             text = (task.get("text") or "").strip()
             priority = "!" * min(max(int(task.get("priority") or 0), 0), 3)
             tags = " ".join(task.get("tags") or [])
@@ -939,7 +943,7 @@ class TaskPanel(QWidget):
             if count >= max_lines:
                 lines.append("[truncated]")
                 break
-            status = "(x)" if task.get("status") == "done" else "()"
+            status = "- [x]" if task.get("status") == "done" else "- [ ]"
             text = (task.get("text") or "").strip()
             priority = "!" * min(max(int(task.get("priority") or 0), 0), 3)
             tags = " ".join(task.get("tags") or [])
@@ -1178,6 +1182,8 @@ class TaskPanel(QWidget):
         norm = path.replace("\\", "/")
         if not norm.startswith("/"):
             norm = "/" + norm.lstrip("/")
+        if norm.lower().endswith(LEGACY_SUFFIX):
+            norm = norm[: -len(LEGACY_SUFFIX)] + PAGE_SUFFIX
         return norm
 
     def _task_matches_filter(self, task_path: str, prefix: str) -> bool:
@@ -1185,7 +1191,7 @@ class TaskPanel(QWidget):
             return False
         if prefix == "/":
             return True
-        if prefix.endswith(PAGE_SUFFIX):
+        if prefix.endswith(tuple(PAGE_SUFFIXES)):
             return task_path == prefix
         base = prefix.rstrip("/")
         if not base:
@@ -1202,7 +1208,7 @@ class TaskPanel(QWidget):
         journal_root = "/Journal"
         if norm == journal_root:
             return True
-        if norm == journal_root + PAGE_SUFFIX:
+        if norm in (journal_root + PAGE_SUFFIX, journal_root + LEGACY_SUFFIX):
             return True
         return norm.startswith(journal_root + "/")
 

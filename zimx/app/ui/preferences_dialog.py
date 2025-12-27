@@ -709,8 +709,9 @@ class PreferencesDialog(QDialog):
         user_dir = Path.home() / ".zimx" / "templates"
         for tpl_dir in (builtin_dir, user_dir):
             if tpl_dir.exists():
-                for tpl in sorted(tpl_dir.glob("*.txt")):
-                    names.append(tpl.stem)
+                for suffix in (".md", ".txt"):
+                    for tpl in sorted(tpl_dir.glob(f"*{suffix}")):
+                        names.append(tpl.stem)
         # Preserve order but drop duplicates
         seen = set()
         unique = []

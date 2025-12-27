@@ -157,7 +157,7 @@ class TestInsertLinkIntegration:
     def test_insert_link_at_cursor(self, main_window):
         """Test that link is inserted at cursor position, not at start of file."""
         # Open a page
-        main_window._open_file("/PageA/PageA.txt")
+        main_window._open_file("/PageA/PageA.md")
         QApplication.processEvents()
         
         # Move cursor to middle of document
@@ -182,7 +182,7 @@ class TestInsertLinkIntegration:
     def test_insert_link_replaces_selection(self, main_window):
         """Test that inserting link replaces selected text."""
         # Open a page with content
-        main_window._open_file("/PageA/PageA.txt")
+        main_window._open_file("/PageA/PageA.md")
         QApplication.processEvents()
         
         # Select some text

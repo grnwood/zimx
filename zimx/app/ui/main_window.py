@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 from zimx.app import config, indexer
-from zimx.server.adapters.files import PAGE_SUFFIX
+from zimx.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES, strip_page_suffix
 from zimx.app import zim_import
 
 _ONE_SHOT_PROMPT_CACHE: Optional[str] = None
@@ -1154,10 +1154,6 @@ class MainWindow(QMainWindow):
         # Vault menu (now left of File)
         vault_menu = self.menuBar().addMenu("Vaul&t")
         file_menu = self.menuBar().addMenu("&File")
-        open_vault_action = QAction("Open Vault", self)
-        open_vault_action.setToolTip("Open an existing vault")
-        open_vault_action.triggered.connect(lambda checked=False: self._select_vault(spawn_new_process=False))
-        vault_menu.addAction(open_vault_action)
         open_vault_new_win_action = QAction("Open Vault in New Window", self)
         open_vault_new_win_action.setToolTip("Launch a separate ZimX process for a vault")
         open_vault_new_win_action.triggered.connect(lambda checked=False: self._select_vault(spawn_new_process=True))
@@ -1522,8 +1518,6 @@ class MainWindow(QMainWindow):
         rename_shortcut = QShortcut(QKeySequence(Qt.Key_F2), self)
         rename_shortcut.setContext(Qt.ApplicationShortcut)
         rename_shortcut.activated.connect(self._trigger_tree_rename)
-        open_vault_shortcut = QShortcut(QKeySequence("Ctrl+O"), self)
-        open_vault_shortcut.activated.connect(lambda: self._select_vault(spawn_new_process=False))
         open_vault_new_win_shortcut = QShortcut(QKeySequence("Ctrl+Shift+O"), self)
         open_vault_new_win_shortcut.activated.connect(lambda: self._select_vault(spawn_new_process=True))
         focus_mode_shortcut = QShortcut(QKeySequence("Ctrl+Alt+F"), self)
@@ -1554,6 +1548,7 @@ class MainWindow(QMainWindow):
         replace_shortcut.setContext(Qt.ApplicationShortcut)
         replace_shortcut.activated.connect(lambda: self._show_find_bar(replace=True))
         task_cycle = QShortcut(QKeySequence(Qt.Key_F12), self)
+        task_cycle.setContext(Qt.ApplicationShortcut)
         task_cycle.activated.connect(self.editor.toggle_task_state)
         # Navigation shortcuts
         nav_back = QShortcut(QKeySequence("Alt+Left"), self)
@@ -4601,10 +4596,9 @@ class MainWindow(QMainWindow):
         
         path_input = QLineEdit()
         path_input.setEnabled(False)
-        # Display current path in colon form without .txt
+        # Display current path in colon form without suffix
         display_path = self.current_path or ""
-        if display_path.endswith(".txt"):
-            display_path = display_path[:-4]
+        display_path = strip_page_suffix(display_path)
         if display_path:
             display_path = path_to_colon(display_path)
         path_input.setText(display_path)
@@ -4633,9 +4627,8 @@ class MainWindow(QMainWindow):
                     # Convert from colon form back to slash form for API
                     from .path_utils import colon_to_path
                     subtree = colon_to_path(path_input.text().strip())
-                    # Add .txt extension back if needed
-                    if not subtree.endswith(".txt"):
-                        subtree = subtree + ".txt"
+                    if not subtree.endswith(tuple(PAGE_SUFFIXES)):
+                        subtree = subtree + PAGE_SUFFIX
                 
                 self.search_tab.set_search_query(query, subtree)
 
@@ -5852,7 +5845,10 @@ class MainWindow(QMainWindow):
         if not cleaned.startswith("/"):
             cleaned = "/" + cleaned.lstrip("/")
         rel = Path(cleaned.lstrip("/"))
-        if rel.suffix != PAGE_SUFFIX:
+        if rel.suffix.lower() in PAGE_SUFFIXES:
+            if rel.suffix.lower() == LEGACY_SUFFIX:
+                cleaned = str(Path(cleaned).with_suffix(PAGE_SUFFIX))
+        else:
             # Treat as folder; map to its page file
             file_path = self._folder_to_file_path(cleaned)
             if file_path:
@@ -5871,7 +5867,7 @@ class MainWindow(QMainWindow):
             suffix = Path(cleaned.replace("\\", "/")).suffix
         except Exception:
             suffix = ""
-        return bool(suffix) and suffix.lower() != ".txt"
+        return bool(suffix) and suffix.lower() not in PAGE_SUFFIXES
 
     def _open_attachment_link(self, name: str) -> bool:
         if self._remote_mode:
@@ -6365,12 +6361,12 @@ class MainWindow(QMainWindow):
         return "/" + "/".join(resolved)
 
     def _file_path_to_folder(self, file_path: str) -> str:
-        """Convert file path like /PageA/PageB/PageC/PageC.txt to folder path /PageA/PageB/PageC."""
+        """Convert file path like /PageA/PageB/PageC/PageC.md to folder path /PageA/PageB/PageC."""
         if not file_path or file_path == "/":
             return "/"
-        # Remove the .txt file at the end
+        # Remove the page file at the end
         path_obj = Path(file_path.lstrip("/"))
-        if path_obj.suffix == PAGE_SUFFIX:  # Suffix includes the dot
+        if path_obj.suffix.lower() in PAGE_SUFFIXES:  # Suffix includes the dot
             return f"/{path_obj.parent.as_posix()}"
         return file_path
 
@@ -7427,7 +7423,7 @@ class MainWindow(QMainWindow):
             warning = ""
             store = None
             target_folder = folder_path
-            if folder_path.lower().endswith(str(PAGE_SUFFIX)):
+            if folder_path.lower().endswith(tuple(PAGE_SUFFIXES)):
                 target_folder = self._file_path_to_folder(folder_path)
             try:
                 if self.right_panel.ai_chat_panel:
@@ -7779,7 +7775,7 @@ class MainWindow(QMainWindow):
     def _remove_deleted_paths_from_history(self, deleted_folder_path: str) -> None:
         """Remove deleted page(s) from history buffer and persist."""
         # Normalize the deleted path
-        if deleted_folder_path.lower().endswith(str(PAGE_SUFFIX)):
+        if deleted_folder_path.lower().endswith(tuple(PAGE_SUFFIXES)):
             deleted_folder_path = self._file_path_to_folder(deleted_folder_path)
         
         # Filter out any history entries that match or are subpaths of the deleted folder
@@ -7787,9 +7783,9 @@ class MainWindow(QMainWindow):
         self.page_history = [
             path for path in self.page_history
             if not (path == deleted_folder_path or 
-                    path.lower().endswith(str(PAGE_SUFFIX)) and self._file_path_to_folder(path) == deleted_folder_path or
+                    path.lower().endswith(tuple(PAGE_SUFFIXES)) and self._file_path_to_folder(path) == deleted_folder_path or
                     path.startswith(deleted_folder_path + "/") or
-                    (path.lower().endswith(str(PAGE_SUFFIX)) and self._file_path_to_folder(path).startswith(deleted_folder_path + "/")))
+                    (path.lower().endswith(tuple(PAGE_SUFFIXES)) and self._file_path_to_folder(path).startswith(deleted_folder_path + "/")))
         ]
         
         # Remove cursor positions for deleted paths
@@ -8490,7 +8486,12 @@ class MainWindow(QMainWindow):
         print("[UI] Reindex start")
         
         root = Path(self.vault_root)
-        txt_files = sorted(root.rglob(f"*{PAGE_SUFFIX}"))
+        txt_files = []
+        for suffix in PAGE_SUFFIXES:
+            for page_file in sorted(root.rglob(f"*{suffix}")):
+                if suffix == LEGACY_SUFFIX and page_file.with_suffix(PAGE_SUFFIX).exists():
+                    continue
+                txt_files.append(page_file)
         
         progress = None
         if show_progress:

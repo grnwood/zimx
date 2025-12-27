@@ -125,14 +125,14 @@ class WebServer:
             page_path = unquote(page_path)
             if not page_path.endswith(".md") and not page_path.endswith(".txt"):
                 # Try both extensions
-                for ext in [".txt", ".md"]:
+                for ext in [".md", ".txt"]:
                     test_path = self.vault_root / (page_path + ext)
                     if test_path.exists():
                         page_path += ext
                         break
                 else:
-                    # Default to .txt if neither exists
-                    page_path += ".txt"
+                    # Default to .md if neither exists
+                    page_path += ".md"
             
             return self._render_page(page_path)
 

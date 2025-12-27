@@ -11,7 +11,13 @@ _ANSI_BLUE = "\033[94m"
 _ANSI_RESET = "\033[0m"
 
 from zimx.app import config
-from zimx.server.adapters.files import FileAccessError, PAGE_SUFFIX
+from zimx.server.adapters.files import (
+    FileAccessError,
+    LEGACY_SUFFIX,
+    PAGE_SUFFIX,
+    PAGE_SUFFIXES,
+    strip_page_suffix,
+)
 
 
 _LOCKS: Dict[str, RLock] = {}
@@ -21,7 +27,7 @@ _REGISTRY_LOCK = RLock()
 def _normalize_folder_path(path: str) -> str:
     cleaned = (path or "").strip().replace("\\", "/")
     cleaned = cleaned.lstrip("/")
-    if cleaned.endswith(PAGE_SUFFIX):
+    if any(cleaned.endswith(suffix) for suffix in PAGE_SUFFIXES):
         cleaned = str(Path(cleaned).parent)
     cleaned = cleaned.rstrip("/")
     return f"/{cleaned}" if cleaned else "/"
@@ -143,9 +149,15 @@ def _move_folder(root: Path, from_path: str, to_path: str, *, set_new_parent_ord
         new_leaf = dest_dir.name
         old_page = dest_dir / f"{old_leaf}{PAGE_SUFFIX}"
         new_page = dest_dir / f"{new_leaf}{PAGE_SUFFIX}"
+        legacy_old = dest_dir / f"{old_leaf}{LEGACY_SUFFIX}"
         if old_page.exists() and old_page != new_page:
             try:
                 old_page.rename(new_page)
+            except Exception:
+                pass
+        elif legacy_old.exists() and not new_page.exists():
+            try:
+                legacy_old.rename(new_page)
             except Exception:
                 pass
         # Note: We do NOT rewrite the heading when moving pages - users control their own titles
@@ -195,13 +207,13 @@ def _rewrite_heading_if_matches(page_path: Path, old_leaf: str, new_leaf: str) -
 
 
 def _path_to_colon(page_path: str) -> str:
-    """Convert /Foo/Bar/Bar.txt -> Foo:Bar."""
+    """Convert /Foo/Bar/Bar.md -> Foo:Bar."""
     cleaned = page_path.strip().strip("/")
     if not cleaned:
         return ""
     parts = cleaned.split("/")
-    if parts and parts[-1].endswith(PAGE_SUFFIX):
-        parts[-1] = parts[-1][:-len(PAGE_SUFFIX)]
+    if parts:
+        parts[-1] = strip_page_suffix(parts[-1])
     if len(parts) >= 2 and parts[-1] == parts[-2]:
         parts = parts[:-1]
     parts = [p.replace(" ", "_") for p in parts]
@@ -219,7 +231,7 @@ def _link_leaf(link: str) -> str:
         text = text.split("#", 1)[0]
     if "/" in text:
         p = Path(text)
-        if p.suffix.lower() == PAGE_SUFFIX:
+        if p.suffix.lower() in PAGE_SUFFIXES:
             return p.stem
         return p.name
     parts = text.split(":")
@@ -249,6 +261,11 @@ def update_links_on_disk(root: Path, path_map: dict[str, str]) -> list[str]:
         if old_path and new_path and (old_path, new_path) not in seen_pairs:
             replacements.append((old_path, new_path))
             seen_pairs.add((old_path, new_path))
+        if old_path.endswith(PAGE_SUFFIX):
+            legacy_old = old_path[: -len(PAGE_SUFFIX)] + LEGACY_SUFFIX
+            if (legacy_old, new_path) not in seen_pairs:
+                replacements.append((legacy_old, new_path))
+                seen_pairs.add((legacy_old, new_path))
         if old_colon and new_colon and (old_colon, new_colon) not in seen_pairs:
             replacements.append((old_colon, new_colon))
             seen_pairs.add((old_colon, new_colon))
@@ -263,57 +280,60 @@ def update_links_on_disk(root: Path, path_map: dict[str, str]) -> list[str]:
         return []
     touched: list[str] = []
     wiki_pattern = re.compile(r"\[(?P<link>[^\]|]+)\|(?P<label>[^\]]*)\]")
-    for txt_file in sorted(root.rglob(f"*{PAGE_SUFFIX}")):
-        if ".zimx" in txt_file.parts:
-            continue
-        try:
-            content = txt_file.read_text(encoding="utf-8")
-        except Exception:
-            continue
-        updated = content
-        for old, new in replacements:
-            if not old or not new or old == new:
+    for suffix in PAGE_SUFFIXES:
+        for txt_file in sorted(root.rglob(f"*{suffix}")):
+            if suffix == LEGACY_SUFFIX and txt_file.with_suffix(PAGE_SUFFIX).exists():
                 continue
-            # Update wiki-style links and adjust label when it matches the old leaf
-            def _replace(match):
-                link = match.group("link")
-                label = match.group("label")
-                if link != old:
-                    return match.group(0)
-                old_leaf = _link_leaf(old)
-                new_leaf = _link_leaf(new)
-                normalized_label = label.strip()
-                new_label = label
-                if normalized_label and old_leaf:
-                    if normalized_label == old_leaf or normalized_label == old_leaf.replace("_", " "):
-                        new_label = new_leaf.replace("_", " ")
-                return f"[{new}|{new_label}]"
-
-            updated = wiki_pattern.sub(_replace, updated)
-            # For colon-style links, use word boundaries to avoid partial matches
-            if old.startswith(":") and ":" in old[1:]:
-                # Multi-level colon link like :Foo:Bar - use word boundaries
-                pattern = re.compile(r'\b' + re.escape(old) + r'\b')
-                updated = pattern.sub(new, updated)
-            elif old.startswith(":"):
-                # Root-level colon link like :RootPage
-                # Match only when followed by non-colon or end of word
-                pattern = re.compile(re.escape(old) + r'(?![:\w])')
-                updated = pattern.sub(new, updated)
-            else:
-                # Regular path replacement - use the old logic
-                if old in new:
-                    # Avoid recursive growth when new contains old
-                    continue
-                if old in updated:
-                    updated = updated.replace(old, new)
-        if updated != content:
+            if ".zimx" in txt_file.parts:
+                continue
             try:
-                txt_file.write_text(updated, encoding="utf-8")
-                rel = f"/{txt_file.relative_to(root).as_posix()}"
-                touched.append(rel)
-                print(f"{_ANSI_BLUE}[API] Link rewrite file: {rel}{_ANSI_RESET}")
-            except Exception as exc:
-                print(f"{_ANSI_BLUE}[API] Failed to rewrite links for {txt_file}: {exc}{_ANSI_RESET}")
+                content = txt_file.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            updated = content
+            for old, new in replacements:
+                if not old or not new or old == new:
+                    continue
+                # Update wiki-style links and adjust label when it matches the old leaf
+                def _replace(match):
+                    link = match.group("link")
+                    label = match.group("label")
+                    if link != old:
+                        return match.group(0)
+                    old_leaf = _link_leaf(old)
+                    new_leaf = _link_leaf(new)
+                    normalized_label = label.strip()
+                    new_label = label
+                    if normalized_label and old_leaf:
+                        if normalized_label == old_leaf or normalized_label == old_leaf.replace("_", " "):
+                            new_label = new_leaf.replace("_", " ")
+                    return f"[{new}|{new_label}]"
+
+                updated = wiki_pattern.sub(_replace, updated)
+                # For colon-style links, use word boundaries to avoid partial matches
+                if old.startswith(":") and ":" in old[1:]:
+                    # Multi-level colon link like :Foo:Bar - use word boundaries
+                    pattern = re.compile(r'\b' + re.escape(old) + r'\b')
+                    updated = pattern.sub(new, updated)
+                elif old.startswith(":"):
+                    # Root-level colon link like :RootPage
+                    # Match only when followed by non-colon or end of word
+                    pattern = re.compile(re.escape(old) + r'(?![:\w])')
+                    updated = pattern.sub(new, updated)
+                else:
+                    # Regular path replacement - use the old logic
+                    if old in new:
+                        # Avoid recursive growth when new contains old
+                        continue
+                    if old in updated:
+                        updated = updated.replace(old, new)
+                if updated != content:
+                    try:
+                        txt_file.write_text(updated, encoding="utf-8")
+                        rel = f"/{txt_file.relative_to(root).as_posix()}"
+                        touched.append(rel)
+                        print(f"{_ANSI_BLUE}[API] Link rewrite file: {rel}{_ANSI_RESET}")
+                    except Exception as exc:
+                        print(f"{_ANSI_BLUE}[API] Failed to rewrite links for {txt_file}: {exc}{_ANSI_RESET}")
     print(f"{_ANSI_BLUE}[API] /api/vault/update-links complete touched={len(touched)}{_ANSI_RESET}")
     return touched

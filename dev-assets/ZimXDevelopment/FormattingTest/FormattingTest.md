@@ -1,0 +1,63 @@
+# FormattingTest
+Created Tuesday 25 November 2025
+---
+# Heading One
+## Heading Two
+### Heading Three
+#### Heading Four
+##### Heading Five
+
+- [ ] uncompleted checkbox
+  - [ ] checkbox one @todo
+- [x] completed task!  @todo <2025-12-27
+
+This is a [https://www.google.com|Google link]
+
+this is a [:FormattingTest|] page link.
+
+this is **bold**.
+
+this is ***bold and italic***.
+
+this is just *italic*
+
+this is ~~strikethrough~~.
+
+~~this is a~~
+~~multiline strike through~~
+~~of stuff~~
+
+this is a `single fixed width` thing.
+
+```
+this is 
+a multine fixed width
+thing.
+```
+
+```javascript
+var joe = Joe();
+```
+
+```python
+ def _is_plain_markdown(self, rendered_html: str) -> bool:
+        """Heuristic: detect if the markdown output is just a <p> block without rich tags."""
+        if not rendered_html.startswith("<p>") or not rendered_html.endswith("</p>"):
+            return False
+        heavy_tags = ("<ul", "<ol", "<pre", "<code", "<h", "<table", "<blockquote", "<li", "<hr", "<img", "<a ")
+        return not any(tag in rendered_html for tag in heavy_tags)
+```
+
+
+The following is a quote:
+>asdfasdfasdfasdf
+>asdfasdf
+
+>you never close your eyes
+>anymore
+>>when i kiss
+> your lips.
+
+
+
+-Joe

@@ -98,8 +98,8 @@ def test_normalize_external_link_strips_sentinels(editor):
 
 
 def test_camelcase_link_uses_parent_folder(editor):
-    # When current page is /Journal/.../PickleSausage/PickleSausage.txt, +NewTopic should live under that folder once
-    editor.set_context("/vault", "/Journal/2025/11/22/SuchandSuchCall/PickleSausage/PickleSausage.txt")
+    # When current page is /Journal/.../PickleSausage/PickleSausage.md, +NewTopic should live under that folder once
+    editor.set_context("/vault", "/Journal/2025/11/22/SuchandSuchCall/PickleSausage/PickleSausage.md")
     text = "Discuss +RandomActsOfKindess tomorrow"
     converted = editor._convert_camelcase_links(text)
     assert "[:Journal:2025:11:22:SuchandSuchCall:PickleSausage:RandomActsOfKindess|RandomActsOfKindess]" in converted

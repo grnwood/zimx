@@ -42,7 +42,7 @@ from zimx.app import config, config as zimx_config
 from zimx.ai.manager import AIManager, ContextItem
 from zimx.rag.index import RetrievedChunk
 from .path_utils import path_to_colon
-from zimx.server.adapters.files import PAGE_SUFFIX
+from zimx.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 
 AI_CHAT_COLOR = "\033[34m"
 CHROMA_COLOR = "\033[33m"
@@ -1823,7 +1823,7 @@ class AIChatPanel(QtWidgets.QWidget):
     def _replace_path_tokens(self, text: str) -> str:
         pattern = re.compile(
             rf"(^|[\s\(\[\"'])"
-            rf"(/[^\s`<>\"'()\]]+(?:{re.escape(PAGE_SUFFIX)})?)"
+            rf"(/[^\s`<>\"'()\]]+(?:{re.escape(PAGE_SUFFIX)}|{re.escape(LEGACY_SUFFIX)})?)"
         )
 
         def _replace(match: re.Match[str]) -> str:
@@ -2086,10 +2086,13 @@ class AIChatPanel(QtWidgets.QWidget):
         if not folder.exists():
             return set()
         result: set[str] = set()
-        for txt in sorted(folder.rglob("*.txt")):
-            if ".zimx" in txt.parts:
-                continue
-            result.add("/" + txt.relative_to(root).as_posix())
+        for suffix in PAGE_SUFFIXES:
+            for page_file in sorted(folder.rglob(f"*{suffix}")):
+                if suffix == LEGACY_SUFFIX and page_file.with_suffix(PAGE_SUFFIX).exists():
+                    continue
+                if ".zimx" in page_file.parts:
+                    continue
+                result.add("/" + page_file.relative_to(root).as_posix())
         return result
 
     def _attachments_in_page(self, page_ref: str) -> list[Path]:
@@ -2102,16 +2105,21 @@ class AIChatPanel(QtWidgets.QWidget):
         elif candidate_file.exists():
             folder = candidate_file.parent
         else:
-            # Try with .txt suffix
-            candidate_with_txt = candidate_file.with_suffix(".txt")
-            folder = candidate_with_txt.parent if candidate_with_txt.exists() else candidate_file.parent
+            candidate_with_md = candidate_file.with_suffix(PAGE_SUFFIX)
+            candidate_with_txt = candidate_file.with_suffix(LEGACY_SUFFIX)
+            if candidate_with_md.exists():
+                folder = candidate_with_md.parent
+            elif candidate_with_txt.exists():
+                folder = candidate_with_txt.parent
+            else:
+                folder = candidate_file.parent
         attachments: list[Path] = []
         for entry in sorted(folder.iterdir()):
             if not entry.is_file():
                 continue
             if entry.name.startswith("."):
                 continue
-            if entry.suffix.lower() == ".txt":
+            if entry.suffix.lower() in PAGE_SUFFIXES:
                 continue
             if ".zimx" in entry.parts:
                 continue
@@ -2402,9 +2410,12 @@ class AIChatPanel(QtWidgets.QWidget):
             return ""
         page_path = Path(self.vault_root) / page_ref.lstrip("/")
         if not page_path.exists():
-            candidate = page_path.with_suffix(".txt")
-            if candidate.exists():
-                page_path = candidate
+            candidate_md = page_path.with_suffix(PAGE_SUFFIX)
+            candidate_txt = page_path.with_suffix(LEGACY_SUFFIX)
+            if candidate_md.exists():
+                page_path = candidate_md
+            elif candidate_txt.exists():
+                page_path = candidate_txt
             else:
                 return ""
         try:
@@ -2455,32 +2466,35 @@ class AIChatPanel(QtWidgets.QWidget):
             trees: list[ContextCandidate] = []
             attachments: list[ContextCandidate] = []
             seen: set[str] = set()
-            for page_file in sorted(root.rglob("*.txt")):
-                if ".zimx" in page_file.parts:
-                    continue
-                rel_page = "/" + page_file.relative_to(root).as_posix()
-                pages.append(ContextCandidate(page_ref=rel_page, label=rel_page))
-                folder = page_file.parent
-                if folder == root:
-                    folder_rel = "/"
-                else:
-                    folder_rel = "/" + folder.relative_to(root).as_posix()
-                if folder_rel not in seen:
-                    seen.add(folder_rel)
-                    trees.append(ContextCandidate(page_ref=folder_rel, label=folder_rel))
-                for attachment in sorted(folder.iterdir()):
-                    if not attachment.is_file():
+            for suffix in PAGE_SUFFIXES:
+                for page_file in sorted(root.rglob(f"*{suffix}")):
+                    if suffix == LEGACY_SUFFIX and page_file.with_suffix(PAGE_SUFFIX).exists():
                         continue
-                    if attachment.suffix.lower() == ".txt":
+                    if ".zimx" in page_file.parts:
                         continue
-                    if attachment.name.startswith("."):
-                        continue
-                    if ".zimx" in attachment.parts:
-                        continue
-                    display = f"{rel_page} · {attachment.name}"
-                    attachments.append(
-                        ContextCandidate(page_ref=rel_page, label=display, attachment_name=attachment.name)
-                    )
+                    rel_page = "/" + page_file.relative_to(root).as_posix()
+                    pages.append(ContextCandidate(page_ref=rel_page, label=rel_page))
+                    folder = page_file.parent
+                    if folder == root:
+                        folder_rel = "/"
+                    else:
+                        folder_rel = "/" + folder.relative_to(root).as_posix()
+                    if folder_rel not in seen:
+                        seen.add(folder_rel)
+                        trees.append(ContextCandidate(page_ref=folder_rel, label=folder_rel))
+                    for attachment in sorted(folder.iterdir()):
+                        if not attachment.is_file():
+                            continue
+                        if attachment.suffix.lower() in PAGE_SUFFIXES:
+                            continue
+                        if attachment.name.startswith("."):
+                            continue
+                        if ".zimx" in attachment.parts:
+                            continue
+                        display = f"{rel_page} · {attachment.name}"
+                        attachments.append(
+                            ContextCandidate(page_ref=rel_page, label=display, attachment_name=attachment.name)
+                        )
             return pages, trees, attachments
 
         def _scan_api_candidates() -> tuple[list[ContextCandidate], list[ContextCandidate]]:

@@ -6,7 +6,7 @@ from pathlib import Path, PurePosixPath
 from typing import Dict, Iterable, List, Mapping, Optional, Set, Tuple
 from urllib.parse import unquote
 
-from zimx.server.adapters.files import PAGE_SUFFIX
+from zimx.server.adapters.files import PAGE_SUFFIX, strip_page_suffix
 
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp"}
@@ -16,7 +16,7 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp"}
 class ImportPage:
     source: Path
     rel_stem: str  # e.g., "Folder/Note"
-    dest_path: str  # vault-relative file path (with .txt), leading slash
+    dest_path: str  # vault-relative file path (with .md), leading slash
     content: str
     attachments: List[Path]
 
@@ -29,7 +29,7 @@ def normalize_folder_path(path: str) -> str:
 
 
 def _dest_path(target_folder: str, rel_stem: str) -> str:
-    """Create vault dest like /target/Folder/Note/Note.txt from rel_stem Folder/Note."""
+    """Create vault dest like /target/Folder/Note/Note.md from rel_stem Folder/Note."""
     base = normalize_folder_path(target_folder).lstrip("/")
     base_path = Path(base) if base else Path()
     rel = PurePosixPath(rel_stem)
@@ -43,8 +43,8 @@ def _path_to_colon(file_path: str) -> str:
     if not cleaned:
         return ""
     parts = cleaned.split("/")
-    if parts and parts[-1].endswith(PAGE_SUFFIX):
-        parts[-1] = parts[-1][: -len(PAGE_SUFFIX)]
+    if parts:
+        parts[-1] = strip_page_suffix(parts[-1])
     if len(parts) >= 2 and parts[-1] == parts[-2]:
         parts = parts[:-1]
     parts = [p.replace(" ", "_") for p in parts]

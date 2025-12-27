@@ -61,15 +61,16 @@ class NewPageDialog(QDialog):
         idx = 0
         for tpl_dir in (user_dir, builtin_dir):
             if tpl_dir.exists():
-                for template_file in sorted(tpl_dir.glob("*.txt")):
-                    template_name = template_file.stem
-                    if template_name in seen:
-                        continue
-                    seen.add(template_name)
-                    self.template_combo.addItem(template_name, str(template_file))
-                    if template_name == default_name:
-                        default_index = idx
-                    idx += 1
+                for suffix in (".md", ".txt"):
+                    for template_file in sorted(tpl_dir.glob(f"*{suffix}")):
+                        template_name = template_file.stem
+                        if template_name in seen:
+                            continue
+                        seen.add(template_name)
+                        self.template_combo.addItem(template_name, str(template_file))
+                        if template_name == default_name:
+                            default_index = idx
+                        idx += 1
         
         # If no templates found, add a "None" option
         if self.template_combo.count() == 0:

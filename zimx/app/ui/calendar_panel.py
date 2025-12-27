@@ -39,7 +39,7 @@ from PySide6.QtCore import QSize
 from PySide6.QtSvg import QSvgRenderer
 from shiboken6 import Shiboken
 
-from zimx.server.adapters.files import PAGE_SUFFIX
+from zimx.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from zimx.app import config
 from .path_utils import path_to_colon
 from markdown import markdown as render_markdown
@@ -574,7 +574,7 @@ class CalendarPanel(QWidget):
         if not rel_path or "Journal" not in rel_path:
             return
         parts = Path(rel_path.lstrip("/")).parts
-        # Expect /Journal/YYYY/MM/DD[/Sub]/file.txt
+        # Expect /Journal/YYYY/MM/DD[/Sub]/file.md
         try:
             idx = parts.index("Journal")
         except ValueError:
@@ -614,6 +614,8 @@ class CalendarPanel(QWidget):
 
     def set_base_font_size(self, size: int) -> None:
         """Align calendar/journal/insights fonts to the editor font size."""
+        if config.has_global_config_key(self._font_size_key):
+            return
         clamped = max(6, min(48, int(size or self._font_size)))
         if clamped == self._font_size:
             return
@@ -1217,7 +1219,7 @@ class CalendarPanel(QWidget):
         if self.calendar_view and Shiboken.isValid(self.calendar_view):
             if self.calendar_view.viewport():
                 self.calendar_view.viewport().update()
-            self.calendar_view.update(self.calendar_view.rect())
+            self.calendar_view.viewport().update(self.calendar_view.viewport().rect())
         self.calendar.update()
 
     def _attach_calendar_view(self) -> None:
@@ -1252,11 +1254,14 @@ class CalendarPanel(QWidget):
 
         if path_value and self.vault_root:
             page_path = Path(self.vault_root) / str(path_value).lstrip("/")
-            # For folder nodes, prefer the matching .txt inside that folder if it exists
+            # For folder nodes, prefer the matching .md inside that folder if it exists
             if page_path.is_dir():
-                candidate = page_path / f"{page_path.name}{PAGE_SUFFIX}"
-                if candidate.exists():
-                    page_path = candidate
+                candidate_md = page_path / f"{page_path.name}{PAGE_SUFFIX}"
+                candidate_txt = page_path / f"{page_path.name}{LEGACY_SUFFIX}"
+                if candidate_md.exists():
+                    page_path = candidate_md
+                elif candidate_txt.exists():
+                    page_path = candidate_txt
             if page_path.is_file():
                 rel_path = "/" + page_path.relative_to(self.vault_root).as_posix()
                 self.pageActivated.emit(rel_path)
@@ -1552,7 +1557,9 @@ class CalendarPanel(QWidget):
             for entry in children:
                 if entry.is_dir():
                     add_from_dir(entry, f"{prefix}{entry.name}/")
-                elif entry.is_file() and entry.suffix.lower() == PAGE_SUFFIX:
+                elif entry.is_file() and entry.suffix.lower() in PAGE_SUFFIXES:
+                    if entry.suffix.lower() == LEGACY_SUFFIX and entry.with_suffix(PAGE_SUFFIX).exists():
+                        continue
                     # Skip the root day's own file; everything else is a subpage
                     if directory == base_dir and entry.stem == base_dir.name:
                         continue

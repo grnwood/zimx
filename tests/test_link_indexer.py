@@ -13,7 +13,7 @@ def teardown_function(_function):
 
 def test_indexer_tracks_wiki_links(tmp_path):
     config.set_active_vault(str(tmp_path))
-    page_path = "/Home/Home.txt"
+    page_path = "/Home/Home.md"
     content = """
 # Home
 [Projects:Roadmap|Roadmap]
@@ -25,8 +25,8 @@ def test_indexer_tracks_wiki_links(tmp_path):
 
     relations = config.fetch_link_relations(page_path)
     assert set(relations["outgoing"]) == {
-        "/Projects/Roadmap/Roadmap.txt",
-        "/Idea List/Idea List.txt",
+        "/Projects/Roadmap/Roadmap.md",
+        "/Idea List/Idea List.md",
     }
     assert relations["incoming"] == []
 
@@ -34,20 +34,20 @@ def test_indexer_tracks_wiki_links(tmp_path):
 def test_fetch_link_relations_incoming(tmp_path):
     config.set_active_vault(str(tmp_path))
     config.update_page_index(
-        path="/Source/Source.txt",
+        path="/Source/Source.md",
         title="Source",
         tags=[],
-        links=["/Target/Target.txt"],
+        links=["/Target/Target.md"],
         tasks=[],
     )
     config.update_page_index(
-        path="/Target/Target.txt",
+        path="/Target/Target.md",
         title="Target",
         tags=[],
         links=[],
         tasks=[],
     )
 
-    relations = config.fetch_link_relations("/Target/Target.txt")
-    assert relations["incoming"] == ["/Source/Source.txt"]
+    relations = config.fetch_link_relations("/Target/Target.md")
+    assert relations["incoming"] == ["/Source/Source.md"]
     assert relations["outgoing"] == []

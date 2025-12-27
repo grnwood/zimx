@@ -13,7 +13,7 @@ def sample_md():
 
 
 def test_extract_tasks_parses_metadata():
-    tasks = extract_tasks(sample_md(), "/Notes/demo/demo.txt")
+    tasks = extract_tasks(sample_md(), "/Notes/demo/demo.md")
     assert len(tasks) == 3
 
     todo = tasks[0]
@@ -28,5 +28,5 @@ def test_extract_tasks_parses_metadata():
 
 def test_extract_tasks_handles_invalid_due():
     md = "- [ ] task {due:not-a-date}"
-    tasks = extract_tasks(md, "/foo/foo.txt")
+    tasks = extract_tasks(md, "/foo/foo.md")
     assert tasks[0].due is None

@@ -11,7 +11,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Iterable, Optional, Sequence
 
-from zimx.server.adapters.files import PAGE_SUFFIX
+from zimx.server.adapters.files import PAGE_SUFFIX, PAGE_SUFFIXES, strip_page_suffix
 
 GLOBAL_CONFIG = Path.home() / ".zimx_config.json"
 
@@ -1382,6 +1382,12 @@ def save_panel_font_size(key: str, size: int) -> None:
     _update_global_config({key: clamped})
 
 
+def has_global_config_key(key: str) -> bool:
+    """Return True if the global config JSON has a stored value for the key."""
+    payload = _read_global_config()
+    return key in payload
+
+
 def load_global_editor_font_size(default: int = 12) -> int:
     """Load the main editor font size from the global config JSON."""
     return load_panel_font_size("editor_font_size", default)
@@ -1604,7 +1610,7 @@ def delete_folder_index(folder_path: str) -> None:
     """Delete all pages under a folder path (recursive) from the index.
     
     Args:
-        folder_path: Folder path like /PageA/PageB (without .txt)
+        folder_path: Folder path like /PageA/PageB (without .md)
     """
     conn = _get_conn()
     if not conn:
@@ -1671,7 +1677,7 @@ def _delete_index_for_prefix(conn: sqlite3.Connection, folder_prefix: str) -> No
 
 
 def _rebase_page_path(page_path: str, old_folder: str, new_folder: str) -> str:
-    """Rebase a page path (with .txt) from one folder prefix to another."""
+    """Rebase a page path (with .md) from one folder prefix to another."""
     cleaned_old = old_folder.strip().lstrip("/")
     cleaned_new = new_folder.strip().lstrip("/")
     page_obj = Path(page_path.lstrip("/"))
@@ -1687,12 +1693,12 @@ def _rebase_page_path(page_path: str, old_folder: str, new_folder: str) -> str:
 
 
 def _collapse_duplicate_leaf_path(page_path: str) -> str:
-    """If a path ends with .../Leaf/Leaf.txt, collapse to .../Leaf.txt."""
+    """If a path ends with .../Leaf/Leaf.md, collapse to .../Leaf.md."""
     cleaned = (page_path or "").strip().lstrip("/")
     if not cleaned:
         return page_path
     p = Path(cleaned)
-    if p.suffix.lower() != PAGE_SUFFIX:
+    if p.suffix.lower() not in PAGE_SUFFIXES:
         return page_path
     if len(p.parts) >= 2 and p.stem == p.parent.name:
         collapsed = p.parent.parent / f"{p.stem}{PAGE_SUFFIX}"
@@ -2007,8 +2013,8 @@ def fetch_display_order_map() -> dict[str, int]:
 def count_folders() -> int:
     """Count the total number of folder pages in the vault.
     
-    A folder is identified by having a .txt file with the same name as its directory.
-    Example: /Joe/Joe.txt is a folder, /Joe/SubPage.txt is not.
+    A folder is identified by having a page file with the same name as its directory.
+    Example: /Joe/Joe.md is a folder, /Joe/SubPage.md is not.
     """
     try:
         conn = _connect_to_vault_db()
@@ -2022,11 +2028,11 @@ def count_folders() -> int:
         folder_count = 0
         for path in paths:
             # Extract folder name and filename
-            # /Joe/Joe.txt -> folder=Joe, filename=Joe.txt
-            # /Joe/SubPage.txt -> folder=Joe, filename=SubPage.txt
+            # /Joe/Joe.md -> folder=Joe, filename=Joe.md
+            # /Joe/SubPage.md -> folder=Joe, filename=SubPage.md
             parts = path.split('/')
             if len(parts) >= 2:
-                filename = parts[-1].replace('.txt', '')
+                filename = strip_page_suffix(parts[-1])
                 parent_folder = parts[-2]
                 if filename == parent_folder:
                     folder_count += 1
@@ -2086,7 +2092,7 @@ def search_pages(term: str, limit: int = 50) -> list[dict]:
                 return False
             if not (day.isdigit() and 1 <= len(day) <= 2):
                 return False
-            if not filename.endswith(PAGE_SUFFIX):
+            if Path(filename).suffix.lower() not in PAGE_SUFFIXES:
                 return False
             return Path(filename).stem == day
         except Exception:
@@ -2103,7 +2109,7 @@ def search_pages(term: str, limit: int = 50) -> list[dict]:
             return rows
 
         # A "subpage" may be nested at any depth under the day folder (e.g.
-        # /Journal/YYYY/MM/DD/Topic/Topic.txt). Detect descendants by path prefix,
+        # /Journal/YYYY/MM/DD/Topic/Topic.md). Detect descendants by path prefix,
         # not just direct children.
         folders_with_children: set[str] = set()
         try:
@@ -2726,7 +2732,7 @@ def _ensure_task_indexes(conn: sqlite3.Connection) -> None:
 
 
 def _parent_folder_for_page(page_path: str) -> str:
-    """Return parent folder path (leading slash) for a page path like /Foo/Bar/Bar.txt."""
+    """Return parent folder path (leading slash) for a page path like /Foo/Bar/Bar.md."""
     cleaned = page_path.strip().lstrip("/")
     if not cleaned:
         return "/"
@@ -2749,7 +2755,7 @@ def _folder_path_for_page(page_path: str) -> str:
 
 
 def folder_to_page_path(folder_path: str) -> str:
-    """Convert a folder path (/Foo/Bar) to the expected page file path (/Foo/Bar/Bar.txt)."""
+    """Convert a folder path (/Foo/Bar) to the expected page file path (/Foo/Bar/Bar.md)."""
     cleaned = folder_path.strip().replace("\\", "/").strip("/")
     if not cleaned:
         return "/"

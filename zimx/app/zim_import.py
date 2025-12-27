@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Dict, Iterable, List, Tuple, Mapping, Optional
 
-from zimx.server.adapters.files import PAGE_SUFFIX
+from zimx.server.adapters.files import PAGE_SUFFIX, strip_page_suffix
 
 
 HEADER_PREFIXES = ("Content-Type:", "Wiki-Format:", "Creation-Date:")
@@ -15,7 +15,7 @@ HEADER_PREFIXES = ("Content-Type:", "Wiki-Format:", "Creation-Date:")
 class ImportPage:
     source: Path
     rel_stem: str  # e.g., "Home" or "Sub/Page"
-    dest_path: str  # vault-relative file path (with .txt), leading slash
+    dest_path: str  # vault-relative file path (with .md), leading slash
     content: str
     attachments: List[Path]
 
@@ -78,8 +78,8 @@ def _path_to_colon(file_path: str) -> str:
     if not cleaned:
         return ""
     parts = cleaned.split("/")
-    if parts and parts[-1].endswith(PAGE_SUFFIX):
-        parts[-1] = parts[-1][: -len(PAGE_SUFFIX)]
+    if parts:
+        parts[-1] = strip_page_suffix(parts[-1])
     if len(parts) >= 2 and parts[-1] == parts[-2]:
         parts = parts[:-1]
     parts = [p.replace(" ", "_") for p in parts]
@@ -116,7 +116,7 @@ def _convert_tasks(line: str) -> str:
     state = m.group("state").lower()
     rest = m.group(3)
     done = state in {"x", "*"}
-    marker = "(x)" if done else "( )"
+    marker = "- [x]" if done else "- [ ]"
     return f"{m.group(1)}{marker} {rest}".rstrip()
 
 
@@ -163,7 +163,7 @@ def _resolve_page_target(
     # Normalize and try relative to current page
     base_page = PurePosixPath(page_rel)
     target_clean = target.strip()
-    target_clean = target_clean[:-4] if target_clean.endswith(PAGE_SUFFIX) else target_clean
+    target_clean = strip_page_suffix(target_clean)
     # Absolute colon link: apply rename and return
     if ":" in target_clean:
         renamed = _apply_rename_colon(target_clean, rename_map)

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from .path_utils import path_to_colon
+from zimx.server.adapters.files import strip_page_suffix
 
 if TYPE_CHECKING:
     import httpx
@@ -420,9 +421,7 @@ class TagsTab(QWidget):
             for idx, path in enumerate(paths):
                 # Extract leaf node from path
                 leaf_name = path.rstrip("/").split("/")[-1] if "/" in path else path
-                # Remove .txt extension for display
-                if leaf_name.endswith(".txt"):
-                    leaf_name = leaf_name[:-4]
+                leaf_name = strip_page_suffix(leaf_name)
                 
                 # Create item for the page path
                 path_item = QTreeWidgetItem(self.results_tree)

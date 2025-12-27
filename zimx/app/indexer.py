@@ -7,7 +7,7 @@ from typing import List, Set, Optional, Dict
 
 from zimx.app import config
 from zimx.app.ui.path_utils import colon_to_path, normalize_link_target
-from zimx.server.adapters.files import PAGE_SUFFIX
+from zimx.server.adapters.files import PAGE_SUFFIX, PAGE_SUFFIXES
 
 # Bump this when task parsing logic changes to force re-index even if file hash is unchanged.
 INDEX_SCHEMA_VERSION = "task-parse-v4"
@@ -22,10 +22,10 @@ MARKDOWN_LINK_PATTERN = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 WIKI_LINK_PATTERN = re.compile(r"\[(?P<link>[^\]|]+)\|[^\]]*\]")
 # Plain colon links written directly in text, e.g., :Journal:2024:01:05:05#Morning
 PLAIN_COLON_LINK_PATTERN = re.compile(r"(?<!\w):(?P<link>[^\s\[\]<>\"'()]+)")
-# Tasks: support "- [ ]", "- [x]", "( )", "(x)", "(X)", and Unicode checkboxes "☐"/"☑"
+# Tasks: support markdown checkboxes "- [ ]" and "- [x]"
 TASK_PATTERN = re.compile(
     r"^(?P<indent>\s*)"
-    r"(?:(?:-\s*\[(?P<state1>[ xX])\])|(?:\((?P<state2>[xX ])?\))|(?P<box>[☐☑]))"
+    r"(?:[-*]\s*\[(?P<state1>[ xX])\])"
     r"\s+(?P<body>.+)$"
 )
 DUE_PATTERN = re.compile(r"<([0-9]{4}-[0-9]{2}-[0-9]{2})")
@@ -158,7 +158,7 @@ def _extract_link_targets(content: str, current_path: Optional[str] = None) -> S
     return targets
 
 def _normalize_page_link(link: str) -> Optional[str]:
-    """Normalize a link target to a vault-relative page path with .txt suffix.
+    """Normalize a link target to a vault-relative page path with .md suffix.
 
     Returns None for external URLs or non-page resources.
     """
@@ -186,9 +186,11 @@ def _normalize_page_link(link: str) -> Optional[str]:
     path = base if base.startswith("/") else f"/{base}"
     path_obj = Path(path)
     # Skip obvious non-page assets (images, docs, etc.)
-    if path_obj.suffix and path_obj.suffix.lower() != PAGE_SUFFIX:
+    if path_obj.suffix and path_obj.suffix.lower() not in PAGE_SUFFIXES:
         return None
-    if path_obj.suffix.lower() != PAGE_SUFFIX:
+    if path_obj.suffix.lower() in PAGE_SUFFIXES:
+        path_obj = path_obj.with_suffix(PAGE_SUFFIX)
+    elif path_obj.suffix.lower() != PAGE_SUFFIX:
         leaf = path_obj.name or path_obj.parent.name
         if not leaf:
             return None
@@ -216,7 +218,7 @@ def extract_tasks(path: str, content: str) -> List[dict]:
         parent = stack[-1][1] if stack else None
 
         body = match.group("body")
-        state = match.group("state1") or match.group("state2") or ("x" if match.group("box") == "☑" else " ")
+        state = match.group("state1") or " "
         # Inherit tags from parent, add own tags
         own_tags = set(_extract_tags(body))
         parent_tags = set(parent["tags"]) if parent else set()

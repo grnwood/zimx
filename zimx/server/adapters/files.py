@@ -7,26 +7,46 @@ from typing import Dict, List
 from datetime import date, datetime
 
 
-PAGE_SUFFIX = ".txt"
+PAGE_SUFFIX = ".md"
+LEGACY_SUFFIX = ".txt"
+PAGE_SUFFIXES = (PAGE_SUFFIX, LEGACY_SUFFIX)
 
 
 class FileAccessError(RuntimeError):
     pass
 
 
-def _page_file_for(directory: Path) -> Path:
-    return directory / f"{directory.name}{PAGE_SUFFIX}"
+def _page_file_for(directory: Path, suffix: str = PAGE_SUFFIX) -> Path:
+    return directory / f"{directory.name}{suffix}"
 
 
-def _ensure_page_file(path: Path) -> None:
-    if path.suffix.lower() != PAGE_SUFFIX:
-        raise FileAccessError("Only page text files (.txt) are supported.")
+def is_page_suffix(suffix: str) -> bool:
+    return suffix.lower() in PAGE_SUFFIXES
 
 
-def _ensure_valid_page_name(path: Path) -> None:
-    _ensure_page_file(path)
+def strip_page_suffix(name: str) -> str:
+    lowered = name.lower()
+    for suffix in PAGE_SUFFIXES:
+        if lowered.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def _ensure_page_file(path: Path, *, allow_legacy: bool = True) -> None:
+    suffix = path.suffix.lower()
+    if suffix == PAGE_SUFFIX:
+        return
+    if allow_legacy and suffix == LEGACY_SUFFIX:
+        return
+    raise FileAccessError(
+        f"Only page text files ({PAGE_SUFFIX} or {LEGACY_SUFFIX}) are supported."
+    )
+
+
+def _ensure_valid_page_name(path: Path, *, allow_legacy: bool = True) -> None:
+    _ensure_page_file(path, allow_legacy=allow_legacy)
     parent = path.parent
-    expected = f"{parent.name}{PAGE_SUFFIX}"
+    expected = f"{parent.name}{path.suffix}"
     if path.name != expected:
         raise FileAccessError("Page files must share the same name as their parent folder.")
 
@@ -37,6 +57,33 @@ def _ensure_page_scaffold(directory: Path) -> Path:
         directory.mkdir(parents=True, exist_ok=True)
         page_file.write_text(f"# {directory.name}\n\n", encoding="utf-8")
     return page_file
+
+
+def _resolve_page_for_read(target: Path) -> Path:
+    if target.is_dir():
+        preferred = _page_file_for(target, PAGE_SUFFIX)
+        if preferred.exists():
+            return preferred
+        legacy = _page_file_for(target, LEGACY_SUFFIX)
+        if legacy.exists():
+            return legacy
+        return preferred
+    suffix = target.suffix.lower()
+    if suffix == LEGACY_SUFFIX:
+        preferred = target.with_suffix(PAGE_SUFFIX)
+        if preferred.exists():
+            return preferred
+        if target.exists():
+            return target
+        return preferred
+    if suffix == PAGE_SUFFIX:
+        if target.exists():
+            return target
+        legacy = target.with_suffix(LEGACY_SUFFIX)
+        if legacy.exists():
+            return legacy
+        return target
+    return target
 
 
 def _resolve(root: Path, relative_path: str) -> Path:
@@ -51,13 +98,12 @@ def _resolve(root: Path, relative_path: str) -> Path:
 
 def read_file(root: Path, path: str) -> str:
     target = _resolve(root, path)
-    if target.is_dir():
-        target = _page_file_for(target)
+    target = _resolve_page_for_read(target)
     if not target.exists():
         parent = target.parent
         if not parent.exists():
             raise FileNotFoundError(target)
-        _ensure_valid_page_name(target)
+        _ensure_valid_page_name(target, allow_legacy=False)
         target.write_text(f"# {parent.name}\n\n", encoding="utf-8")
     _ensure_valid_page_name(target)
     try:
@@ -69,7 +115,11 @@ def read_file(root: Path, path: str) -> str:
 def write_file(root: Path, path: str, content: str) -> None:
     target = _resolve(root, path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    _ensure_valid_page_name(target)
+    if target.is_dir():
+        target = _page_file_for(target, PAGE_SUFFIX)
+    elif target.suffix.lower() == LEGACY_SUFFIX:
+        target = target.with_suffix(PAGE_SUFFIX)
+    _ensure_valid_page_name(target, allow_legacy=False)
     target.write_text(content, encoding="utf-8")
 
 
@@ -106,7 +156,7 @@ def list_dir(root: Path, subpath: str = "/", recursive: bool = True) -> List[Dic
                     for d in child.iterdir()
                     if d.is_dir() and not d.name.startswith(".")
                 ]
-                page_file = _page_file_for(child)
+                page_file = _resolve_page_for_read(child)
                 rel_file = page_file.relative_to(root).as_posix()
                 children.append(
                     {
@@ -118,7 +168,7 @@ def list_dir(root: Path, subpath: str = "/", recursive: bool = True) -> List[Dic
                         "children": [],
                     }
                 )
-        page_file = _page_file_for(directory)
+        page_file = _resolve_page_for_read(directory)
         rel_file = page_file.relative_to(root).as_posix()
         has_children = bool(children)
         node = {
@@ -161,16 +211,23 @@ def list_files_modified_between(root: Path, start: date, end: date) -> List[Dict
     results: List[Dict] = []
     if start > end:
         start, end = end, start
-    for path in root.rglob(f"*{PAGE_SUFFIX}"):
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
-            continue
-        mod_dt = datetime.fromtimestamp(mtime)
-        mod_date = mod_dt.date()
-        if start <= mod_date <= end:
-            rel = f"/{path.relative_to(root).as_posix()}"
-            results.append({"path": rel, "modified": mod_dt.isoformat()})
+    seen_dirs: set[Path] = set()
+    for suffix in PAGE_SUFFIXES:
+        for path in root.rglob(f"*{suffix}"):
+            page_dir = path.parent
+            if page_dir in seen_dirs and suffix == LEGACY_SUFFIX:
+                continue
+            if suffix == PAGE_SUFFIX:
+                seen_dirs.add(page_dir)
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            mod_dt = datetime.fromtimestamp(mtime)
+            mod_date = mod_dt.date()
+            if start <= mod_date <= end:
+                rel = f"/{path.relative_to(root).as_posix()}"
+                results.append({"path": rel, "modified": mod_dt.isoformat()})
     return results
 
 
@@ -186,7 +243,11 @@ def create_markdown_file(root: Path, path: str, content: str = "") -> None:
     target = _resolve(root, path)
     if target.exists():
         raise FileExistsError(target)
-    _ensure_valid_page_name(target)
+    if target.is_dir():
+        target = _page_file_for(target, PAGE_SUFFIX)
+    elif target.suffix.lower() == LEGACY_SUFFIX:
+        target = target.with_suffix(PAGE_SUFFIX)
+    _ensure_valid_page_name(target, allow_legacy=False)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
 
@@ -198,6 +259,7 @@ def delete_path(root: Path, path: str) -> None:
     if target.is_dir():
         shutil.rmtree(target)
     else:
+        target = _resolve_page_for_read(target)
         _ensure_valid_page_name(target)
         parent = target.parent
         if parent == root:

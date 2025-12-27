@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Optional
 
-from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtCore import QPointF, Qt, Signal, QVariantAnimation, QParallelAnimationGroup, QEasingCurve
 from PySide6.QtGui import QColor, QFont, QBrush, QPen, QPainter, QPolygonF
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from zimx.app import config
+from zimx.server.adapters.files import strip_page_suffix
 from .path_utils import path_to_colon
 
 
@@ -50,9 +51,13 @@ class _GalaxyNodeItem(QGraphicsEllipseItem):
         self._attach_brush = QBrush(QColor(90, 160, 120))
         self._base_pen = QPen(QColor(20, 20, 24), 1.2)
         self._active_pen = QPen(QColor(255, 245, 220), 2.0)
+        self._base_z = 2
+        self._active_z = 6
+        self._label_base_z = 3
+        self._label_active_z = 20
         self.setBrush(self._base_brush)
         self.setPen(self._base_pen)
-        self.setZValue(2)
+        self.setZValue(self._base_z)
         self.setAcceptHoverEvents(True)
 
         label = QGraphicsSimpleTextItem(data.label, self)
@@ -61,7 +66,7 @@ class _GalaxyNodeItem(QGraphicsEllipseItem):
         font.setWeight(QFont.Weight.Bold)
         label.setFont(font)
         label.setBrush(QBrush(QColor(200, 200, 210)))
-        label.setZValue(3)
+        label.setZValue(self._label_base_z)
         label.setFlag(label.GraphicsItemFlag.ItemIgnoresTransformations, True)
         rect = label.boundingRect()
         label.setPos(-rect.width() / 2, -rect.height() / 2)
@@ -72,15 +77,17 @@ class _GalaxyNodeItem(QGraphicsEllipseItem):
         if active:
             self.setBrush(self._active_brush)
             self.setPen(self._active_pen)
+            self.setZValue(self._active_z)
             self.label_item.setOpacity(1.0)
             self.label_item.setBrush(QBrush(QColor(255, 255, 255)))
-            self.label_item.setZValue(10)
+            self.label_item.setZValue(self._label_active_z)
         else:
             self.setBrush(self._attach_brush if self.data.kind == "attachment" else self._base_brush)
             self.setPen(self._base_pen)
-            self.label_item.setOpacity(0.25)
-            self.label_item.setBrush(QBrush(QColor(200, 200, 210)))
-            self.label_item.setZValue(3)
+            self.setZValue(self._base_z)
+        self.label_item.setOpacity(0.25)
+        self.label_item.setBrush(QBrush(QColor(200, 200, 210)))
+        self.label_item.setZValue(self._label_base_z)
 
     def set_dimmed(self, dimmed: bool) -> None:
         if dimmed:
@@ -90,6 +97,17 @@ class _GalaxyNodeItem(QGraphicsEllipseItem):
             self.setBrush(self._attach_brush if self.data.kind == "attachment" else self._base_brush)
             if self.label_item.opacity() < 0.25:
                 self.label_item.setOpacity(0.25)
+
+    def set_label_emphasis(self, enabled: bool) -> None:
+        if enabled:
+            self.label_item.setOpacity(1.0)
+            self.label_item.setBrush(QBrush(QColor(245, 245, 245)))
+            self.label_item.setZValue(self._label_active_z)
+        else:
+            if self.label_item.opacity() > 0.25:
+                self.label_item.setOpacity(0.25)
+            if self.label_item.zValue() > self._label_base_z:
+                self.label_item.setZValue(self._label_base_z)
 
 
 class _GalaxyEdge(QGraphicsLineItem):
@@ -154,6 +172,8 @@ class GalaxyGraphView(QGraphicsView):
         self._center_path: Optional[str] = None
         self._zoom = 1.0
         self._hover_path: Optional[str] = None
+        self._base_positions: dict[str, QPointF] = {}
+        self._spread_anim: Optional[QParallelAnimationGroup] = None
         self._arrows_enabled = True
         self._node_size_scale = 1.0
         self._edge_width_scale = 1.0
@@ -165,6 +185,10 @@ class GalaxyGraphView(QGraphicsView):
         self._edges.clear()
         self._center_path = None
         self._hover_path = None
+        self._base_positions.clear()
+        if self._spread_anim:
+            self._spread_anim.stop()
+            self._spread_anim = None
 
     def wheelEvent(self, event) -> None:  # type: ignore[override]
         delta = event.angleDelta().y()
@@ -214,11 +238,13 @@ class GalaxyGraphView(QGraphicsView):
             else:
                 color = QColor(90, 120, 180) if data.path == center_path else QColor(70, 80, 110)
             item = _GalaxyNodeItem(data, radius, color)
-            item.setPos(positions.get(data.path, QPointF(0, 0)))
+            pos = positions.get(data.path, QPointF(0, 0))
+            item.setPos(pos)
             item.hoverEnterEvent = lambda _e, p=data.path: self._on_hover(p)  # type: ignore[assignment]
             item.hoverLeaveEvent = lambda _e: self._on_hover(None)  # type: ignore[assignment]
             self._scene.addItem(item)
             self._nodes[data.path] = item
+            self._base_positions[data.path] = QPointF(pos)
 
         edge_limit = 2500
         if len(edges) > edge_limit:
@@ -303,15 +329,74 @@ class GalaxyGraphView(QGraphicsView):
             for node in self._nodes.values():
                 node.set_active(node.data.path == self._center_path)
                 node.set_dimmed(False)
+                node.set_label_emphasis(False)
             for edge in self._edges:
                 edge.set_active(False)
+            self._animate_node_positions(self._base_positions)
             return
+        connected_paths: set[str] = set()
+        for edge in self._edges:
+            if edge.source.data.path == path or edge.target.data.path == path:
+                connected_paths.add(edge.source.data.path)
+                connected_paths.add(edge.target.data.path)
         for node in self._nodes.values():
             node.set_dimmed(node.data.path != path and node.data.path != self._center_path)
             node.set_active(node.data.path == path or node.data.path == self._center_path)
+            node.set_label_emphasis(node.data.path in connected_paths)
         for edge in self._edges:
             active = edge.source.data.path == path or edge.target.data.path == path
             edge.set_active(active)
+        self._animate_node_positions(self._spread_positions(path, connected_paths))
+
+    def _spread_positions(self, path: str, connected_paths: set[str]) -> dict[str, QPointF]:
+        hover_base = self._base_positions.get(path)
+        if hover_base is None:
+            hover_base = self._nodes.get(path).pos() if path in self._nodes else QPointF(0, 0)
+        spread = 1.45
+        min_offset = 28.0
+        targets: dict[str, QPointF] = {}
+        for node_path, base in self._base_positions.items():
+            if node_path == path or node_path not in connected_paths:
+                targets[node_path] = base
+                continue
+            delta = base - hover_base
+            dist = math.hypot(delta.x(), delta.y())
+            if dist < 1.0:
+                seed = int(hashlib.sha1(node_path.encode("utf-8")).hexdigest()[:8], 16)
+                rng = random.Random(seed)
+                angle = rng.random() * math.tau
+                delta = QPointF(math.cos(angle) * min_offset, math.sin(angle) * min_offset)
+            elif dist < min_offset:
+                scale = min_offset / max(dist, 1.0)
+                delta = QPointF(delta.x() * scale, delta.y() * scale)
+            targets[node_path] = hover_base + QPointF(delta.x() * spread, delta.y() * spread)
+        return targets
+
+    def _animate_node_positions(self, targets: dict[str, QPointF]) -> None:
+        if self._spread_anim:
+            self._spread_anim.stop()
+            self._spread_anim = None
+        group = QParallelAnimationGroup(self)
+        duration = 220
+        for path, node in self._nodes.items():
+            target = targets.get(path)
+            if target is None:
+                continue
+            start = node.pos()
+            if start == target:
+                continue
+            anim = QVariantAnimation(self)
+            anim.setStartValue(start)
+            anim.setEndValue(target)
+            anim.setDuration(duration)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            anim.valueChanged.connect(lambda value, n=node: n.setPos(value))
+            anim.valueChanged.connect(lambda _value: self._update_edges())
+            group.addAnimation(anim)
+        if group.animationCount() == 0:
+            return
+        self._spread_anim = group
+        group.start()
 
     def set_arrow_mode(self, enabled: bool) -> None:
         self._arrows_enabled = bool(enabled)
@@ -536,8 +621,7 @@ class LinkNavigatorPanel(QWidget):
         if colon:
             return colon.split(":")[-1] or colon
         leaf = path.rsplit("/", 1)[-1] or path
-        if leaf.endswith(".txt"):
-            leaf = leaf[:-4]
+        leaf = strip_page_suffix(leaf)
         return leaf
 
     def _collect_attachment_nodes(self, visible_paths: set[str]) -> tuple[list[_NodeData], list[tuple[str, str]]]:

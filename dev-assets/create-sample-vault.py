@@ -230,7 +230,7 @@ def _sample_tasks(reference_date: date | None = None) -> list[str]:
         state = " " if random.random() > 0.35 else "x"
         bangs = "!" * max(0, min(priority, 3))
         start_part = f" >{start.isoformat()}" if start else ""
-        tasks.append(f"({state})  {text} {bangs} {tag_str} <{due.isoformat()}{start_part}")
+        tasks.append(f"- [{'x' if state == 'x' else ' '}] {text} {bangs} {tag_str} <{due.isoformat()}{start_part}")
     return tasks
 
 

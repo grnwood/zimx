@@ -14,14 +14,14 @@ def temp_db(tmp_path):
 
 
 def test_extract_tasks_builds_hierarchy_and_inheritance() -> None:
-    path = "/Party/Party.txt"
+    path = "/Party/Party.md"
     content = """
-( ) Organize party <2017-08-19 !!
-    ( ) Send invitations by first of month <2017-08-01 !!
-    ( ) Cleanup living room
-        ( ) Get rid of moving boxes <2017-08-10
-        ( ) Buy vacuum cleaner <2017-08-15
-    ( ) Buy food & drinks
+- [ ] Organize party <2017-08-19 !!
+    - [ ] Send invitations by first of month <2017-08-01 !!
+    - [ ] Cleanup living room
+        - [ ] Get rid of moving boxes <2017-08-10
+        - [ ] Buy vacuum cleaner <2017-08-15
+    - [ ] Buy food & drinks
 """.strip()
     tasks = indexer.extract_tasks(path, content)
     by_text = {t["text"]: t for t in tasks}
@@ -47,11 +47,11 @@ def test_extract_tasks_builds_hierarchy_and_inheritance() -> None:
 
 
 def test_parent_becomes_actionable_when_children_done() -> None:
-    path = "/Cleanup/Cleanup.txt"
+    path = "/Cleanup/Cleanup.md"
     content = """
-( ) Cleanup living room <2017-08-19 !!
-    (x) Get rid of moving boxes <2017-08-10
-    (x) Buy vacuum cleaner <2017-08-15
+- [ ] Cleanup living room <2017-08-19 !!
+    - [x] Get rid of moving boxes <2017-08-10
+    - [x] Buy vacuum cleaner <2017-08-15
 """.strip()
     tasks = indexer.extract_tasks(path, content)
     by_text = {t["text"]: t for t in tasks}
@@ -62,14 +62,14 @@ def test_parent_becomes_actionable_when_children_done() -> None:
 
 
 def test_fetch_tasks_includes_ancestors_for_actionable_tasks(temp_db) -> None:
-    path = "/Party/Party.txt"
+    path = "/Party/Party.md"
     content = """
-( ) Organize party <2017-08-19 !!
-    ( ) Send invitations by first of month <2017-08-01 !!
-    ( ) Cleanup living room
-        ( ) Get rid of moving boxes <2017-08-10
-        ( ) Buy vacuum cleaner <2017-08-15
-    ( ) Buy food & drinks
+- [ ] Organize party <2017-08-19 !!
+    - [ ] Send invitations by first of month <2017-08-01 !!
+    - [ ] Cleanup living room
+        - [ ] Get rid of moving boxes <2017-08-10
+        - [ ] Buy vacuum cleaner <2017-08-15
+    - [ ] Buy food & drinks
 """.strip()
     tasks = indexer.extract_tasks(path, content)
     config.update_page_index(path=path, title="Party", tags=[], links=[], tasks=tasks)
@@ -85,11 +85,11 @@ def test_fetch_tasks_includes_ancestors_for_actionable_tasks(temp_db) -> None:
 
 def test_tag_search_shows_non_actionable_matches(temp_db) -> None:
     """Searching by tag should surface matching parents even if they are not actionable."""
-    path = "/Todos/Todos.txt"
+    path = "/Todos/Todos.md"
     content = """
-( ) task one @todo
-    ( ) gimme a break
-    ( ) get some milk @wt
+- [ ] task one @todo
+    - [ ] gimme a break
+    - [ ] get some milk @wt
 """.strip()
     tasks = indexer.extract_tasks(path, content)
     config.update_page_index(path=path, title="Todos", tags=[], links=[], tasks=tasks)
@@ -115,10 +115,10 @@ def test_tag_search_shows_non_actionable_matches(temp_db) -> None:
 def test_actionable_filter_respects_non_actionable_tags(temp_db, monkeypatch) -> None:
     """Configured non-actionable tags should be excluded from actionable view."""
     monkeypatch.setattr(config, "load_non_actionable_task_tags", lambda: "@wt")
-    path = "/Todos/Todos.txt"
+    path = "/Todos/Todos.md"
     content = """
-( ) waiting around @wt
-( ) do now
+- [ ] waiting around @wt
+- [ ] do now
 """.strip()
     tasks = indexer.extract_tasks(path, content)
     config.update_page_index(path=path, title="Todos", tags=[], links=[], tasks=tasks)

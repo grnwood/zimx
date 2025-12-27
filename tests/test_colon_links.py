@@ -17,33 +17,38 @@ class TestPathToColon:
     """Test converting filesystem paths to colon notation."""
     
     def test_simple_single_level(self):
-        """Single level page: /PageA/PageA.txt -> PageA"""
+        """Single level page: /PageA/PageA.md -> PageA"""
+        result = path_to_colon("/PageA/PageA.md")
+        assert result == "PageA"
+
+    def test_legacy_txt_suffix(self):
+        """Legacy page: /PageA/PageA.txt -> PageA"""
         result = path_to_colon("/PageA/PageA.txt")
         assert result == "PageA"
     
     def test_two_level_hierarchy(self):
-        """Two level page: /PageA/PageB/PageB.txt -> PageA:PageB"""
-        result = path_to_colon("/PageA/PageB/PageB.txt")
+        """Two level page: /PageA/PageB/PageB.md -> PageA:PageB"""
+        result = path_to_colon("/PageA/PageB/PageB.md")
         assert result == "PageA:PageB"
     
     def test_three_level_hierarchy(self):
-        """Three level page: /PageA/PageB/PageC/PageC.txt -> PageA:PageB:PageC"""
-        result = path_to_colon("/PageA/PageB/PageC/PageC.txt")
+        """Three level page: /PageA/PageB/PageC/PageC.md -> PageA:PageB:PageC"""
+        result = path_to_colon("/PageA/PageB/PageC/PageC.md")
         assert result == "PageA:PageB:PageC"
     
     def test_joebob_example(self):
-        """Real world example: /JoeBob/JoeBob2/JoeBob2.txt -> JoeBob:JoeBob2"""
-        result = path_to_colon("/JoeBob/JoeBob2/JoeBob2.txt")
+        """Real world example: /JoeBob/JoeBob2/JoeBob2.md -> JoeBob:JoeBob2"""
+        result = path_to_colon("/JoeBob/JoeBob2/JoeBob2.md")
         assert result == "JoeBob:JoeBob2"
     
     def test_without_leading_slash(self):
         """Path without leading slash should still work"""
-        result = path_to_colon("PageA/PageB/PageB.txt")
+        result = path_to_colon("PageA/PageB/PageB.md")
         assert result == "PageA:PageB"
     
     def test_with_trailing_slash(self):
         """Path with trailing slashes should be cleaned"""
-        result = path_to_colon("/PageA/PageB/PageB.txt/")
+        result = path_to_colon("/PageA/PageB/PageB.md/")
         assert result == "PageA:PageB"
     
     def test_empty_path(self):
@@ -58,22 +63,22 @@ class TestPathToColon:
     
     def test_deep_hierarchy(self):
         """Deep nested structure"""
-        result = path_to_colon("/A/B/C/D/E/F/F.txt")
+        result = path_to_colon("/A/B/C/D/E/F/F.md")
         assert result == "A:B:C:D:E:F"
     
     def test_numeric_names(self):
         """Pages with numeric names"""
-        result = path_to_colon("/2025/11/12/12.txt")
+        result = path_to_colon("/2025/11/12/12.md")
         assert result == "2025:11:12"
     
     def test_names_with_underscores(self):
         """Pages with underscores in names"""
-        result = path_to_colon("/My_Page/Sub_Page/Sub_Page.txt")
+        result = path_to_colon("/My_Page/Sub_Page/Sub_Page.md")
         assert result == "My_Page:Sub_Page"
     
     def test_mixed_case_names(self):
         """Pages with mixed case names"""
-        result = path_to_colon("/MyPage/SubPage/SubPage.txt")
+        result = path_to_colon("/MyPage/SubPage/SubPage.md")
         assert result == "MyPage:SubPage"
 
 
@@ -81,24 +86,24 @@ class TestColonToPath:
     """Test converting colon notation to filesystem paths."""
     
     def test_simple_single_level(self):
-        """PageA -> /PageA/PageA.txt"""
+        """PageA -> /PageA/PageA.md"""
         result = colon_to_path("PageA")
-        assert result == "/PageA/PageA.txt"
+        assert result == "/PageA/PageA.md"
     
     def test_two_level_hierarchy(self):
-        """PageA:PageB -> /PageA/PageB/PageB.txt"""
+        """PageA:PageB -> /PageA/PageB/PageB.md"""
         result = colon_to_path("PageA:PageB")
-        assert result == "/PageA/PageB/PageB.txt"
+        assert result == "/PageA/PageB/PageB.md"
     
     def test_three_level_hierarchy(self):
-        """PageA:PageB:PageC -> /PageA/PageB/PageC/PageC.txt"""
+        """PageA:PageB:PageC -> /PageA/PageB/PageC/PageC.md"""
         result = colon_to_path("PageA:PageB:PageC")
-        assert result == "/PageA/PageB/PageC/PageC.txt"
+        assert result == "/PageA/PageB/PageC/PageC.md"
     
     def test_joebob_example(self):
-        """JoeBob:JoeBob2 -> /JoeBob/JoeBob2/JoeBob2.txt"""
+        """JoeBob:JoeBob2 -> /JoeBob/JoeBob2/JoeBob2.md"""
         result = colon_to_path("JoeBob:JoeBob2")
-        assert result == "/JoeBob/JoeBob2/JoeBob2.txt"
+        assert result == "/JoeBob/JoeBob2/JoeBob2.md"
     
     def test_empty_path(self):
         """Empty colon path should return /"""
@@ -108,35 +113,35 @@ class TestColonToPath:
     def test_empty_path_with_vault_root(self):
         """Empty path with vault root should return vault root file"""
         result = colon_to_path("", vault_root_name="MyVault")
-        assert result == "/MyVault.txt"
+        assert result == "/MyVault.md"
     
     def test_deep_hierarchy(self):
         """Deep nested structure"""
         result = colon_to_path("A:B:C:D:E:F")
-        assert result == "/A/B/C/D/E/F/F.txt"
+        assert result == "/A/B/C/D/E/F/F.md"
     
     def test_numeric_names(self):
         """Pages with numeric names"""
         result = colon_to_path("2025:11:12")
-        assert result == "/2025/11/12/12.txt"
+        assert result == "/2025/11/12/12.md"
     
     def test_names_with_underscores(self):
         """Pages with underscores"""
         result = colon_to_path("My_Page:Sub_Page")
-        assert result == "/My_Page/Sub_Page/Sub_Page.txt"
+        assert result == "/My Page/Sub Page/Sub Page.md"
 
     def test_root_prefixed_single_level(self):
         """Leading ':' should still resolve correctly"""
         result = colon_to_path(":Finance")
-        assert result == "/Finance/Finance.txt"
+        assert result == "/Finance/Finance.md"
 
     def test_root_prefixed_multi_level(self):
         result = colon_to_path(":Parent:Child")
-        assert result == "/Parent/Child/Child.txt"
+        assert result == "/Parent/Child/Child.md"
 
 
 class TestColonToFolderPath:
-    """Test converting colon notation to folder paths (without .txt file)."""
+    """Test converting colon notation to folder paths (without .md file)."""
     
     def test_simple_single_level(self):
         """PageA -> /PageA"""
@@ -168,7 +173,7 @@ class TestRoundTrip:
     
     def test_path_to_colon_to_path(self):
         """Converting path -> colon -> path should return original"""
-        original = "/PageA/PageB/PageC/PageC.txt"
+        original = "/PageA/PageB/PageC/PageC.md"
         colon = path_to_colon(original)
         back = colon_to_path(colon)
         assert back == original
@@ -183,11 +188,11 @@ class TestRoundTrip:
     def test_multiple_round_trips(self):
         """Multiple conversions should be stable"""
         test_cases = [
-            "/A/A.txt",
-            "/A/B/B.txt",
-            "/A/B/C/C.txt",
-            "/JoeBob/JoeBob2/JoeBob2.txt",
-            "/Journal/2025/11/11.txt",
+            "/A/A.md",
+            "/A/B/B.md",
+            "/A/B/C/C.md",
+            "/JoeBob/JoeBob2/JoeBob2.md",
+            "/Journal/2025/11/11.md",
         ]
         for original in test_cases:
             colon = path_to_colon(original)
@@ -197,7 +202,7 @@ class TestRoundTrip:
     def test_joebob_round_trip(self):
         """Specific test for the JoeBob issue"""
         # Start with filesystem path
-        file_path = "/JoeBob/JoeBob2/JoeBob2.txt"
+        file_path = "/JoeBob/JoeBob2/JoeBob2.md"
         
         # Convert to colon notation
         colon = path_to_colon(file_path)
@@ -205,7 +210,7 @@ class TestRoundTrip:
         
         # Convert back to filesystem path
         back = colon_to_path(colon)
-        assert back == "/JoeBob/JoeBob2/JoeBob2.txt"
+        assert back == "/JoeBob/JoeBob2/JoeBob2.md"
         
         # Ensure no duplicate folders
         assert back.count("JoeBob2") == 2  # Once in folder, once in filename
@@ -215,7 +220,7 @@ class TestRoundTrip:
         colon = ensure_root_colon_link("Parent:Child")
         assert colon == ":Parent:Child"
         file_path = colon_to_path(colon)
-        assert file_path == "/Parent/Child/Child.txt"
+        assert file_path == "/Parent/Child/Child.md"
         back = ensure_root_colon_link(path_to_colon(file_path))
         assert back == ":Parent:Child"
 
@@ -225,7 +230,7 @@ class TestEdgeCases:
     
     def test_single_character_names(self):
         """Single character page names"""
-        assert path_to_colon("/A/B/B.txt") == "A:B"
+        assert path_to_colon("/A/B/B.md") == "A:B"
 
     def test_strip_root_prefix(self):
         """strip_root_prefix removes only leading ':'"""
@@ -248,44 +253,44 @@ class TestEnsureRootPrefix:
 
     def test_ignores_pure_anchor(self):
         assert ensure_root_colon_link("#heading") == "#heading"
-        assert colon_to_path("A:B") == "/A/B/B.txt"
+        assert colon_to_path("A:B") == "/A/B/B.md"
 
 
 class TestNormalizeLinkTarget:
     def test_spaces_replaced_and_lowered(self):
-        assert normalize_link_target("My Page") == "my_page"
+        assert normalize_link_target("My Page") == "My_Page"
 
     def test_multi_segment(self):
-        assert normalize_link_target("Parent Page:Child Page") == "parent_page:child_page"
+        assert normalize_link_target("Parent Page:Child Page") == "Parent_Page:Child_Page"
 
     def test_preserves_root_prefix(self):
-        assert normalize_link_target(":Root Page:Child") == ":root_page:child"
+        assert normalize_link_target(":Root Page:Child") == ":Root_Page:Child"
 
     def test_preserves_anchor(self):
-        assert normalize_link_target("Page Name#Section") == "page_name#Section"
+        assert normalize_link_target("Page Name#Section") == "Page_Name#Section"
 
     def test_handles_extra_whitespace(self):
-        assert normalize_link_target("  Mixed   Case  ") == "mixed_case"
+        assert normalize_link_target("  Mixed   Case  ") == "Mixed_Case"
     
     def test_names_with_numbers(self):
         """Names mixing letters and numbers"""
-        assert path_to_colon("/Page1/Page2/Page2.txt") == "Page1:Page2"
-        assert colon_to_path("Page1:Page2") == "/Page1/Page2/Page2.txt"
+        assert path_to_colon("/Page1/Page2/Page2.md") == "Page1:Page2"
+        assert colon_to_path("Page1:Page2") == "/Page1/Page2/Page2.md"
     
     def test_whitespace_handling(self):
         """Paths with extra whitespace should be handled"""
-        result = path_to_colon("  /PageA/PageB/PageB.txt  ")
+        result = path_to_colon("  /PageA/PageB/PageB.md  ")
         assert result == "PageA:PageB"
     
     def test_vault_root_special_case(self):
         """Vault root name is used for empty colon path"""
         result = colon_to_path("", vault_root_name="TestVault")
-        assert result == "/TestVault.txt"
+        assert result == "/TestVault.md"
     
     def test_very_long_hierarchy(self):
         """Very deep nesting should work"""
         parts = [f"Level{i}" for i in range(10)]
-        file_path = "/" + "/".join(parts) + f"/{parts[-1]}.txt"
+        file_path = "/" + "/".join(parts) + f"/{parts[-1]}.md"
         colon = path_to_colon(file_path)
         back = colon_to_path(colon)
         assert back == file_path

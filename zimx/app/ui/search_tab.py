@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
     QStyleOptionViewItem,
 )
+from zimx.server.adapters.files import strip_page_suffix
 
 from .jump_dialog import JumpToPageDialog
 from .path_utils import path_to_colon
@@ -60,10 +61,8 @@ class SearchResultModel(QAbstractItemModel):
             snippet = result.get("snippet", "")
             line = result.get("line", 0)
             
-            # Extract leaf name without .txt
             leaf_name = path.rstrip("/").split("/")[-1] if "/" in path else path
-            if leaf_name.endswith(".txt"):
-                leaf_name = leaf_name[:-4]
+            leaf_name = strip_page_suffix(leaf_name)
             
             # Create page item (both page and snippet use the same line number)
             page_item = SearchResultItem(path=path, snippet=leaf_name, is_page=True, line=line)

@@ -178,9 +178,19 @@ class SearchEngine:
 
 
 TAG_PATTERN = QRegularExpression(r"(?<![\w.+-])@([A-Za-z0-9_]+)")
-TASK_PATTERN = QRegularExpression(r"^(?P<indent>\s*)\((?P<state>[xX ])?\)(?P<body>\s+.*)$")
-TASK_LINE_PATTERN = re.compile(r"^(\s*)\(([ xX])\)(\s+)", re.MULTILINE)
-DISPLAY_TASK_PATTERN = re.compile(r"^(\s*)([☐☑])(\s+)", re.MULTILINE)
+TASK_PATTERN = QRegularExpression(
+    r"^(?P<indent>\s*)"
+    r"(?:[-*]\s*\[(?P<state>[ xX])\])"
+    r"(?P<body>\s+.*)$"
+)
+TASK_LINE_PATTERN = re.compile(
+    r"^(\s*)([-*])\s*\[(?P<state>[ xX])\](\s+)(?P<body>.*)$",
+    re.MULTILINE,
+)
+SYMBOL_TASK_LINE_PATTERN = re.compile(
+    r"^(\s*)([☐☑])(\s+)(?P<body>.*)$",
+    re.MULTILINE,
+)
 # Bullet patterns for storage and display
 BULLET_STORAGE_PATTERN = re.compile(r"^(\s*)\* ", re.MULTILINE)
 BULLET_DISPLAY_PATTERN = re.compile(r"^(\s*)• ", re.MULTILINE)
@@ -1145,15 +1155,15 @@ class MarkdownEditor(QTextEdit):
         """Convert +CamelCase links to colon-style links [:Path:Path:Page|+CamelCase] using current page context, but only if not already inside a [link|label]."""
         import re
         from pathlib import Path
-        from zimx.server.adapters.files import PAGE_SUFFIX
+        from zimx.server.adapters.files import PAGE_SUFFIX, PAGE_SUFFIXES
         from .path_utils import path_to_colon
         current_path = self.current_relative_path() if hasattr(self, "current_relative_path") else None
         base_dir: Optional[Path] = None
         if current_path:
             try:
                 current = Path(current_path)
-                # When pointed at /Page/Page.txt, use the containing folder as the base
-                base_dir = current.parent if current.suffix == PAGE_SUFFIX else current
+                # When pointed at /Page/Page.md, use the containing folder as the base
+                base_dir = current.parent if current.suffix in PAGE_SUFFIXES else current
             except Exception:
                 base_dir = None
         # Find all [link|label] spans so we can skip +CamelCase in the label part
@@ -1185,7 +1195,7 @@ class MarkdownEditor(QTextEdit):
                     target_path = f"/{target_path}"
                 colon_path = path_to_colon(target_path)
             else:
-                colon_path = path_to_colon(f"/{link}/{link}.txt")
+                colon_path = path_to_colon(f"/{link}/{link}{PAGE_SUFFIX}")
             return f"[:{colon_path}|{label}]"
         # Replace +CamelCase only if not in the label part of a [link|label]
         return re.sub(r'\+(?P<link>[A-Z][\w]*)', replacer, text)
@@ -2067,35 +2077,41 @@ class MarkdownEditor(QTextEdit):
             if block.isValid():
                 self.highlighter.rehighlightBlock(block)
 
+    def _toggle_task_marker(self, block, rel_pos: int | None = None) -> bool:
+        text = block.text()
+        symbol_match = re.match(r"^(?P<indent>\s*)(?P<box>[☐☑])", text)
+        if symbol_match:
+            indent = symbol_match.group("indent") or ""
+            if rel_pos is not None and rel_pos > len(indent) + 1:
+                return False
+            pos = block.position() + len(indent)
+            new_symbol = "☑" if symbol_match.group("box") == "☐" else "☐"
+            line_cursor = QTextCursor(self.document())
+            line_cursor.setPosition(pos)
+            line_cursor.setPosition(pos + 1, QTextCursor.KeepAnchor)
+            line_cursor.insertText(new_symbol)
+            return True
+
+        md_match = re.match(r"^(?P<indent>\s*)(?P<bullet>[-*])\s*\[(?P<state>[ xX])\]", text)
+        if not md_match:
+            return False
+        if rel_pos is not None and rel_pos > md_match.end():
+            return False
+        state = md_match.group("state") or " "
+        new_state = "x" if state.strip().lower() != "x" else " "
+        pos = block.position() + md_match.start("state")
+        line_cursor = QTextCursor(self.document())
+        line_cursor.setPosition(pos)
+        line_cursor.setPosition(pos + 1, QTextCursor.KeepAnchor)
+        line_cursor.insertText(new_state)
+        return True
+
     def toggle_task_state(self) -> None:
         cursor = self.textCursor()
         initial_position = cursor.position()
         block = cursor.block()
-        text = block.text()
-        stripped = text.lstrip()
-        indent = len(text) - len(stripped)
-        if stripped.startswith("☐") or stripped.startswith("☑"):
-            symbol = stripped[0]
-            new_symbol = "☑" if symbol == "☐" else "☐"
-            block_cursor = QTextCursor(block)
-            block_cursor.setPosition(block.position() + indent)
-            block_cursor.setPosition(block.position() + indent + 1, QTextCursor.KeepAnchor)
-            block_cursor.insertText(new_symbol)
-            self._enforce_display_symbols()
+        if self._toggle_task_marker(block):
             self._restore_cursor_position(initial_position)
-            return
-        match = TASK_PATTERN.match(text)
-        if not match:
-            return
-        start = len(match.captured("indent"))
-        state = match.captured("state") or " "
-        new_state = "x" if state.strip().lower() != "x" else " "
-        block_cursor = QTextCursor(block)
-        block_cursor.setPosition(block.position() + start)
-        block_cursor.setPosition(block.position() + start + 3, QTextCursor.KeepAnchor)
-        block_cursor.insertText(f"({new_state})")
-        self._enforce_display_symbols()
-        self._restore_cursor_position(initial_position)
 
     def insertFromMimeData(self, source: QMimeData) -> None:  # type: ignore[override]
         # 1) Images → save and embed
@@ -2667,7 +2683,7 @@ class MarkdownEditor(QTextEdit):
             if content.startswith(("☐ ", "☑ ")):
                 content = content[2:]
             else:
-                m = re.match(r"\((?:[ xX])\)\s*(.*)", content)
+                m = re.match(r"[-*]\s*\[[ xX]\]\s*(.*)", content)
                 if m:
                     content = m.group(1)
         content = content.lstrip()
@@ -2982,20 +2998,6 @@ class MarkdownEditor(QTextEdit):
                 if link:
                     self.linkActivated.emit(link)
                     return
-        # Handle quick checkbox typing: "()" -> "( ) ", "(+)" -> "(x) "
-        if event.text() == ")" and not meaningful_modifiers:
-            super().keyPressEvent(event)
-            if self._maybe_expand_checkbox():
-                event.accept()
-                return
-            return
-        if event.key() == Qt.Key_Space and not meaningful_modifiers:
-            if self._maybe_expand_checkbox():
-                super().keyPressEvent(event)
-                event.accept()
-                return
-            # fall through to default handling
-
         # ...existing code...
         super().keyPressEvent(event)
 
@@ -3585,22 +3587,8 @@ class MarkdownEditor(QTextEdit):
     def _toggle_task_at_cursor(self, pos=None) -> bool:
         cursor = self.cursorForPosition(pos) if pos is not None else self.textCursor()
         block = cursor.block()
-        text = block.text()
-        match = TASK_PATTERN.match(text)
-        if not match:
-            return False
-        state = match.captured("state") or " "
-        if pos is not None:
-            rel = cursor.position() - block.position()
-            if rel > len(match.captured("indent")) + 3:
-                return False
-        new_state = "x" if state.strip().lower() != "x" else " "
-        start = len(match.captured("indent"))
-        new_line = text[:start] + f"({new_state})" + text[start + 3 :]
-        block_cursor = QTextCursor(block)
-        block_cursor.select(QTextCursor.LineUnderCursor)
-        block_cursor.insertText(new_line)
-        return True
+        rel = cursor.position() - block.position()
+        return self._toggle_task_marker(block, rel_pos=rel)
 
     def _handle_link_boundary_navigation(self, key: int) -> bool:
         """Handle Left/Right arrow navigation over link boundaries. Returns True if handled."""
@@ -5033,11 +5021,24 @@ class MarkdownEditor(QTextEdit):
         self._apply_scroll_past_end_margin()
 
     def _to_display(self, text: str) -> str:
-        def repl(match: re.Match[str]) -> str:
-            symbol = "☑" if match.group(2).strip().lower() == "x" else "☐"
-            return f"{match.group(1)}{symbol}{match.group(3)}"
+        def _symbol_for(state: str) -> str:
+            return "☑" if state.strip().lower() == "x" else "☐"
 
-        converted = TASK_LINE_PATTERN.sub(repl, text)
+        def _format_task_symbol(indent: str, symbol: str, body: str) -> str:
+            body = (body or "").lstrip()
+            spacer = "  " if not body else " "
+            return f"{indent}{symbol}{spacer}{body}"
+
+        def _md_repl(match: re.Match[str]) -> str:
+            symbol = _symbol_for(match.group("state"))
+            return _format_task_symbol(match.group(1), symbol, match.group("body"))
+
+        def _symbol_repl(match: re.Match[str]) -> str:
+            symbol = _symbol_for("x" if match.group(2) == "☑" else " ")
+            return _format_task_symbol(match.group(1), symbol, match.group("body"))
+
+        converted = TASK_LINE_PATTERN.sub(_md_repl, text)
+        converted = SYMBOL_TASK_LINE_PATTERN.sub(_symbol_repl, converted)
         converted = HEADING_MARK_PATTERN.sub(self._encode_heading, converted)
         # Transform wiki-style links: [link|label] → \x00link\x00label\x00
         converted = WIKI_LINK_STORAGE_PATTERN.sub(self._encode_wiki_link, converted)
@@ -5046,10 +5047,6 @@ class MarkdownEditor(QTextEdit):
         return converted
 
     def _from_display(self, text: str) -> str:
-        def repl(match: re.Match[str]) -> str:
-            state = "x" if match.group(2) == "☑" else " "
-            return f"{match.group(1)}({state}){match.group(3)}"
-
         # Restore wiki-style links: \x00link\x00label\x00 → [link|label]
         restored = WIKI_LINK_DISPLAY_PATTERN.sub(self._decode_wiki_link, text)
         # Drop duplicated link tails that sometimes get re-appended after decoding.
@@ -5063,7 +5060,10 @@ class MarkdownEditor(QTextEdit):
 
         restored = WIKI_LINK_DUPLICATE_TAIL_PATTERN.sub(_dedupe_tail, restored)
         restored = HEADING_DISPLAY_PATTERN.sub(self._decode_heading, restored)
-        restored = DISPLAY_TASK_PATTERN.sub(repl, restored)
+        restored = SYMBOL_TASK_LINE_PATTERN.sub(
+            lambda m: f"{m.group(1)}- [{'x' if m.group(2) == '☑' else ' '}] {m.group('body')}",
+            restored,
+        )
         # Restore bullets: • → *
         restored = BULLET_DISPLAY_PATTERN.sub(r"\1* ", restored)
         return restored
@@ -5203,7 +5203,7 @@ class MarkdownEditor(QTextEdit):
         self._apply_scroll_past_end_margin()
 
     def _enforce_display_symbols(self) -> None:
-        """Safely render display symbols on the current line only.
+        """Normalize display formatting on the current line only.
 
         Avoid full-document rewrites to preserve inline image fragments and
         prevent cursor jumps or spurious newlines when typing.
@@ -5218,12 +5218,25 @@ class MarkdownEditor(QTextEdit):
 
         original = block.text()
 
-        # 1) Checkbox: ( ) / (x) at start-of-line → ☐ / ☑
-        def task_repl(match: re.Match[str]) -> str:
-            symbol = "☑" if match.group(2).strip().lower() == "x" else "☐"
-            return f"{match.group(1)}{symbol}{match.group(3)}"
+        # 1) Normalize checkbox syntax to display symbols.
+        def _symbol_for(state: str) -> str:
+            return "☑" if state.strip().lower() == "x" else "☐"
 
-        line = TASK_LINE_PATTERN.sub(task_repl, original)
+        def _format_task_symbol(indent: str, symbol: str, body: str) -> str:
+            body = (body or "").lstrip()
+            spacer = "  " if not body else " "
+            return f"{indent}{symbol}{spacer}{body}"
+
+        def md_repl(match: re.Match[str]) -> str:
+            symbol = _symbol_for(match.group("state") or " ")
+            return _format_task_symbol(match.group(1), symbol, match.group("body"))
+
+        def symbol_repl(match: re.Match[str]) -> str:
+            symbol = _symbol_for("x" if match.group(2) == "☑" else " ")
+            return _format_task_symbol(match.group(1), symbol, match.group("body"))
+
+        line = TASK_LINE_PATTERN.sub(md_repl, original)
+        line = SYMBOL_TASK_LINE_PATTERN.sub(symbol_repl, line)
 
         # 2) Heading marks: #'s → sentinel on this line only (unless actively editing)
         delay_heading_render = False
@@ -5420,21 +5433,21 @@ class MarkdownEditor(QTextEdit):
         """Check if line is a dash list entry: leading '-' plus a space."""
         stripped = text.lstrip()
         indent = text[:len(text) - len(stripped)]
-        if stripped.startswith("- ") and not stripped.startswith("--"):
+        if stripped.startswith("- ") and not stripped.startswith("--") and not stripped.startswith("- ["):
             return True, indent, stripped[2:]
         return False, "", ""
 
     def _list_line_info(self, text: str) -> tuple[str, str, str]:
         """Return (kind, indent, remainder) where kind is bullet/dash/task/other."""
+        is_task, indent, _, _ = self._is_task_line(text)
+        if is_task:
+            return "task", indent, text[len(indent):]
         is_bullet, indent, _ = self._is_bullet_line(text)
         if is_bullet:
             return "bullet", indent, text[len(indent):]
         is_dash, indent, _ = self._is_dash_line(text)
         if is_dash:
             return "dash", indent, text[len(indent):]
-        is_task, indent, _, _ = self._is_task_line(text)
-        if is_task:
-            return "task", indent, text[len(indent):]
         return "other", "", text
 
     def _list_children_blocks(self, block, current_indent_len: int):
@@ -5540,17 +5553,17 @@ class MarkdownEditor(QTextEdit):
 
     def _is_task_line(self, text: str) -> tuple[bool, str, str, str]:
         """Return whether the line is a task and its components (indent, state, content)."""
-        m = re.match(r"^(\s*)\((?P<state>[ xX]?)\)\s*(.*)$", text)
-        if m:
-            indent = m.group(1) or ""
-            state = m.group("state") or " "
-            content = m.group(3) or ""
-            return True, indent, state, content
         m = re.match(r"^(\s*)([☐☑])\s*(.*)$", text)
         if m:
             indent = m.group(1) or ""
             state = "x" if m.group(2) == "☑" else " "
             content = m.group(3) or ""
+            return True, indent, state, content
+        m = re.match(r"^(\s*)([-*])\s*\[(?P<state>[ xX])\]\s*(.*)$", text)
+        if m:
+            indent = m.group(1) or ""
+            state = m.group("state") or " "
+            content = m.group(4) or ""
             return True, indent, state, content
         return False, "", "", ""
 
@@ -5582,33 +5595,7 @@ class MarkdownEditor(QTextEdit):
         return True
 
     def _maybe_expand_checkbox(self) -> bool:
-        import re as _re
-        cursor = self.textCursor()
-        block = cursor.block()
-        text = block.text()
-        pos = cursor.positionInBlock()
-        prefix = text[:pos]
-        state_char = " "
-        m = _re.match(r"^(\s*)\(\)\s*$", prefix) or _re.match(r"^(\s*)\(\)\s+\s*$", prefix)
-        if not m:
-            m = _re.match(r"^(\s*)\(\+\)\s*$", prefix) or _re.match(r"^(\s*)\(\+\)\s+\s*$", prefix)
-            if m:
-                state_char = "x"
-        if not m:
-            return False
-        indent = m.group(1) or ""
-        remainder = text[pos:]
-        marker = "☐ " if state_char == " " else "☑ "
-        new_prefix = f"{indent}{marker}"
-        new_text = new_prefix + remainder.lstrip()
-        cursor.beginEditBlock()
-        cursor.select(QTextCursor.LineUnderCursor)
-        cursor.removeSelectedText()
-        cursor.insertText(new_text)
-        cursor.setPosition(block.position() + len(new_prefix))
-        cursor.endEditBlock()
-        self.setTextCursor(cursor)
-        return True
+        return False
 
     def _handle_task_indent(self, indent: str) -> bool:
         cursor = self.textCursor()

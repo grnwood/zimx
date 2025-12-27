@@ -7,10 +7,10 @@ from typing import Iterable, List, Optional
 
 META_PATTERN = re.compile(r"\{([^}]*)\}\s*$")
 TAG_PATTERN = re.compile(r"(?:^|\s)(#\w+|@\w+)")
-# Tasks: support "- [ ]", "- [x]", "( )", "(x)", and Unicode checkboxes "☐/☑"
+# Tasks: support markdown checkboxes "- [ ]" and "- [x]"
 TASK_PATTERN = re.compile(
     r"^(?P<indent>\s*)"
-    r"(?:(?:-\s*\[(?P<state1>[ xX])\])|(?:\((?P<state2>[xX ])?\))|(?P<box>[☐☑]))"
+    r"(?:[-*]\s*\[(?P<state1>[ xX])\])"
     r"\s+(?P<body>.*)$"
 )
 
@@ -44,7 +44,7 @@ def extract_tasks(markdown: str, path: str) -> List[Task]:
         match = TASK_PATTERN.match(line)
         if not match:
             continue
-        state = match.group("state1") or match.group("state2") or ("x" if match.group("box") == "☑" else " ")
+        state = match.group("state1") or " "
         remainder = match.group("body") or ""
         meta_match = META_PATTERN.search(remainder)
         meta = {}

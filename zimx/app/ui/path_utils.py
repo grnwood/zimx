@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from zimx.server.adapters.files import PAGE_SUFFIX
+from zimx.server.adapters.files import PAGE_SUFFIX, strip_page_suffix
 
 
 def strip_root_prefix(colon_path: str) -> str:
@@ -67,13 +67,13 @@ def normalize_link_target(link: str) -> str:
 
 
 def path_to_colon(file_path: str) -> str:
-    """Convert a filesystem path like /PageA/PageB/PageC/PageC.txt to PageA:PageB:PageC.
+    """Convert a filesystem path like /PageA/PageB/PageC/PageC.md to PageA:PageB:PageC.
     
     The structure is: Each page lives in a folder with the same name.
-    /JoeBob/JoeBob2/JoeBob2.txt should display as JoeBob:JoeBob2
+    /JoeBob/JoeBob2/JoeBob2.md should display as JoeBob:JoeBob2
     
     Args:
-        file_path: Vault-relative path starting with / (e.g., "/PageA/PageB/PageC/PageC.txt")
+        file_path: Vault-relative path starting with / (e.g., "/PageA/PageB/PageC/PageC.md")
         
     Returns:
         Colon-separated page hierarchy (e.g., "PageA:PageB:PageC")
@@ -84,11 +84,11 @@ def path_to_colon(file_path: str) -> str:
         return ""
     
     parts = cleaned.split("/")
-    # Remove .txt suffix from last part if present
-    if parts and parts[-1].endswith(PAGE_SUFFIX):
-        parts[-1] = parts[-1][:-len(PAGE_SUFFIX)]
+    # Remove page suffix from last part if present
+    if parts:
+        parts[-1] = strip_page_suffix(parts[-1])
     
-    # The filesystem structure is /Folder1/Folder2/Folder2.txt
+    # The filesystem structure is /Folder1/Folder2/Folder2.md
     # The last part (file name) matches the second-to-last (folder name)
     # We want to display this as Folder1:Folder2, not Folder1:Folder2:Folder2
     if len(parts) >= 2 and parts[-1] == parts[-2]:
@@ -105,7 +105,7 @@ def colon_to_path(colon_path: str, vault_root_name: str = "") -> str:
     """Convert colon notation like PageA:PageB:PageC to filesystem path.
     
     The structure is: Each page lives in a folder with the same name.
-    PageA:PageB:PageC becomes /PageA/PageB/PageC/PageC.txt
+    PageA:PageB:PageC becomes /PageA/PageB/PageC/PageC.md
     Underscores in colon notation are converted to spaces to match actual folder names.
     
     Args:
@@ -113,7 +113,7 @@ def colon_to_path(colon_path: str, vault_root_name: str = "") -> str:
         vault_root_name: Name of the vault root (optional, for handling root page)
         
     Returns:
-        Vault-relative filesystem path (e.g., "/PageA/PageB/PageC/PageC.txt")
+        Vault-relative filesystem path (e.g., "/PageA/PageB/PageC/PageC.md")
     """
     cleaned = (colon_path or "").strip()
     if "#" in cleaned:
@@ -128,14 +128,14 @@ def colon_to_path(colon_path: str, vault_root_name: str = "") -> str:
     # Convert underscores to spaces in each part to match actual folder/file names
     parts = [part.replace("_", " ") for part in parts]
     # Each page lives in a folder with the same name
-    # Final path is /Part1/Part2/.../PartN/PartN.txt
+    # Final path is /Part1/Part2/.../PartN/PartN.md
     folder_path = "/".join(parts)
     file_name = f"{parts[-1]}{PAGE_SUFFIX}"
     return f"/{folder_path}/{file_name}"
 
 
 def colon_to_folder_path(colon_path: str) -> str:
-    """Convert colon notation to folder path (without the .txt file).
+    """Convert colon notation to folder path (without the .md file).
     
     Underscores in colon notation are converted to spaces to match actual folder names.
     

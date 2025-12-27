@@ -7,7 +7,7 @@ from zimx.app.ui.markdown_editor import MarkdownEditor
 
 def test_move_selected_text_replaces_with_link_and_sends_markdown(qapp):
     editor = MarkdownEditor()
-    editor.set_context(None, "/Source/Source.txt")
+    editor.set_context(None, "/Source/Source.md")
     editor.setPlainText("Hello world")
 
     captured: dict = {}
@@ -25,10 +25,10 @@ def test_move_selected_text_replaces_with_link_and_sends_markdown(qapp):
     editor.setTextCursor(cursor)
     QApplication.processEvents()
 
-    ok = editor._move_selected_text_to_page("/Target/Target.txt")
+    ok = editor._move_selected_text_to_page("/Target/Target.md")
     assert ok is True
 
-    assert captured["dest_path"] == "/Target/Target.txt"
+    assert captured["dest_path"] == "/Target/Target.md"
     assert captured["markdown_text"] == "world"
 
     text = editor.toPlainText()

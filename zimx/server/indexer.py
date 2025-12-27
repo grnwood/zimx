@@ -14,7 +14,7 @@ def stub_search(query: str, limit: int = 5) -> List[dict]:
         return []
     return [
         {
-            "path": "/README/README.txt",
+            "path": "/README/README.md",
             "title": "Search Coming Soon",
             "excerpt": "Indexing pipeline not implemented yet.",
             "score": 0.0,

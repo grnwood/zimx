@@ -11,7 +11,7 @@ def sample_nested_md():
     ])
 
 def test_extract_tasks_nested_structure():
-    tasks = extract_tasks(sample_nested_md(), "/Notes/demo/nested.txt")
+    tasks = extract_tasks(sample_nested_md(), "/Notes/demo/nested.md")
     # Find parent and children by text
     parent = next(t for t in tasks if t["text"] == "parent task")
     child1 = next(t for t in tasks if t["text"] == "child task 1")
