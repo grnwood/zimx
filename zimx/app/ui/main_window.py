@@ -1774,10 +1774,35 @@ class MainWindow(QMainWindow):
                     name = name.strip()
                     if not name:
                         QMessageBox.warning(self, "Missing Name", "Please enter a vault name.")
+                username = None
+                while not username:
+                    username, ok = QInputDialog.getText(
+                        self,
+                        "Vault Login",
+                        "Set a username for this vault:",
+                    )
+                    if not ok:
+                        return None
+                    username = username.strip()
+                    if not username:
+                        QMessageBox.warning(self, "Missing Username", "Please enter a username.")
+                password = None
+                while not password:
+                    password, ok = QInputDialog.getText(
+                        self,
+                        "Vault Login",
+                        "Set a password for this vault:",
+                        QLineEdit.Password,
+                    )
+                    if not ok:
+                        return None
+                    password = password.strip()
+                    if not password:
+                        QMessageBox.warning(self, "Missing Password", "Please enter a password.")
                 headers = {"Authorization": f"Bearer {access_token}"} if access_token else None
                 create_resp = httpx.post(
                     f"{base_url}/api/vaults/create",
-                    json={"name": name},
+                    json={"name": name, "auth_username": username, "auth_password": password},
                     headers=headers,
                     timeout=10.0,
                     verify=verify_ssl,
@@ -1789,7 +1814,7 @@ class MainWindow(QMainWindow):
                     headers = {"Authorization": f"Bearer {access_token}"} if access_token else None
                     create_resp = httpx.post(
                         f"{base_url}/api/vaults/create",
-                        json={"name": name},
+                        json={"name": name, "auth_username": username, "auth_password": password},
                         headers=headers,
                         timeout=10.0,
                         verify=verify_ssl,
@@ -2351,6 +2376,32 @@ class MainWindow(QMainWindow):
             self._alert(f"Login failed: {exc}")
             return False
 
+    def _ensure_remote_auth_for_vault(self) -> bool:
+        """Prompt for remote login when the selected vault is protected."""
+        if not self._remote_mode:
+            return True
+        try:
+            resp = self.http.get("/auth/status")
+        except httpx.HTTPError:
+            return True
+        if resp.status_code == 401:
+            if not self._prompt_remote_login():
+                return False
+            try:
+                resp = self.http.get("/auth/status")
+            except httpx.HTTPError:
+                return True
+        if resp.status_code != 200:
+            return True
+        payload = resp.json()
+        if not payload.get("enabled") or not payload.get("configured"):
+            return True
+        if self._access_token:
+            return True
+        if self._refresh_token and self._attempt_refresh():
+            return True
+        return self._prompt_remote_login()
+
     def _logout_remote(self) -> None:
         if not self._remote_mode:
             return
@@ -2540,6 +2591,10 @@ class MainWindow(QMainWindow):
                 return False
             self.vault_root = resp.json().get("root")
             self.vault_root_name = Path(self.vault_root).name if self.vault_root else None
+            if self._remote_mode:
+                if not self._ensure_remote_auth_for_vault():
+                    self.statusBar().showMessage("Login required to access this vault.", 4000)
+                    return False
             index_dir_missing = False
             if self.vault_root and not self._remote_mode:
                 index_dir = Path(self.vault_root) / ".zimx"

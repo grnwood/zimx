@@ -248,6 +248,43 @@ def _set_auth_config(username: str, password_hash: str):
         conn.close()
 
 
+def _init_vault_db(root: Path) -> None:
+    """Ensure the vault settings DB exists with schema."""
+    db_dir = root / ".zimx"
+    db_dir.mkdir(parents=True, exist_ok=True)
+    db_path = db_dir / "settings.db"
+    import sqlite3
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        config._ensure_schema(conn)
+    finally:
+        conn.close()
+
+
+def _set_auth_config_for_path(root: Path, username: str, password_hash: str) -> None:
+    """Store auth configuration for a specific vault path."""
+    db_path = root / ".zimx" / "settings.db"
+    import sqlite3
+    import json
+
+    config_payload = {
+        "username": username,
+        "password_hash": password_hash,
+        "configured_at": datetime.utcnow().isoformat()
+    }
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)",
+            ("auth_config", json.dumps(config_payload))
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def set_local_ui_token(token: Optional[str]) -> None:
     """Register a shared local UI token for localhost auth bypass."""
     global _LOCAL_UI_TOKEN
@@ -398,6 +435,8 @@ class VaultSelectPayload(BaseModel):
 
 class VaultCreatePayload(BaseModel):
     name: str = Field(..., min_length=1)
+    auth_username: Optional[str] = None
+    auth_password: Optional[str] = None
 
 
 class CreatePathPayload(BaseModel):
@@ -653,6 +692,17 @@ def create_vault(payload: VaultCreatePayload) -> dict:
         target.mkdir(parents=True)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to create vault: {exc}") from exc
+    try:
+        _init_vault_db(target)
+        if payload.auth_username or payload.auth_password:
+            if not payload.auth_username or not payload.auth_password:
+                raise HTTPException(status_code=400, detail="Username and password are required to configure auth")
+            password_hash = _hash_password(payload.auth_password)
+            _set_auth_config_for_path(target, payload.auth_username, password_hash)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to initialize vault: {exc}") from exc
     return {"ok": True, "name": name, "path": str(target)}
 
 
