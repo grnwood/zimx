@@ -50,6 +50,7 @@ class AIManager:
 
     # --- Public API -------------------------------------------------
     def get_or_create_page_chat(self, page_ref: str, title: str | None = None) -> Conversation:
+        self._ensure_open()
         existing = self.find_page_chat(page_ref)
         if existing:
             self._touch(existing.id)
@@ -58,9 +59,11 @@ class AIManager:
         return self._create_conversation(conv_title, "page", page_ref)
 
     def create_global_chat(self, title: str = "New chat") -> Conversation:
+        self._ensure_open()
         return self._create_conversation(title or "New chat", "global", None)
 
     def get_conversation(self, conv_id: int) -> Conversation | None:
+        self._ensure_open()
         cur = self._conn.execute(
             """
             SELECT id, title, mode, anchor_page_ref, created_at, updated_at, last_used_at
@@ -74,6 +77,7 @@ class AIManager:
         return Conversation(*row)
 
     def list_conversations(self) -> list[Conversation]:
+        self._ensure_open()
         cur = self._conn.execute(
             """
             SELECT id, title, mode, anchor_page_ref, created_at, updated_at, last_used_at
@@ -84,6 +88,7 @@ class AIManager:
         return [Conversation(*row) for row in cur.fetchall()]
 
     def list_messages(self, conv_id: int) -> list[Message]:
+        self._ensure_open()
         cur = self._conn.execute(
             """
             SELECT id, conversation_id, role, content, created_at
@@ -96,6 +101,7 @@ class AIManager:
         return [Message(*row) for row in cur.fetchall()]
 
     def list_context_items(self, conv_id: int) -> list[ContextItem]:
+        self._ensure_open()
         cur = self._conn.execute(
             """
             SELECT id, conversation_id, kind, page_ref, attachment_name, created_at
@@ -108,32 +114,40 @@ class AIManager:
         return [ContextItem(*row) for row in cur.fetchall()]
 
     def delete_context_item(self, item_id: int) -> None:
+        self._ensure_open()
         self._conn.execute("DELETE FROM ai_context_items WHERE id = ?", (item_id,))
         self._conn.commit()
 
     def send_user_message(self, conv_id: int, text: str) -> Message:
+        self._ensure_open()
         return self._insert_message(conv_id, "user", text)
 
     def add_assistant_message(self, conv_id: int, text: str) -> Message:
+        self._ensure_open()
         return self._insert_message(conv_id, "assistant", text)
 
     def add_context_page(self, conv_id: int, page_ref: str) -> None:
+        self._ensure_open()
         self._ensure_collection_mode(conv_id)
         self._insert_context_item(conv_id, "page", page_ref, None)
 
     def add_context_page_tree(self, conv_id: int, page_ref: str) -> None:
+        self._ensure_open()
         self._ensure_collection_mode(conv_id)
         self._insert_context_item(conv_id, "page-tree", page_ref, None)
 
     def add_context_attachment(self, conv_id: int, page_ref: str, attachment_name: str) -> None:
+        self._ensure_open()
         self._ensure_collection_mode(conv_id)
         self._insert_context_item(conv_id, "attachment", page_ref, attachment_name)
 
     def clear_context_items(self, conv_id: int) -> None:
+        self._ensure_open()
         self._conn.execute("DELETE FROM ai_context_items WHERE conversation_id = ?", (conv_id,))
         self._conn.commit()
 
     def find_page_chat(self, page_ref: str) -> Conversation | None:
+        self._ensure_open()
         cur = self._conn.execute(
             """
             SELECT id, title, mode, anchor_page_ref, created_at, updated_at, last_used_at
@@ -147,6 +161,7 @@ class AIManager:
         return Conversation(*row) if row else None
 
     def find_collections_containing_page(self, page_ref: str) -> list[Conversation]:
+        self._ensure_open()
         collections = [
             conv for conv in self.list_conversations() if conv.mode == "collection"
         ]
@@ -159,12 +174,24 @@ class AIManager:
 
     def delete_conversation(self, conv_id: int) -> None:
         """Remove a conversation and its related rows."""
+        self._ensure_open()
         self._conn.execute("DELETE FROM ai_messages WHERE conversation_id = ?", (conv_id,))
         self._conn.execute("DELETE FROM ai_context_items WHERE conversation_id = ?", (conv_id,))
         self._conn.execute("DELETE FROM ai_conversations WHERE id = ?", (conv_id,))
         self._conn.commit()
 
     # --- Internal helpers -------------------------------------------
+    def _ensure_open(self) -> None:
+        try:
+            self._conn.execute("SELECT 1")
+        except sqlite3.ProgrammingError as exc:
+            if "closed" not in str(exc).lower():
+                raise
+            self._conn = config._get_conn()
+            if not self._conn:
+                raise RuntimeError("AIManager requires an active vault connection") from exc
+            self._ensure_schema()
+
     def _ensure_schema(self) -> None:
         """Guard against older vaults that predate ai tables."""
         self._conn.executescript(

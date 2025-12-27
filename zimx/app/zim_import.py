@@ -7,6 +7,8 @@ from typing import Dict, Iterable, List, Tuple, Mapping, Optional
 
 from zimx.server.adapters.files import PAGE_SUFFIX, strip_page_suffix
 
+ZIM_PAGE_SUFFIX = ".txt"
+
 
 HEADER_PREFIXES = ("Content-Type:", "Wiki-Format:", "Creation-Date:")
 
@@ -266,9 +268,20 @@ def _attachments_for_page(source_root: Path, rel_stem: str) -> List[Path]:
         return []
     attachments: List[Path] = []
     for path in sorted(attach_dir.iterdir()):
-        if path.is_file() and path.suffix.lower() != PAGE_SUFFIX:
+        if path.is_file() and path.suffix.lower() != ZIM_PAGE_SUFFIX:
             attachments.append(path)
     return attachments
+
+
+def _read_text_lossy(path: Path) -> str:
+    """Read text with fallback encodings for legacy Zim exports."""
+    encodings = ("utf-8", "utf-8-sig", "cp1252", "latin-1")
+    for enc in encodings:
+        try:
+            return path.read_text(encoding=enc)
+        except UnicodeDecodeError:
+            continue
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def plan_import(
@@ -279,7 +292,7 @@ def plan_import(
     if not source_path.exists():
         raise FileNotFoundError(source_path)
     source_root = source_path if source_path.is_dir() else source_path.parent
-    txt_files = [source_path] if source_path.is_file() else sorted(source_root.rglob(f"*{PAGE_SUFFIX}"))
+    txt_files = [source_path] if source_path.is_file() else sorted(source_root.rglob(f"*{ZIM_PAGE_SUFFIX}"))
     txt_files = [p for p in txt_files if p.is_file()]
     if not txt_files:
         return [], 0
@@ -305,7 +318,7 @@ def plan_import(
         rel_stem = rel_map[file_path]
         renamed_rel = _apply_rename_path(rel_stem, rename_map)
         dest_path = _dest_path(target_folder, renamed_rel)
-        raw = file_path.read_text(encoding="utf-8")
+        raw = _read_text_lossy(file_path)
         content = convert_content(raw, rel_stem, page_map, rename_map)
         attachments = _attachments_for_page(source_root, rel_stem)
         attachment_count += len(attachments)
