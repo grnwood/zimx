@@ -146,9 +146,9 @@ class ChromaRAG:
         return chunks
 
     def _delete_scope(self, page_ref: str, kind: str, attachment: Optional[str] = None) -> None:
-        where = {"page_ref": page_ref, "kind": kind}
+        where = {"$and": [{"page_ref": page_ref}, {"kind": kind}]}
         if attachment:
-            where["attachment_name"] = attachment
+            where["$and"].append({"attachment_name": attachment})
         try:
             self.collection.delete(where=where)
             print(f"[Chroma] Delete request for {page_ref} ({kind})")

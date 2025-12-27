@@ -136,6 +136,7 @@ class TabbedRightPanel(QWidget):
         self.attachments_panel.set_remote_mode(remote_mode, api_base)
         if auth_prompt is not None:
             self.attachments_panel.set_auth_prompt(auth_prompt)
+        self.task_panel.set_http_client(http_client)
         if self.ai_chat_panel:
             self.ai_chat_panel.set_api_client(http_client)
     
@@ -422,6 +423,10 @@ class TabbedRightPanel(QWidget):
             self._add_ai_chat_tab()
         else:
             self._remove_ai_chat_tab()
+        try:
+            self.task_panel.set_ai_enabled(enabled)
+        except Exception:
+            pass
     
     def _update_attachments_tab_label(self) -> None:
         """Update the Attachments tab label with the count of attachments."""

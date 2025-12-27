@@ -6609,18 +6609,15 @@ class MainWindow(QMainWindow):
             return
         # Accept both folder paths and full page refs (may include anchors)
         base, anchor = self._split_link_anchor(chat_folder)
-        # If base appears to be a file path (ends with PAGE_SUFFIX), normalize directly
-        if base and base.strip().endswith(PAGE_SUFFIX):
-            file_path = self._normalize_editor_path(base)
-        else:
-            file_path = self._folder_to_file_path(base or "/")
+        file_path = self._normalize_editor_path(base or "/")
         # Stay on the current page if it already matches this chat's folder/file
         if self.current_path:
             try:
                 current_folder = "/" + Path(self.current_path.lstrip("/")).parent.as_posix()
             except Exception:
                 current_folder = None
-            if current_folder == (base or "/") or self.current_path == file_path:
+            target_folder = "/" + Path(file_path.lstrip("/")).parent.as_posix() if file_path else None
+            if current_folder == target_folder or self.current_path == file_path:
                 # If an anchor was provided, attempt to scroll within current page
                 if anchor and self.current_path == file_path:
                     self._scroll_to_anchor_slug(self._anchor_slug(anchor))

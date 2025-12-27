@@ -4,10 +4,12 @@ from datetime import date, timedelta
 import html
 import os
 import re
+from pathlib import Path
 from typing import Iterable, Optional
 
-from PySide6.QtCore import QEvent, Qt, Signal, QSize, QTimer, QByteArray
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QEvent, Qt, Signal, QSize, QTimer, QByteArray, QUrl
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap, QDesktopServices
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -16,6 +18,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QProgressDialog,
+    QStackedWidget,
     QSplitter,
     QHBoxLayout,
     QTreeWidget,
@@ -25,11 +29,14 @@ from PySide6.QtWidgets import (
     QWidget,
     QLabel,
     QToolButton,
+    QTextBrowser,
 )
 
+from markdown import markdown as render_markdown
 from zimx.app import config
 from zimx.server.adapters.files import PAGE_SUFFIX
-from .path_utils import path_to_colon
+from .ai_chat_panel import AIChatPanel, ApiWorker, ServerManager, VectorAPIClient
+from .path_utils import colon_to_path, path_to_colon
 
 TAG_PATTERN = re.compile(r"(?<![\w.+-])@([A-Za-z0-9_]+)")
 TAG_PREFIX_PATTERN = re.compile(r"(?<![\w.+-])@[\w_]*$")
@@ -144,6 +151,27 @@ class TaskPanel(QWidget):
         self._header_save_timer.setSingleShot(True)
         self._header_save_timer.timeout.connect(self._save_header_state)
         self._allow_filter_clear = True
+        self.vault_root = None
+        self._ai_enabled = config.load_enable_ai_chats()
+        self._ai_worker = None
+        self._ai_response_buffer = ""
+        self._ai_last_markdown = ""
+        self._ai_panel = None
+        self._ai_chat_panel = None
+        self._ai_summary_panel = None
+        self._ai_splitter = None
+        self._ai_toggle_btn = None
+        self._ai_generate_btn = None
+        self._ai_delete_btn = None
+        self._ai_copy_btn = None
+        self._ai_markdown_view = None
+        self._ai_title_label = None
+        self._task_context_dirty = True
+        self._task_index_version = config.get_task_index_version()
+        self._task_context_initialized = False
+        self._ai_progress = None
+        self._http_client = None
+        self._vector_api = VectorAPIClient(None)
 
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search tasks…")
@@ -309,12 +337,32 @@ class TaskPanel(QWidget):
         self.zoom_in_btn.clicked.connect(lambda: self._adjust_font_size(1))
         header_row.addWidget(self.zoom_in_btn)
 
+        self._ai_toggle_btn = QToolButton()
+        self._ai_toggle_btn.setToolTip("Open task AI insights and chat")
+        self._ai_toggle_btn.setAutoRaise(True)
+        self._ai_toggle_btn.setCheckable(True)
+        self._ai_toggle_btn.setVisible(self._ai_enabled)
+        self._ai_toggle_btn.setIcon(self._load_ai_icon())
+        self._ai_toggle_btn.setIconSize(QSize(22, 22))
+        self._ai_toggle_btn.toggled.connect(self._toggle_ai_panel)
+        header_row.addWidget(self._ai_toggle_btn)
+
+        self.task_content = QWidget()
+        task_content_layout = QVBoxLayout()
+        task_content_layout.setContentsMargins(0, 0, 0, 0)
+        task_content_layout.addWidget(splitter)
+        self.task_content.setLayout(task_content_layout)
+
+        self.content_stack = QStackedWidget()
+        self.content_stack.addWidget(self.task_content)
+        if self._ai_enabled:
+            self._setup_ai_panel()
+
         layout = QVBoxLayout()
         layout.addLayout(header_row)
-        layout.addWidget(splitter, 1)
+        layout.addWidget(self.content_stack, 1)
         self.setLayout(layout)
         
-        self.vault_root = None
         self._nav_filter_prefix: Optional[str] = None
         self._nav_filter_enabled = True
         self._include_journal = True
@@ -458,9 +506,21 @@ class TaskPanel(QWidget):
             self.show_actionable,
             self.zoom_in_btn,
             self.zoom_out_btn,
+            self._ai_toggle_btn,
+            self._ai_title_label,
+            self._ai_delete_btn,
+            self._ai_copy_btn,
+            self._ai_generate_btn,
+            self._ai_markdown_view,
         ):
             try:
-                widget.setFont(font)
+                if widget:
+                    widget.setFont(font)
+            except Exception:
+                pass
+        if self._ai_chat_panel:
+            try:
+                self._ai_chat_panel.set_font_size(self._font_size)
             except Exception:
                 pass
 
@@ -477,6 +537,639 @@ class TaskPanel(QWidget):
         except Exception:
             return
         config.save_header_state(self._header_state_key, state)
+
+    def _find_asset(self, name: str) -> Optional[Path]:
+        candidates = [
+            Path(__file__).resolve().parents[2] / "assets" / name,
+            Path(__file__).resolve().parents[2] / "zimx" / "assets" / name,
+        ]
+        for path in candidates:
+            if path.exists():
+                return path
+        return None
+
+    def _load_svg_icon(self, name: str, size: QSize) -> QIcon:
+        path = self._find_asset(name)
+        if not path:
+            return QIcon()
+        try:
+            renderer = QSvgRenderer(str(path))
+            pixmap = QPixmap(size)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            renderer.render(painter)
+            painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+            painter.fillRect(pixmap.rect(), Qt.white)
+            painter.end()
+            return QIcon(pixmap)
+        except Exception:
+            return QIcon()
+
+    def _load_ai_icon(self) -> QIcon:
+        return self._load_svg_icon("ai.svg", QSize(24, 24))
+
+    def _build_ai_summary_panel(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(6)
+        self._ai_title_label = QLabel("AI Insights")
+        self._ai_title_label.setStyleSheet("font-weight: bold;")
+        self._ai_delete_btn = QToolButton()
+        self._ai_delete_btn.setIcon(self._load_svg_icon("icons8-trash.svg", QSize(20, 20)))
+        self._ai_delete_btn.setToolTip("Delete AI summary for tasks")
+        self._ai_delete_btn.setAutoRaise(True)
+        self._ai_delete_btn.clicked.connect(self._delete_ai_summary)
+        self._ai_copy_btn = QToolButton()
+        self._ai_copy_btn.setIcon(self._load_svg_icon("copy.svg", QSize(20, 20)))
+        self._ai_copy_btn.setToolTip("Copy AI summary markdown")
+        self._ai_copy_btn.setAutoRaise(True)
+        self._ai_copy_btn.clicked.connect(self._copy_ai_markdown)
+        self._ai_generate_btn = QToolButton()
+        self._ai_generate_btn.setIcon(self._load_ai_icon())
+        self._ai_generate_btn.setToolTip("Refresh AI summary for tasks")
+        self._ai_generate_btn.setAutoRaise(True)
+        self._ai_generate_btn.setIconSize(QSize(28, 28))
+        self._ai_generate_btn.clicked.connect(self._on_generate_ai_summary)
+        header.addWidget(self._ai_title_label)
+        header.addStretch(1)
+        header.addWidget(self._ai_delete_btn)
+        header.addWidget(self._ai_copy_btn)
+        header.addWidget(self._ai_generate_btn)
+        self._ai_markdown_view = QTextBrowser()
+        self._ai_markdown_view.setOpenExternalLinks(False)
+        self._ai_markdown_view.setOpenLinks(False)
+        self._ai_markdown_view.anchorClicked.connect(self._on_ai_markdown_link_clicked)
+        self._ai_markdown_view.setReadOnly(True)
+        self._ai_markdown_view.setStyleSheet(
+            "background:#1f1f1f; color:#f0f0f0; border:1px solid #444; padding:10px;"
+        )
+        layout.addLayout(header)
+        layout.addWidget(self._ai_markdown_view, 1)
+        self._set_ai_markdown("Click button to generate an AI summary.")
+        return panel
+
+    def _setup_ai_panel(self) -> None:
+        if self._ai_panel:
+            return
+        self._ai_panel = QWidget()
+        layout = QVBoxLayout(self._ai_panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._ai_summary_panel = self._build_ai_summary_panel()
+        self._ai_chat_panel = AIChatPanel(font_size=self._font_size, api_client=self._http_client)
+        self._ai_chat_panel.set_preserve_session_on_reset(True, keep_context=True)
+        self._ai_chat_panel.chatNavigateRequested.connect(self._on_ai_chat_navigate_requested)
+        if self.vault_root:
+            try:
+                self._ai_chat_panel.set_vault_root(self.vault_root)
+            except Exception:
+                pass
+        self._set_ai_chat_enabled(self._task_context_initialized)
+        splitter = QSplitter(Qt.Vertical)
+        splitter.addWidget(self._ai_summary_panel)
+        splitter.addWidget(self._ai_chat_panel)
+        splitter.setSizes([200, 300])
+        layout.addWidget(splitter, 1)
+        self._ai_splitter = splitter
+        self.content_stack.addWidget(self._ai_panel)
+        self._apply_font_size()
+
+    def _toggle_ai_panel(self, checked: bool) -> None:
+        if not self._ai_enabled:
+            if self._ai_toggle_btn:
+                self._ai_toggle_btn.setChecked(False)
+            return
+        if checked:
+            if not self._ai_panel:
+                self._setup_ai_panel()
+            if self._ai_panel:
+                self.content_stack.setCurrentWidget(self._ai_panel)
+            self._open_ai_panel()
+        else:
+            self.content_stack.setCurrentWidget(self.task_content)
+
+    def _open_ai_panel(self) -> None:
+        if not self._ai_enabled:
+            return
+        if not config.has_active_vault():
+            self._set_ai_markdown("Open a vault to view task insights.")
+            return
+        self._ensure_task_chat_ready()
+        stored = config.load_task_ai_summary() or ""
+        if stored.strip():
+            self._set_ai_markdown(stored)
+            self._task_context_initialized = True
+            self._set_ai_chat_enabled(True)
+        else:
+            self._set_ai_chat_enabled(self._task_context_initialized)
+            self._set_ai_markdown("Click AI button to generate AI summary.")
+
+    def _set_ai_markdown(self, text: str) -> None:
+        if not self._ai_markdown_view:
+            return
+        self._ai_last_markdown = text or ""
+        self._render_ai_markdown(self._ai_last_markdown)
+
+    def _render_ai_markdown(self, markdown_text: str) -> None:
+        if not self._ai_markdown_view:
+            return
+        try:
+            cleaned = self._replace_emoji_with_fallback(markdown_text or "")
+            linked = self._linkify_vault_paths(cleaned)
+            html = render_markdown(linked, extensions=["extra", "sane_lists", "tables", "fenced_code"])
+            font_size = max(6, self._font_size)
+            style = f"""
+            <style>
+            body {{ background:#1f1f1f; color:#f0f0f0; font-size: {font_size}px;
+                   font-family: 'Noto Sans', 'Segoe UI', 'Helvetica', 'Arial',
+                   'Noto Color Emoji', 'Segoe UI Emoji', 'Apple Color Emoji', sans-serif; }}
+            h1,h2,h3,h4,h5,h6 {{ margin: 0.4em 0 0.2em 0; }}
+            ul,ol {{ margin-top: 0.2em; margin-bottom: 0.2em; }}
+            </style>
+            """
+            self._ai_markdown_view.setHtml(style + html)
+        except Exception:
+            try:
+                self._ai_markdown_view.setPlainText(markdown_text)
+            except Exception:
+                pass
+
+    def _replace_emoji_with_fallback(self, text: str) -> str:
+        if not text:
+            return text
+        replacements = {
+            "📝": "✎",
+            "✅": "✔",
+            "✔️": "✔",
+            "📅": "📆",
+            "📎": "⎘",
+            "🧩": "◆",
+            "🔧": "🔧",
+            "🧭": "➤",
+            "🗒️": "✐",
+            "📌": "•",
+            "🎯": "◎",
+            "📍": "•",
+            "🗓️": "📆",
+            "🏷️": "⬦",
+            "👉": "→",
+            "⚡": "⚡",
+        }
+        for emoji, fallback in replacements.items():
+            text = text.replace(emoji, fallback)
+        return text
+
+    def _linkify_vault_paths(self, text: str) -> str:
+        if not text:
+            return text
+        fenced = re.split(r"(```.*?```)", text, flags=re.DOTALL)
+        for idx, chunk in enumerate(fenced):
+            if chunk.startswith("```"):
+                continue
+            fenced[idx] = self._linkify_inline_paths(chunk)
+        return "".join(fenced)
+
+    def _linkify_inline_paths(self, text: str) -> str:
+        segments = re.split(r"(`[^`]*`)", text)
+        for idx, seg in enumerate(segments):
+            if seg.startswith("`"):
+                continue
+            segments[idx] = self._replace_path_tokens(seg)
+        return "".join(segments)
+
+    def _replace_path_tokens(self, text: str) -> str:
+        pattern = re.compile(
+            rf"(^|[\s\(\[\"'])"
+            rf"(/[^\s`<>\"'()\]]+(?:{re.escape(PAGE_SUFFIX)})?)"
+        )
+
+        def _replace(match: re.Match[str]) -> str:
+            prefix = match.group(1)
+            raw_path = match.group(2)
+            trimmed = raw_path.rstrip(",:;.!?")
+            trailing = raw_path[len(trimmed):]
+            if not trimmed:
+                return f"{prefix}{raw_path}"
+            colon = path_to_colon(trimmed)
+            if not colon:
+                return f"{prefix}{raw_path}"
+            colon = f":{colon}"
+            label = Path(trimmed).stem or colon.split(":")[-1]
+            safe_label = html.escape(label, quote=False)
+            safe_colon = html.escape(colon, quote=True)
+            return f"{prefix}<a href=\"{safe_colon}\" title=\"{safe_colon}\">{safe_label}</a>{trailing}"
+
+        return pattern.sub(_replace, text)
+
+    def _normalize_ai_link_target(self, href: str) -> Optional[str]:
+        if not href:
+            return None
+        base = href.split("#", 1)[0].strip()
+        if not base:
+            return None
+        if base.startswith(":"):
+            vault_root_name = Path(self.vault_root).name if self.vault_root else ""
+            base = colon_to_path(base, vault_root_name) or base
+        if not base.startswith("/"):
+            base = "/" + base.lstrip("/")
+        rel = Path(base.lstrip("/"))
+        if rel.suffix != PAGE_SUFFIX:
+            name = rel.name or ""
+            if name:
+                rel = rel / f"{name}{PAGE_SUFFIX}"
+                base = "/" + rel.as_posix()
+        return base
+
+    def _open_ai_link(self, href: str) -> None:
+        target = self._normalize_ai_link_target(href)
+        if not target:
+            return
+        try:
+            self._mark_activation_source("mouse")
+        except Exception:
+            pass
+        self.taskActivated.emit(target, 1)
+
+    def _on_ai_markdown_link_clicked(self, url: QUrl) -> None:
+        href = url.toString()
+        if href.startswith("http://") or href.startswith("https://"):
+            QDesktopServices.openUrl(QUrl(href))
+            return
+        if href.startswith("/") or href.startswith(":"):
+            self._open_ai_link(href)
+
+    def _on_ai_chat_navigate_requested(self, href: str) -> None:
+        if not href:
+            return
+        self._open_ai_link(href)
+
+    def _ensure_task_chat_ready(self) -> None:
+        if not self._ai_chat_panel:
+            return
+        try:
+            self._ai_chat_panel.open_named_chat("Tasks", "/")
+            self._ai_chat_panel.ensure_context_page_ref("tasks", index=False)
+        except Exception:
+            return
+
+    def _set_ai_chat_enabled(self, enabled: bool) -> None:
+        if not self._ai_chat_panel:
+            return
+        self._ai_chat_panel.setEnabled(enabled)
+        if enabled:
+            self._ai_chat_panel.setToolTip("")
+        else:
+            self._ai_chat_panel.setToolTip("Initialize task AI to enable chat.")
+
+    def _build_task_context_text(self) -> str:
+        tasks = config.fetch_tasks(
+            "",
+            [],
+            include_done=True,
+            include_ancestors=True,
+            actionable_only=False,
+        )
+        lines: list[str] = []
+        for task in tasks:
+            status = "(x)" if task.get("status") == "done" else "()"
+            text = (task.get("text") or "").strip()
+            priority = "!" * min(max(int(task.get("priority") or 0), 0), 3)
+            tags = " ".join(task.get("tags") or [])
+            due = (task.get("due") or "").strip()
+            starts = (task.get("starts") or task.get("start") or "").strip()
+            date_parts = []
+            if due:
+                date_parts.append(f"<{due}")
+            if starts:
+                date_parts.append(f">{starts}")
+            date_str = " ".join(date_parts)
+            parts = [status]
+            if text:
+                parts.append(text)
+            if priority:
+                parts.append(priority)
+            if tags:
+                parts.append(tags)
+            if date_str:
+                parts.append(date_str)
+            line = " ".join(parts).strip()
+            path = (task.get("path") or "").strip()
+            if path:
+                line = f"{line} :: {path}"
+            lines.append(line)
+        return "\n".join(lines).strip()
+
+    def _build_task_insight_input(self, max_lines: int = 200, max_chars: int = 6000) -> str:
+        tasks = config.fetch_tasks(
+            "",
+            [],
+            include_done=True,
+            include_ancestors=True,
+            actionable_only=False,
+        )
+        tag_counts = config.fetch_task_tags()
+        today = date.today()
+        overdue = 0
+        upcoming = 0
+        future_starts = 0
+        done = 0
+        priority_counts = {0: 0, 1: 0, 2: 0, 3: 0}
+        path_counts: dict[str, int] = {}
+        for task in tasks:
+            status = task.get("status") or ""
+            if status == "done":
+                done += 1
+            priority = min(max(int(task.get("priority") or 0), 0), 3)
+            priority_counts[priority] = priority_counts.get(priority, 0) + 1
+            path = (task.get("path") or "").strip()
+            if path:
+                parent = str(Path(path).parent)
+                path_counts[parent] = path_counts.get(parent, 0) + 1
+            due_str = (task.get("due") or "").strip()
+            if due_str:
+                try:
+                    due_dt = date.fromisoformat(due_str)
+                    if status != "done":
+                        if due_dt < today:
+                            overdue += 1
+                        elif due_dt <= today + timedelta(days=7):
+                            upcoming += 1
+                except ValueError:
+                    pass
+            start_str = (task.get("starts") or task.get("start") or "").strip()
+            if start_str:
+                try:
+                    start_dt = date.fromisoformat(start_str)
+                    if start_dt > today:
+                        future_starts += 1
+                except ValueError:
+                    pass
+        total = len(tasks)
+        todo = total - done
+        lines: list[str] = []
+        lines.append("Task overview:")
+        lines.append(f"Total tasks: {total} (open: {todo}, done: {done})")
+        lines.append(
+            "Priority counts: "
+            f"!={priority_counts.get(1, 0)}, "
+            f"!!={priority_counts.get(2, 0)}, "
+            f"!!!={priority_counts.get(3, 0)}"
+        )
+        lines.append(f"Overdue open tasks: {overdue}")
+        lines.append(f"Upcoming (next 7 days): {upcoming}")
+        lines.append(f"Future start tasks: {future_starts}")
+        lines.append("")
+        lines.append("Top task areas (by parent path):")
+        for path, count in sorted(path_counts.items(), key=lambda item: item[1], reverse=True)[:12]:
+            lines.append(f"{path}: {count}")
+        lines.append("")
+        lines.append("Tag counts:")
+        if tag_counts:
+            for tag, count in tag_counts[:20]:
+                lines.append(f"{tag}: {count}")
+        else:
+            lines.append("None")
+        lines.append("")
+        lines.append("Tasks (truncated):")
+        count = 0
+        for task in tasks:
+            if count >= max_lines:
+                lines.append("[truncated]")
+                break
+            status = "(x)" if task.get("status") == "done" else "()"
+            text = (task.get("text") or "").strip()
+            priority = "!" * min(max(int(task.get("priority") or 0), 0), 3)
+            tags = " ".join(task.get("tags") or [])
+            due = (task.get("due") or "").strip()
+            starts = (task.get("starts") or task.get("start") or "").strip()
+            date_parts = []
+            if due:
+                date_parts.append(f"<{due}")
+            if starts:
+                date_parts.append(f">{starts}")
+            date_str = " ".join(date_parts)
+            parts = [status]
+            if text:
+                parts.append(text)
+            if priority:
+                parts.append(priority)
+            if tags:
+                parts.append(tags)
+            if date_str:
+                parts.append(date_str)
+            line = " ".join(parts).strip()
+            path = (task.get("path") or "").strip()
+            if path:
+                line = f"{line} :: {path}"
+            if sum(len(l) + 1 for l in lines) + len(line) + 1 > max_chars:
+                lines.append("[truncated]")
+                break
+            lines.append(line)
+            count += 1
+        return "\n".join(lines).strip()
+
+    def _ensure_task_context_indexed(self, force: bool) -> bool:
+        if not config.has_active_vault():
+            return False
+        if not self._vector_api or not self._vector_api.available():
+            return False
+        if not force and not self._task_context_dirty:
+            return True
+        text = self._build_task_context_text()
+        if not text:
+            return False
+        ok = self._vector_api.index_text("tasks", text, "page", timeout=60.0)
+        if ok:
+            self._task_context_dirty = False
+            self._task_context_initialized = True
+        return ok
+
+    def _resolve_ai_server_and_model(self) -> Optional[tuple[dict, str]]:
+        try:
+            server_mgr = ServerManager()
+        except Exception:
+            return None
+        server_config: dict = {}
+        try:
+            default_server_name = config.load_default_ai_server()
+        except Exception:
+            default_server_name = None
+        if default_server_name:
+            try:
+                server_config = server_mgr.get_server(default_server_name) or {}
+            except Exception:
+                server_config = {}
+        if not server_config:
+            try:
+                active = server_mgr.get_active_server_name()
+                if active:
+                    server_config = server_mgr.get_server(active) or {}
+            except Exception:
+                server_config = {}
+        if not server_config:
+            try:
+                servers = server_mgr.load_servers()
+                if servers:
+                    server_config = servers[0]
+            except Exception:
+                server_config = {}
+        if not server_config:
+            return None
+        try:
+            model = config.load_default_ai_model()
+        except Exception:
+            model = None
+        if not model:
+            model = server_config.get("default_model") or "gpt-3.5-turbo"
+        return server_config, model
+
+    def _on_generate_ai_summary(self) -> None:
+        if not self._ai_enabled:
+            return
+        if self._ai_worker and self._ai_worker.isRunning():
+            try:
+                self._ai_worker.request_cancel()
+            except Exception:
+                pass
+        if not config.has_active_vault():
+            self._set_ai_markdown("Open a vault to generate a task summary.")
+            return
+        if self._ai_progress:
+            try:
+                self._ai_progress.close()
+            except Exception:
+                pass
+        progress = QProgressDialog("Collecting Task Info…", None, 0, 0, self)
+        progress.setWindowTitle("Collecting Task Info")
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        progress.show()
+        QApplication.processEvents()
+        self._ai_progress = progress
+        prompt_path = Path(__file__).resolve().parents[1] / "task-tab-insight-prompt.txt"
+        try:
+            prompt_text = prompt_path.read_text(encoding="utf-8")
+        except Exception:
+            if self._ai_progress:
+                self._ai_progress.close()
+                self._ai_progress = None
+            self._set_ai_markdown("Failed to load task summary prompt.")
+            return
+        server_model = self._resolve_ai_server_and_model()
+        if not server_model:
+            if self._ai_progress:
+                self._ai_progress.close()
+                self._ai_progress = None
+            self._set_ai_markdown("Configure an AI server to generate a summary.")
+            return
+        if not self._ensure_task_context_indexed(force=True):
+            if self._ai_progress:
+                self._ai_progress.close()
+                self._ai_progress = None
+            self._set_ai_markdown("Unable to index task context.")
+            return
+        self._set_ai_chat_enabled(True)
+        self._ensure_task_chat_ready()
+        task_context = self._build_task_insight_input()
+        if not task_context.strip():
+            if self._ai_progress:
+                self._ai_progress.close()
+                self._ai_progress = None
+            self._set_ai_markdown("No tasks available to summarize.")
+            return
+        server_config, model = server_model
+        messages = [
+            {"role": "system", "content": prompt_text},
+            {"role": "user", "content": f"Task list:\n\n{task_context}"},
+        ]
+        self._ai_response_buffer = ""
+        self._set_ai_markdown("Generating AI summary…")
+        try:
+            if self._ai_generate_btn:
+                self._ai_generate_btn.setEnabled(False)
+        except Exception:
+            pass
+        worker = ApiWorker(server_config, messages, model, stream=True)
+        self._ai_worker = worker
+        worker.chunk.connect(self._on_ai_chunk)
+        worker.finished.connect(self._on_ai_finished)
+        worker.failed.connect(self._on_ai_failed)
+        worker.start()
+
+    def _on_ai_chunk(self, chunk: str) -> None:
+        self._ai_response_buffer += chunk or ""
+        if self._ai_response_buffer.strip():
+            self._ai_last_markdown = self._ai_response_buffer
+            self._render_ai_markdown(self._ai_last_markdown)
+
+    def _on_ai_finished(self, content: str) -> None:
+        try:
+            if self._ai_generate_btn:
+                self._ai_generate_btn.setEnabled(True)
+        except Exception:
+            pass
+        if self._ai_progress:
+            try:
+                self._ai_progress.close()
+            except Exception:
+                pass
+            self._ai_progress = None
+        final = content or self._ai_response_buffer
+        self._ai_response_buffer = final
+        if not final.strip():
+            self._set_ai_markdown("AI returned no content.")
+        else:
+            self._set_ai_markdown(final)
+            config.save_task_ai_summary(final)
+        if self._ai_worker:
+            try:
+                self._ai_worker.deleteLater()
+            except Exception:
+                pass
+            self._ai_worker = None
+
+    def _on_ai_failed(self, message: str) -> None:
+        try:
+            if self._ai_generate_btn:
+                self._ai_generate_btn.setEnabled(True)
+        except Exception:
+            pass
+        if self._ai_progress:
+            try:
+                self._ai_progress.close()
+            except Exception:
+                pass
+            self._ai_progress = None
+        if not message:
+            message = "Failed to generate AI summary."
+        self._set_ai_markdown(message)
+        if self._ai_worker:
+            try:
+                self._ai_worker.deleteLater()
+            except Exception:
+                pass
+            self._ai_worker = None
+
+    def _copy_ai_markdown(self) -> None:
+        if not self._ai_enabled:
+            return
+        try:
+            clipboard = QApplication.clipboard()
+        except Exception:
+            return
+        payload = self._ai_last_markdown or ""
+        clipboard.setText(payload)
+
+    def _delete_ai_summary(self) -> None:
+        if not self._ai_enabled:
+            return
+        config.delete_task_ai_summary()
+        self._set_ai_markdown("Click button to generate an AI summary.")
 
     @staticmethod
     def _normalize_task_path(path: Optional[str]) -> str:
@@ -723,6 +1416,8 @@ class TaskPanel(QWidget):
         self._last_keyboard_task_id = None
         self._last_keyboard_task_path = None
         self._last_keyboard_task_line = None
+        self._task_context_dirty = True
+        self._task_context_initialized = False
         self._update_filter_indicator()
 
     def _refresh_tags(self) -> None:
@@ -781,6 +1476,10 @@ class TaskPanel(QWidget):
         self.tag_list.blockSignals(False)
 
     def _refresh_tasks(self) -> None:
+        current_version = config.get_task_index_version()
+        if current_version != self._task_index_version:
+            self._task_index_version = current_version
+            self._task_context_dirty = True
         raw_text = self.search.text().strip()
         query, tokens = self._parse_search_tags(raw_text)
         self._tag_source_tasks = None
@@ -1064,6 +1763,37 @@ class TaskPanel(QWidget):
         """Set vault root for task filtering preferences."""
         self.vault_root = vault_root
         self._apply_show_future_preference()
+        self._task_context_dirty = True
+        self._task_context_initialized = False
+        self._set_ai_chat_enabled(False)
+        if self._ai_chat_panel:
+            try:
+                self._ai_chat_panel.set_vault_root(vault_root)
+            except Exception:
+                pass
+
+    def set_http_client(self, http_client) -> None:
+        self._http_client = http_client
+        self._vector_api = VectorAPIClient(http_client)
+        if self._ai_chat_panel:
+            try:
+                self._ai_chat_panel.set_api_client(http_client)
+            except Exception:
+                pass
+
+    def set_ai_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._ai_enabled:
+            return
+        self._ai_enabled = enabled
+        if self._ai_toggle_btn:
+            self._ai_toggle_btn.setVisible(enabled)
+            if not enabled:
+                self._ai_toggle_btn.setChecked(False)
+        if enabled:
+            self._setup_ai_panel()
+        else:
+            self.content_stack.setCurrentWidget(self.task_content)
 
     def _on_show_future_toggled(self, checked: bool) -> None:
         if config.has_active_vault():

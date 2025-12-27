@@ -42,6 +42,7 @@ from zimx.app import config, config as zimx_config
 from zimx.ai.manager import AIManager, ContextItem
 from zimx.rag.index import RetrievedChunk
 from .path_utils import path_to_colon
+from zimx.server.adapters.files import PAGE_SUFFIX
 
 AI_CHAT_COLOR = "\033[34m"
 CHROMA_COLOR = "\033[33m"
@@ -88,7 +89,14 @@ class VectorAPIClient:
         except Exception:
             return True
 
-    def index_text(self, page_ref: str, text: str, kind: str, attachment: Optional[str] = None) -> bool:
+    def index_text(
+        self,
+        page_ref: str,
+        text: str,
+        kind: str,
+        attachment: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> bool:
         if not self.available():
             return False
         payload = {
@@ -98,14 +106,14 @@ class VectorAPIClient:
             "attachment_name": attachment,
         }
         try:
-            resp = self._client.post("/vector/add", json=payload)
+            resp = self._client.post("/vector/add", json=payload, timeout=timeout)
             resp.raise_for_status()
             return True
         except (httpx.HTTPError, RuntimeError) as exc:
             _log_vector(f"Failed to index {page_ref}: {exc}")
             return False
 
-    def delete_text(self, page_ref: str, kind: str, attachment: Optional[str] = None) -> bool:
+    def delete_text(self, page_ref: str, kind: str, attachment: Optional[str] = None, timeout: Optional[float] = None) -> bool:
         if not self.available():
             return False
         payload = {
@@ -114,7 +122,7 @@ class VectorAPIClient:
             "attachment_name": attachment,
         }
         try:
-            resp = self._client.post("/vector/remove", json=payload)
+            resp = self._client.post("/vector/remove", json=payload, timeout=timeout)
             resp.raise_for_status()
             return True
         except (httpx.HTTPError, RuntimeError) as exc:
@@ -645,6 +653,21 @@ class AIChatStore:
         chat_id = self._create_session(name or "Chat", parent_id, chat_path, "chat")
         return {"id": chat_id, "name": name or "Chat", "parent_id": parent_id, "path": chat_path, "type": "chat"}
 
+    def get_or_create_named_chat(self, folder_path: str, name: str) -> Dict:
+        """Return a stable named chat for a folder, creating it if needed."""
+        folder_path = self._normalize_folder_path(folder_path)
+        parent_id, folder_path = self._ensure_folder_chain(folder_path)
+        base_name = name or "Chat"
+        if folder_path == "/":
+            chat_path = f"/{base_name}"
+        else:
+            chat_path = f"{folder_path.rstrip('/')}/{base_name}".replace("//", "/")
+        existing = self.get_session_by_path(chat_path, "chat")
+        if existing:
+            return existing
+        chat_id = self._create_session(base_name, parent_id, chat_path, "chat")
+        return {"id": chat_id, "name": base_name, "parent_id": parent_id, "path": chat_path, "type": "chat"}
+
     def get_or_create_chat_for_page(self, rel_path: Optional[str]) -> Optional[Dict]:
         if not rel_path:
             return self.get_session_by_path("/", "chat") or self._create_root_chat()
@@ -1166,6 +1189,8 @@ class AIChatPanel(QtWidgets.QWidget):
         self._condense_flush_timer.setInterval(40)
         self._condense_flush_timer.setSingleShot(True)
         self._condense_flush_timer.timeout.connect(self._flush_condense_buffer)
+        self._preserve_session_on_reset = False
+        self._reset_keep_context = False
         self._build_ui()
         self._load_system_prompts()
         self._refresh_server_dropdown()
@@ -1406,6 +1431,40 @@ class AIChatPanel(QtWidgets.QWidget):
             return
 
         session_id = self.current_session_id
+        if self._preserve_session_on_reset:
+            if not self._reset_keep_context:
+                if self._context_items:
+                    for item in list(self._context_items):
+                        self._delete_context_source(item)
+                if self.ai_manager and self._current_ai_conversation_id:
+                    try:
+                        self.ai_manager.clear_context_items(self._current_ai_conversation_id)
+                    except Exception:
+                        import traceback
+                        traceback.print_exc()
+                self._context_items = []
+                self._current_ai_conversation_id = None
+                self._update_context_summary()
+            self.messages = []
+            self.chat_view.clear()
+            self._context_overlay.hide()
+            self._context_popup.hide()
+            try:
+                self.store.clear_chat(session_id)
+            except Exception as exc:
+                print(f"[AIChat][reset] Failed to clear chat {session_id}: {exc}")
+            self._condense_buffer = ""
+            self._summary_content = None
+            self._message_think.clear()
+            self._message_think_active.clear()
+            self._message_think_expanded.clear()
+            self._condense_think_state = {"in_think": False, "pending": "", "visible": ""}
+            self._context_popup_position = None
+            self._context_popup_width = None
+            self._set_status("Chat history cleared.")
+            print("[AIChat][reset] Finished _reset_chat_history")
+            return
+
         if self._context_items:
             for item in list(self._context_items):
                 self._delete_context_source(item)
@@ -1440,6 +1499,11 @@ class AIChatPanel(QtWidgets.QWidget):
             self._load_chat_messages(self.current_session_id)
         self._set_status("Chat history cleared.")
         print("[AIChat][reset] Finished _reset_chat_history")
+
+    def set_preserve_session_on_reset(self, preserve: bool, *, keep_context: bool = False) -> None:
+        """Control whether reset clears messages but keeps the current chat session."""
+        self._preserve_session_on_reset = bool(preserve)
+        self._reset_keep_context = bool(keep_context)
 
     def _load_condense_prompt(self) -> str:
         """Load the condense prompt from file or fall back to a default."""
@@ -1672,10 +1736,14 @@ class AIChatPanel(QtWidgets.QWidget):
         for idx, (role, content) in enumerate(self.messages):
             cls = "assistant" if role == "assistant" else "user"
             msg_id = f"msg-{idx}"
-            rendered = markdown(content, extensions=["fenced_code", "tables"])
+            linkified = self._linkify_vault_paths(content)
+            rendered = markdown(linkified, extensions=["fenced_code", "tables"])
             if self._is_plain_markdown(rendered):
-                safe = html.escape(content).replace("\n", "<br>")
-                rendered = f"<p>{safe}</p>"
+                if "<a href=" in linkified:
+                    rendered = f"<p>{linkified.replace(chr(10), '<br>')}</p>"
+                else:
+                    safe = html.escape(linkified).replace("\n", "<br>")
+                    rendered = f"<p>{safe}</p>"
             actions = [
                 f"<a href='action:copy:{msg_id}'>{_icon_tag('copy.svg','Copy message', 20)}</a>",
                 f"<a href='action:goto:{msg_id}'>{_icon_tag('go-to-top.svg','Go to start', 20)}</a>",
@@ -1715,10 +1783,14 @@ class AIChatPanel(QtWidgets.QWidget):
                     "<a href='action:summary:accept' title='Accept condensed chat'>Accept</a>",
                     "<a href='action:summary:reject' title='Reject condensed chat'>Reject</a>",
                 ]
-            summary_html = markdown(summary_text, extensions=["fenced_code", "tables"])
+            summary_linkified = self._linkify_vault_paths(summary_text)
+            summary_html = markdown(summary_linkified, extensions=["fenced_code", "tables"])
             if self._is_plain_markdown(summary_html):
-                safe = html.escape(summary_text).replace("\n", "<br>")
-                summary_html = f"<p>{safe}</p>"
+                if "<a href=" in summary_linkified:
+                    summary_html = f"<p>{summary_linkified.replace(chr(10), '<br>')}</p>"
+                else:
+                    safe = html.escape(summary_linkified).replace("\n", "<br>")
+                    summary_html = f"<p>{safe}</p>"
             parts.append(
                 f"<div class='bubble summary' id='summary'><a name='summary'></a>"
                 f"<span class='role'>Summary:</span><br>{summary_html}"
@@ -1729,6 +1801,48 @@ class AIChatPanel(QtWidgets.QWidget):
         cursor = self.chat_view.textCursor()
         cursor.movePosition(QTextCursor.End)
         self.chat_view.setTextCursor(cursor)
+
+    def _linkify_vault_paths(self, text: str) -> str:
+        if not text:
+            return text
+        fenced = re.split(r"(```.*?```)", text, flags=re.DOTALL)
+        for idx, chunk in enumerate(fenced):
+            if chunk.startswith("```"):
+                continue
+            fenced[idx] = self._linkify_inline_paths(chunk)
+        return "".join(fenced)
+
+    def _linkify_inline_paths(self, text: str) -> str:
+        segments = re.split(r"(`[^`]*`)", text)
+        for idx, seg in enumerate(segments):
+            if seg.startswith("`"):
+                continue
+            segments[idx] = self._replace_path_tokens(seg)
+        return "".join(segments)
+
+    def _replace_path_tokens(self, text: str) -> str:
+        pattern = re.compile(
+            rf"(^|[\s\(\[\"'])"
+            rf"(/[^\s`<>\"'()\]]+(?:{re.escape(PAGE_SUFFIX)})?)"
+        )
+
+        def _replace(match: re.Match[str]) -> str:
+            prefix = match.group(1)
+            raw_path = match.group(2)
+            trimmed = raw_path.rstrip(",:;.!?")
+            trailing = raw_path[len(trimmed):]
+            if not trimmed:
+                return f"{prefix}{raw_path}"
+            colon = path_to_colon(trimmed)
+            if not colon:
+                return f"{prefix}{raw_path}"
+            colon = f":{colon}"
+            label = Path(trimmed).stem or colon.split(":")[-1]
+            safe_label = html.escape(label, quote=False)
+            safe_colon = html.escape(colon, quote=True)
+            return f"{prefix}<a href=\"{safe_colon}\" title=\"{safe_colon}\">{safe_label}</a>{trailing}"
+
+        return pattern.sub(_replace, text)
 
     def _refresh_context_items(self) -> None:
         if not self.ai_manager or not self._current_ai_conversation_id:
@@ -3440,6 +3554,44 @@ class AIChatPanel(QtWidgets.QWidget):
             self._load_chat_messages(chat["id"])
         self._update_model_status()
         self._update_load_current_page_button()
+
+    def open_named_chat(self, name: str, folder_path: str = "/") -> None:
+        """Open (and create if needed) a stable named chat under the given folder."""
+        self.current_page_path = None
+        self._suppress_navigation = True
+        chat = self.store.get_or_create_named_chat(folder_path, name)
+        if chat:
+            self.current_session_id = chat["id"]
+            self._load_chat_tree(select_id=chat["id"])
+            self._load_chat_messages(chat["id"])
+        self._update_model_status()
+        self._update_load_current_page_button()
+
+    def ensure_context_page_ref(self, page_ref: str, *, index: bool = True) -> None:
+        """Ensure a context page is attached to the current conversation."""
+        if not page_ref:
+            return
+        if not self.ai_manager:
+            try:
+                self.ai_manager = AIManager()
+            except Exception:
+                return
+        if not self.current_session_id:
+            return
+        if not self._current_ai_conversation_id:
+            self._bind_ai_conversation()
+        if not self._current_ai_conversation_id:
+            return
+        self._refresh_context_items()
+        if any(item.kind == "page" and item.page_ref == page_ref for item in self._context_items):
+            return
+        try:
+            self.ai_manager.add_context_page(self._current_ai_conversation_id, page_ref)
+            if index:
+                self._index_context_item("@", ContextCandidate(page_ref=page_ref, label=page_ref))
+        except Exception:
+            return
+        self._refresh_context_items()
 
     def _load_current_page_chat(self) -> None:
         if not self.current_page_path:

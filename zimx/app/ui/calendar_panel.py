@@ -1217,7 +1217,7 @@ class CalendarPanel(QWidget):
         if self.calendar_view and Shiboken.isValid(self.calendar_view):
             if self.calendar_view.viewport():
                 self.calendar_view.viewport().update()
-            self.calendar_view.update()
+            self.calendar_view.update(self.calendar_view.rect())
         self.calendar.update()
 
     def _attach_calendar_view(self) -> None:

@@ -2186,6 +2186,51 @@ def fetch_task_tags() -> list[tuple[str, int]]:
     return [(row[0], row[1]) for row in cur.fetchall()]
 
 
+def load_task_ai_summary() -> Optional[str]:
+    """Load the last AI summary for tasks from the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        row = conn.execute("SELECT content FROM task_ai_summary WHERE id = 1").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return row[0] if row else None
+
+
+def save_task_ai_summary(content: str) -> None:
+    """Persist the last AI summary for tasks to the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        conn.execute(
+            """
+            INSERT INTO task_ai_summary (id, content, updated)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                content = excluded.content,
+                updated = excluded.updated
+            """,
+            (content, time.time()),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        return
+
+
+def delete_task_ai_summary() -> None:
+    """Remove the stored task AI summary for the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        conn.execute("DELETE FROM task_ai_summary WHERE id = 1")
+        conn.commit()
+    except sqlite3.OperationalError:
+        return
+
+
 def bump_task_index_version() -> int:
     """Increment the in-memory task index version used for cache invalidation."""
     global _TASK_INDEX_VERSION
@@ -2869,6 +2914,11 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             mtime INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_pages_search_path ON pages_search_index(path);
+        CREATE TABLE IF NOT EXISTS task_ai_summary (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            content TEXT,
+            updated REAL
+        );
         """
     )
     _ensure_task_columns(conn)
