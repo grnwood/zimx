@@ -315,11 +315,16 @@ class RemoteVaultSelectDialog(QDialog):
         self.setModal(True)
         self.resize(480, 360)
         self._selected_path: Optional[str] = None
+        self._create_new: bool = False
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Choose a vault to add from the remote server:"))
 
         self.list_widget = QListWidget()
+        new_item = QListWidgetItem()
+        new_item.setText("Add New Vault...")
+        new_item.setData(Qt.UserRole, {"create_new": True})
+        self.list_widget.addItem(new_item)
         for vault in vaults:
             item = QListWidgetItem()
             name = vault.get("name") or Path(vault.get("path") or "").name
@@ -339,6 +344,11 @@ class RemoteVaultSelectDialog(QDialog):
             QMessageBox.warning(self, "No Selection", "Please select a vault.")
             return
         vault = item.data(Qt.UserRole)
+        if vault and vault.get("create_new"):
+            self._create_new = True
+            self._selected_path = None
+            super().accept()
+            return
         if not vault or not vault.get("path"):
             QMessageBox.warning(self, "No Selection", "Please select a vault.")
             return
@@ -347,6 +357,9 @@ class RemoteVaultSelectDialog(QDialog):
 
     def selected_path(self) -> Optional[str]:
         return self._selected_path
+
+    def create_new(self) -> bool:
+        return self._create_new
 
 from .markdown_editor import MarkdownEditor
 from .tabbed_right_panel import TabbedRightPanel
@@ -1761,13 +1774,14 @@ class MainWindow(QMainWindow):
             vaults = payload.get("vaults", [])
             if not isinstance(vaults, list):
                 raise RuntimeError("Invalid vault list response")
-            if not vaults:
+            def _prompt_create_remote_vault() -> Optional[str]:
+                nonlocal access_token
                 name = None
                 while not name:
                     name, ok = QInputDialog.getText(
                         self,
                         "Create Remote Vault",
-                        "No vaults found. Enter a new vault name:",
+                        "Enter a new vault name:",
                     )
                     if not ok:
                         return None
@@ -1822,20 +1836,33 @@ class MainWindow(QMainWindow):
                 if create_resp.status_code != 200:
                     raise RuntimeError(f"Failed to create vault (HTTP {create_resp.status_code})")
                 created = create_resp.json()
-                selected_path = created.get("path")
-                if not selected_path:
+                selected = created.get("path")
+                if not selected:
                     raise RuntimeError("Failed to create vault (missing path)")
+                return selected
+
+            if not vaults:
+                selected_path = _prompt_create_remote_vault()
         except Exception as exc:
             self._alert(f"Could not load vaults from {base_url}: {exc}")
             return None
 
-        if not selected_path:
+        if not selected_path and vaults:
             select_dialog = RemoteVaultSelectDialog(vaults, parent=self)
             if select_dialog.exec() != QDialog.Accepted:
                 return None
-            selected_path = select_dialog.selected_path()
+            if select_dialog.create_new():
+                try:
+                    selected_path = _prompt_create_remote_vault()
+                except Exception as exc:
+                    self._alert(f"Could not create vault on {base_url}: {exc}")
+                    return None
+            else:
+                selected_path = select_dialog.selected_path()
             if not selected_path:
                 return None
+        if not selected_path:
+            return None
 
         existing = None
         for entry in config.load_remote_servers():
@@ -5519,6 +5546,9 @@ class MainWindow(QMainWindow):
                 return
             QDesktopServices.openUrl(QUrl(link))
             return
+        if self._is_attachment_link(link):
+            if self._open_attachment_link(link):
+                return
         # Absolute vault-relative path (starts with /): open directly without CamelCase heuristics
         if link.startswith("/"):
             target = self._normalize_editor_path(link)
@@ -5829,6 +5859,86 @@ class MainWindow(QMainWindow):
                 cleaned = file_path
         return cleaned
 
+    def _is_attachment_link(self, name: str) -> bool:
+        cleaned = (name or "").strip()
+        if not cleaned:
+            return False
+        if cleaned.startswith(("http://", "https://")):
+            return False
+        if ":" in cleaned:
+            return False
+        try:
+            suffix = Path(cleaned.replace("\\", "/")).suffix
+        except Exception:
+            suffix = ""
+        return bool(suffix) and suffix.lower() != ".txt"
+
+    def _open_attachment_link(self, name: str) -> bool:
+        if self._remote_mode:
+            return self._open_remote_attachment_link(name)
+        return self._open_local_attachment_link(name)
+
+    def _open_local_attachment_link(self, name: str) -> bool:
+        if not self.vault_root:
+            return False
+        if not self.current_path and not name.startswith("/"):
+            return False
+        rel_name = name[2:] if name.startswith("./") else name
+        if name.startswith("/"):
+            candidate = (Path(self.vault_root) / rel_name.lstrip("/")).resolve()
+        else:
+            rel_current = Path(self.current_path.lstrip("/")) if self.current_path else Path("/")
+            page_folder = rel_current.parent
+            candidate = (Path(self.vault_root) / page_folder / rel_name).resolve()
+        if not candidate.exists() or not candidate.is_file():
+            return False
+        try:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(candidate)))
+            return True
+        except Exception:
+            return False
+
+    def _open_remote_attachment_link(self, name: str) -> bool:
+        if not self._remote_mode or not self.api_base:
+            return False
+        if not self.current_path and not name.startswith("/"):
+            return False
+        rel_name = name[2:] if name.startswith("./") else name
+        if name.startswith("/"):
+            virtual_path = f"/{rel_name.lstrip('/')}"
+        else:
+            base_dir = Path(self.current_path).parent if self.current_path else Path("/")
+            virtual_path = f"/{(base_dir / rel_name).as_posix()}"
+        cache_root = self._ensure_remote_cache_root()
+        cache_path = (cache_root / "attachments" / virtual_path.lstrip("/")).resolve()
+        if not cache_path.exists():
+            if not self.http:
+                return False
+            try:
+                resp = self.http.get("/api/file/raw", params={"path": virtual_path})
+                if resp.status_code == 401 and self._remote_mode:
+                    if not self._prompt_remote_login():
+                        return False
+                    resp = self.http.get("/api/file/raw", params={"path": virtual_path})
+                resp.raise_for_status()
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_bytes(resp.content)
+            except httpx.HTTPError as exc:
+                self._alert_api_error(exc, f"Failed to load {virtual_path}")
+                return False
+            except OSError as exc:
+                self._alert(f"Failed to cache remote file: {exc}")
+                return False
+        try:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(cache_path)))
+            return True
+        except Exception:
+            return False
+
     def _open_camel_link(self, name: str, focus_target: str | None = None, refresh_only: bool = False, force: bool = False) -> None:
         """Open a link - handles both CamelCase (relative), colon notation (absolute), and HTTP URLs."""
         # Handle HTTP/HTTPS links
@@ -5850,23 +5960,9 @@ class MainWindow(QMainWindow):
         self._save_current_file(auto=True)
 
         # Attachment file link: detect filename with extension (non .txt) and open via OS
-        if "." in name and ":" not in name and not name.endswith(".txt"):
-            # Resolve relative to current page folder
-            rel_current = Path(self.current_path.lstrip("/"))
-            page_folder = rel_current.parent
-            folder_path = Path(self.vault_root) / page_folder if self.vault_root else None
-            if folder_path:
-                # Strip optional leading ./
-                clean_name = name[2:] if name.startswith("./") else name
-                candidate = (folder_path / clean_name).resolve()
-                if candidate.exists() and candidate.is_file():
-                    try:
-                        from PySide6.QtGui import QDesktopServices
-                        from PySide6.QtCore import QUrl
-                        QDesktopServices.openUrl(QUrl.fromLocalFile(str(candidate)))
-                        return
-                    except Exception:
-                        pass  # fall through to normal handling if OS open fails
+        if self._is_attachment_link(name):
+            if self._open_attachment_link(name):
+                return
 
         target_name, anchor = self._split_link_anchor(name)
         anchor_slug = self._anchor_slug(anchor)
