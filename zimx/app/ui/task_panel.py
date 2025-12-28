@@ -1302,14 +1302,27 @@ class TaskPanel(QWidget):
     def _handle_task_nav_key(self, event) -> bool:
         """Handle up/down navigation (including vi j/k) within the task list."""
         key = event.key()
+        if key == Qt.Key_J and not self._is_vi_mode():
+            return False
         if key in (Qt.Key_J, Qt.Key_Down):
             self._cycle_task_selection(1)
             event.accept()
             return True
+        if key == Qt.Key_K and not self._is_vi_mode():
+            return False
         if key in (Qt.Key_K, Qt.Key_Up):
             self._cycle_task_selection(-1)
             event.accept()
             return True
+        return False
+
+    def _is_vi_mode(self) -> bool:
+        """Check if vi mode is enabled in the parent main window."""
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, "_vi_enabled"):
+                return bool(parent._vi_enabled)
+            parent = parent.parent()
         return False
 
     def _cycle_task_selection(self, direction: int) -> None:

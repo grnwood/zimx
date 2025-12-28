@@ -4523,6 +4523,7 @@ class MainWindow(QMainWindow):
     
     def _open_search_tab(self) -> None:
         """Switch to the Search tab and focus the search field."""
+        self._ensure_left_panel_visible()
         self.left_tab_widget.setCurrentIndex(2)  # Search tab is now index 2 (Vault=0, Tags=1, Search=2)
         self.search_tab.focus_search()
     
@@ -4650,7 +4651,7 @@ class MainWindow(QMainWindow):
             query = search_input.text().strip()
             if query:
                 # Switch to search tab and populate it
-                self.left_tab_widget.setCurrentIndex(2)  # Search tab (now index 2)
+                self._open_search_tab()
                 
                 subtree = None
                 if limit_checkbox.isChecked() and path_input.text().strip():
@@ -4835,7 +4836,7 @@ class MainWindow(QMainWindow):
         if link_text:
             self.statusBar().showMessage(f"Copied link: {link_text}", 3000)
 
-    def _show_new_page_dialog(self) -> None:
+    def _show_new_page_dialog(self, parent_path: Optional[str] = None) -> None:
         """Show dialog to create a new page with template selection (Ctrl+N)."""
         if not self.vault_root:
             self._alert("Select a vault before creating pages.")
@@ -4854,11 +4855,11 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("Page name cannot contain '/' or ':'", 3000)
                 return
             
-            # Determine parent path based on current selection
-            parent_path = self._get_current_parent_path()
+            # Determine parent path based on current selection unless overridden
+            resolved_parent = parent_path if parent_path is not None else self._get_current_parent_path()
             
             # Create the new page path
-            target_path = self._join_paths(parent_path, page_name)
+            target_path = self._join_paths(resolved_parent, page_name)
             
             try:
                 # Create the page folder
@@ -5543,6 +5544,15 @@ class MainWindow(QMainWindow):
             total = sum(sizes) or max(1, self.editor_split.width())
             self.editor_split.setSizes([max(1, total - width), max(0, width)])
         self._save_panel_visibility()
+
+    def _ensure_left_panel_visible(self) -> None:
+        """Ensure the left navigation panel is visible (used before showing search/tags)."""
+        sizes = self.main_splitter.sizes()
+        if sizes and sizes[0] == 0:
+            width = getattr(self, "_saved_left_width", 240)
+            total = sum(sizes) or max(1, self.main_splitter.width())
+            self.main_splitter.setSizes([width, max(1, total - width)])
+            self._save_panel_visibility()
 
     def _ensure_right_panel_visible(self) -> None:
         """Ensure the right panel is visible (used before showing link/AI panes)."""
@@ -6478,7 +6488,7 @@ class MainWindow(QMainWindow):
                 ai_chat_action = menu.addAction("AI Chat…")
                 ai_chat_action.triggered.connect(lambda checked=False, fp=file_path: self._open_ai_chat_for_path(fp, create=True))
         else:
-            menu.addAction("New Page", lambda checked=False: self._show_new_page_dialog())
+            menu.addAction("New Page", lambda checked=False: self._show_new_page_dialog(parent_path="/"))
         if menu.actions():
             menu.exec(global_pos)
 

@@ -1331,6 +1331,9 @@ class CalendarPanel(QWidget):
             Qt.Key_K: Qt.Key_Up,
         }
         target_key = key_map.get(event.key(), event.key())
+        if event.key() in (Qt.Key_H, Qt.Key_J, Qt.Key_K, Qt.Key_L) and not self._is_vi_mode():
+            super().keyPressEvent(event)
+            return
         if target_key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
             self.journal_tree.setFocus(Qt.OtherFocusReason)
             forwarded = QKeyEvent(event.type(), target_key, event.modifiers())
@@ -1338,6 +1341,15 @@ class CalendarPanel(QWidget):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def _is_vi_mode(self) -> bool:
+        """Check if vi mode is enabled in the parent main window."""
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, "_vi_enabled"):
+                return bool(parent._vi_enabled)
+            parent = parent.parent()
+        return False
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         # Handle calendar widget events to detect shift-click
