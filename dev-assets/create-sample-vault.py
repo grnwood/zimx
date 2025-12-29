@@ -214,6 +214,12 @@ def _sample_tasks(reference_date: date | None = None) -> list[str]:
         today + timedelta(days=10),
         today + timedelta(days=45),
     ]
+    start_dates = [
+        today - timedelta(days=3),
+        today + timedelta(days=1),
+        today + timedelta(days=5),
+        today + timedelta(days=14),
+    ]
     templates = [(_generate_task_text(), random.randint(0, 3)) for _ in range(6)]
     tasks: list[str] = []
     for text, priority in templates:
@@ -226,11 +232,18 @@ def _sample_tasks(reference_date: date | None = None) -> list[str]:
                 tags.append(tag)
         tag_str = " ".join(f"@{tag}" for tag in tags) if tags else "@general"
         due = random.choice(due_dates)
-        start = due - timedelta(days=random.randint(0, 5))
+        start = None
+        include_due = True
+        include_start = False
+        include_due = bool(random.choice([True, False]))
+        include_start = not include_due
+        if include_start:
+            start = random.choice(start_dates)
         state = " " if random.random() > 0.35 else "x"
         bangs = "!" * max(0, min(priority, 3))
-        start_part = f" >{start.isoformat()}" if start else ""
-        tasks.append(f"- [{'x' if state == 'x' else ' '}] {text} {bangs} {tag_str} <{due.isoformat()}{start_part}")
+        due_part = f" <{due.isoformat()}" if include_due else ""
+        start_part = f" >{start.isoformat()}" if include_start and start else ""
+        tasks.append(f"- [{'x' if state == 'x' else ' '}] {text} {bangs} {tag_str}{due_part}{start_part}")
     return tasks
 
 

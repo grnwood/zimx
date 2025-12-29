@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Callable, Optional
+import traceback
 import httpx
 
 from PySide6.QtCore import QTimer, Qt, QByteArray
@@ -12,6 +13,7 @@ from .markdown_editor import MarkdownEditor
 from .insert_link_dialog import InsertLinkDialog
 from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
 from zimx.app import config
+from zimx.server.adapters.files import PAGE_SUFFIXES
 
 
 class PageEditorWindow(QMainWindow):
@@ -48,14 +50,14 @@ class PageEditorWindow(QMainWindow):
         self.editor.set_vi_mode_enabled(config.load_vi_mode_enabled())
         self.editor.set_read_only_mode(self._read_only)
         self.editor.linkActivated.connect(self._forward_link_to_main)
-        self.editor.focusLost.connect(lambda: self._save_current_file(auto=True))
+        self.editor.focusLost.connect(lambda: self._save_current_file(auto=True, reason="focus lost"))
         self.setCentralWidget(self.editor)
 
         self._last_saved_content: Optional[str] = None
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setInterval(30_000)
         self._autosave_timer.setSingleShot(True)
-        self._autosave_timer.timeout.connect(lambda: self._save_current_file(auto=True))
+        self._autosave_timer.timeout.connect(lambda: self._save_current_file(auto=True, reason="autosave timer"))
         self.editor.textChanged.connect(lambda: self._autosave_timer.start())
         self.editor.document().modificationChanged.connect(lambda _: self._update_dirty_indicator())
 
@@ -137,7 +139,7 @@ class PageEditorWindow(QMainWindow):
         save_action = QAction("Save", self)
         save_action.setShortcut(QKeySequence("Ctrl+S"))
         save_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
-        save_action.triggered.connect(lambda: self._save_current_file(auto=False))
+        save_action.triggered.connect(lambda: self._save_current_file(auto=False, reason="manual save"))
         toolbar.addAction(save_action)
         toolbar.addSeparator()
         font_up = QAction("A+", self)
@@ -207,13 +209,29 @@ class PageEditorWindow(QMainWindow):
         )
         return False
 
-    def _save_current_file(self, auto: bool = False) -> None:
+    def _save_current_file(self, auto: bool = False, reason: str = "save") -> None:
         if not self._is_dirty():
             return
         if not self._ensure_writable(auto):
             return
         payload = {"path": self._source_path, "content": self.editor.to_markdown()}
-        print(f"[ZimX Popup] Writing page {self._source_path} -> /api/file/write payload bytes={len(payload['content'].encode('utf-8'))}")
+        try:
+            payload_bytes = len(payload["content"].encode("utf-8"))
+        except Exception:
+            payload_bytes = len(payload["content"] or "")
+        mode = "auto" if auto else "manual"
+        reason_label = reason or "save"
+        try:
+            rel = Path(self._source_path.lstrip("/"))
+            if len(rel.parts) == 1 and rel.suffix.lower() in PAGE_SUFFIXES:
+                trace = "".join(traceback.format_stack(limit=12))
+                print(f"[ZimX Popup] Invalid root write requested path={self._source_path} reason={reason_label}\n{trace}")
+        except Exception:
+            pass
+        print(
+            f"[ZimX Popup] Write request reason={reason_label} mode={mode} path={self._source_path} "
+            f"bytes={payload_bytes}"
+        )
         try:
             resp = self.http.post("/api/file/write", json=payload)
             resp.raise_for_status()
@@ -300,7 +318,7 @@ class PageEditorWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         # Autosave on close if dirty and writable
-        self._save_current_file(auto=False)
+        self._save_current_file(auto=False, reason="window close")
         self._save_geometry()
         try:
             self.http.close()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+import math
 import html
 import os
 import re
@@ -238,26 +239,51 @@ class TaskPanel(QWidget):
         )
 
         self.task_tree = DebugTaskTree()
-        self.task_tree.setColumnCount(4)
-        self.task_tree.setHeaderLabels(["!", "Task", "Due", "Path"])
+        self._show_task_start_column = False
+        self._show_task_page_column = False
+        self._configure_task_columns(force=True)
         self.task_tree.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.task_tree.setRootIsDecorated(True)
         self.task_tree.setAlternatingRowColors(True)
+        self.task_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         # Match search results alternating colors
         from PySide6.QtGui import QPalette
         palette = QApplication.palette()
-        window_color = palette.color(QPalette.Window)
-        alt_color = "rgb(220, 220, 220)" if window_color.lightness() > 128 else "rgb(70, 70, 70)"
-        self.task_tree.setStyleSheet(f"QTreeWidget::item:alternate {{ background: {alt_color}; }}")
+        base_color = palette.color(QPalette.Base)
+        alt_color = base_color.darker(105) if base_color.lightness() > 128 else base_color.lighter(110)
+        self.task_tree.setStyleSheet(
+            "QTreeWidget::item:selected {"
+            " background: palette(highlight);"
+            " color: palette(highlighted-text);"
+            "}"
+            "QTreeWidget::item:selected:active {"
+            " background: palette(highlight);"
+            " color: palette(highlighted-text);"
+            "}"
+            "QTreeWidget::item:selected:!active {"
+            " background: palette(inactive, highlight);"
+            " color: palette(inactive, highlighted-text);"
+            "}"
+            f"QTreeWidget::item:alternate {{ background: {alt_color.name()}; }}"
+        )
         self.task_tree.itemActivated.connect(self._on_task_activated)
         self.task_tree.itemDoubleClicked.connect(self._on_task_double_clicked)
+        self.task_tree.itemActivated.connect(lambda *_: QTimer.singleShot(0, self._reset_horizontal_scroll))
+        self.task_tree.itemDoubleClicked.connect(lambda *_: QTimer.singleShot(0, self._reset_horizontal_scroll))
         self.task_tree.setSortingEnabled(True)
         self.sort_column = 0
         self.sort_order = Qt.AscendingOrder
         header = self.task_tree.header()
         header.sectionClicked.connect(self._handle_header_click)
         header.setSortIndicator(self.sort_column, self.sort_order)
-        self.task_tree.setColumnWidth(0, 40)
+        header.setStretchLastSection(False)
+        try:
+            from PySide6.QtWidgets import QHeaderView
+            header.setSectionResizeMode(0, QHeaderView.Interactive)
+            header.setSectionResizeMode(1, QHeaderView.Interactive)
+            header.setSectionResizeMode(2, QHeaderView.Interactive)
+        except Exception:
+            pass
         self.task_tree.setFocusPolicy(Qt.StrongFocus)
         self.task_tree.installEventFilter(self)
         self.task_tree.setFocusPolicy(Qt.StrongFocus)
@@ -491,6 +517,89 @@ class TaskPanel(QWidget):
         """Public wrapper used by parent containers to adjust fonts."""
         self._adjust_font_size(delta)
 
+    def _load_display_preferences(self) -> tuple[bool, bool]:
+        show_start = config.load_show_task_start_date()
+        show_page = config.load_show_task_page()
+        return bool(show_start), bool(show_page)
+
+    def _configure_task_columns(self, force: bool = False) -> None:
+        show_start, show_page = self._load_display_preferences()
+        if (
+            not force
+            and show_start == self._show_task_start_column
+            and show_page == self._show_task_page_column
+        ):
+            return
+        self._show_task_start_column = show_start
+        self._show_task_page_column = show_page
+        headers = ["!", "Task", "Due"]
+        if show_start:
+            headers.append("Start")
+        if show_page:
+            headers.append("Path")
+        self.task_tree.setColumnCount(len(headers))
+        self.task_tree.setHeaderLabels(headers)
+        self.task_tree.setColumnWidth(0, 70)
+        header = self.task_tree.header()
+        try:
+            from PySide6.QtWidgets import QHeaderView
+            header.setSectionResizeMode(0, QHeaderView.Interactive)
+            header.setSectionResizeMode(1, QHeaderView.Interactive)
+            if self._show_task_start_column:
+                header.setSectionResizeMode(2, QHeaderView.Interactive)
+                header.setSectionResizeMode(3, QHeaderView.Interactive)
+                if self._show_task_page_column:
+                    header.setSectionResizeMode(4, QHeaderView.Interactive)
+            else:
+                header.setSectionResizeMode(2, QHeaderView.Interactive)
+                if self._show_task_page_column:
+                    header.setSectionResizeMode(3, QHeaderView.Interactive)
+        except Exception:
+            pass
+
+    def _relative_day_label(self, target: date, prefix: str = "") -> str:
+        today = date.today()
+        delta_days = (target - today).days
+        if delta_days <= 13:
+            label = f"{max(delta_days, 0)}d"
+        elif delta_days < 56:
+            label = f"{max(1, math.ceil(delta_days / 7))}w"
+        elif delta_days < 365:
+            label = f"{max(1, math.ceil(delta_days / 30))}m"
+        else:
+            label = f"{max(1, math.ceil(delta_days / 365))}y"
+        return f"{prefix}{label}" if label else ""
+
+    def _priority_time_label(self, task: dict) -> tuple[str, bool]:
+        priority_level = min(task.get("priority", 0) or 0, 3)
+        priority = "!" * priority_level
+        due_str = (task.get("due") or "").strip()
+        start_str = (task.get("starts") or task.get("start") or "").strip()
+        label = ""
+        overdue = False
+        if due_str:
+            try:
+                due_dt = date.fromisoformat(due_str)
+                if due_dt < date.today():
+                    label = "OD"
+                    overdue = True
+                else:
+                    label = self._relative_day_label(due_dt)
+            except Exception:
+                label = ""
+        elif start_str:
+            try:
+                start_dt = date.fromisoformat(start_str)
+                if start_dt > date.today():
+                    label = self._relative_day_label(start_dt, prefix=">")
+            except Exception:
+                label = ""
+        if label and priority:
+            return f"{label} {priority}", overdue
+        if label:
+            return label, overdue
+        return priority, overdue
+
     def _apply_font_size(self) -> None:
         font = self.font()
         font.setPointSize(self._font_size)
@@ -523,6 +632,14 @@ class TaskPanel(QWidget):
                 self._ai_chat_panel.set_font_size(self._font_size)
             except Exception:
                 pass
+
+    def _reset_horizontal_scroll(self) -> None:
+        """Force the task list to show the left-most priority column."""
+        try:
+            bar = self.task_tree.horizontalScrollBar()
+            bar.setValue(0)
+        except Exception:
+            return
 
     def _save_splitter_sizes(self) -> None:
         try:
@@ -1323,7 +1440,10 @@ class TaskPanel(QWidget):
             if hasattr(parent, "_vi_enabled"):
                 return bool(parent._vi_enabled)
             parent = parent.parent()
-        return False
+        try:
+            return bool(config.load_vi_mode_enabled())
+        except Exception:
+            return False
 
     def _cycle_task_selection(self, direction: int) -> None:
         """Move selection up/down with wrap-around in the task list."""
@@ -1499,6 +1619,7 @@ class TaskPanel(QWidget):
         if current_version != self._task_index_version:
             self._task_index_version = current_version
             self._task_context_dirty = True
+        self._configure_task_columns()
         raw_text = self.search.text().strip()
         query, tokens = self._parse_search_tags(raw_text)
         self._tag_source_tasks = None
@@ -1588,13 +1709,24 @@ class TaskPanel(QWidget):
                 continue
             visible_tasks.append(task)
             priority_level = min(task.get("priority", 0) or 0, 3)
-            priority = "!" * priority_level
             due = task.get("due", "") or ""
+            start = (task.get("starts") or task.get("start") or "").strip()
             text = task["text"]
             display_text = self._format_task_text(text)
             display_path = self._present_path(task["path"])
-            item = QTreeWidgetItem([priority, "", due, display_path])
-            item.setText(1, display_text)
+            priority_text, due_overdue = self._priority_time_label(task)
+            due_idx = 2
+            start_idx = 3 if self._show_task_start_column else None
+            path_idx = 3 if (not self._show_task_start_column and self._show_task_page_column) else 4
+            row = [""] * self.task_tree.columnCount()
+            row[0] = priority_text
+            row[1] = display_text
+            row[due_idx] = due
+            if self._show_task_start_column and start_idx is not None:
+                row[start_idx] = start
+            if self._show_task_page_column:
+                row[path_idx] = display_path
+            item = QTreeWidgetItem(row)
             item.setToolTip(1, text)
             item.setData(0, Qt.UserRole, task)
             item.setToolTip(1, text)
@@ -1602,13 +1734,17 @@ class TaskPanel(QWidget):
             if due_fg_bg:
                 fg, bg = due_fg_bg
                 if bg:
-                    item.setBackground(2, bg)
+                    item.setBackground(due_idx, bg)
                 if fg:
-                    item.setForeground(2, fg)
+                    item.setForeground(due_idx, fg)
             pri_brush = self._priority_brush(priority_level)
             if pri_brush:
                 item.setBackground(0, pri_brush["bg"])
                 item.setForeground(0, pri_brush["fg"])
+            if due_overdue:
+                font = item.font(0)
+                font.setUnderline(True)
+                item.setFont(0, font)
             if task.get("status") == "done":
                 font = item.font(1)
                 font.setStrikeOut(True)
@@ -1629,6 +1765,7 @@ class TaskPanel(QWidget):
         self.task_tree.sortItems(self.sort_column, self.sort_order)
         self._restore_last_keyboard_selection(items_by_id)
         self._refresh_tags()
+        QTimer.singleShot(0, self._reset_horizontal_scroll)
 
     def _filter_tasks_to_tag_groups(self, tasks: list[dict], tag_groups: list[set[str]]) -> list[dict]:
         """Apply tag filtering for OR-within-prefix semantics."""
@@ -1703,12 +1840,17 @@ class TaskPanel(QWidget):
             return None
         # Three levels only, matching red/orange/yellow backgrounds
         colors = [
-            {"bg": QColor("#FFF9C4"), "fg": QColor("#444444")},  # !
-            {"bg": QColor("#F57900"), "fg": QColor("#3A1D00")},  # !!
-            {"bg": QColor("#CC0000"), "fg": QColor("#FFFFFF")},  # !!!
+            {"bg": QColor("#FFF9C4")},  # !
+            {"bg": QColor("#F57900")},  # !!
+            {"bg": QColor("#CC0000")},  # !!!
         ]
         idx = min(level - 1, len(colors) - 1)
-        return colors[idx]
+        bg = colors[idx]["bg"]
+        return {"bg": bg, "fg": self._contrast_text_color(bg)}
+
+    def _contrast_text_color(self, bg: QColor) -> QColor:
+        """Return a readable text color for the given background."""
+        return QColor("#FFFFFF") if bg.lightness() < 128 else QColor("#000000")
 
     def _task_sort_key(self, task: dict) -> tuple:
         """Sort tasks to ensure parents are created before children."""

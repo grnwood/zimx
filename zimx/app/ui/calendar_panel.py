@@ -5,6 +5,7 @@ import re
 import os
 import calendar
 from datetime import date as Date
+import math
 from typing import Optional, Callable
 
 from PySide6.QtCore import Qt, Signal, QDate, QEvent, QTimer, QByteArray, QRect
@@ -404,24 +405,34 @@ class CalendarPanel(QWidget):
         self.day_insights_layout.addWidget(self.recent_list)
         # Due tasks header with overdue checkbox filter
         self.tasks_due_list = QTreeWidget()
-        self.tasks_due_list.setColumnCount(4)
-        self.tasks_due_list.setHeaderLabels(["!", "Task", "Due", "Path"])
+        self._show_task_start_column = False
+        self._show_task_page_column = False
+        self._configure_task_columns(force=True)
         self.tasks_due_list.setRootIsDecorated(False)
         self.tasks_due_list.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tasks_due_list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.tasks_due_list.setAlternatingRowColors(True)
+        self.tasks_due_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         # Match search results alternating colors
         palette = QApplication.palette()
-        window_color = palette.color(QPalette.Window)
-        alt_color = "rgb(220, 220, 220)" if window_color.lightness() > 128 else "rgb(70, 70, 70)"
-        self.tasks_due_list.setStyleSheet(f"QTreeWidget::item:alternate {{ background: {alt_color}; }}")
+        base_color = palette.color(QPalette.Base)
+        alt_color = base_color.darker(105) if base_color.lightness() > 128 else base_color.lighter(110)
+        self.tasks_due_list.setStyleSheet(f"QTreeWidget::item:alternate {{ background: {alt_color.name()}; }}")
         self.tasks_due_list.itemActivated.connect(self._open_task_item)
         self.tasks_due_list.itemDoubleClicked.connect(self._open_task_item)
         self.tasks_due_list.setSortingEnabled(True)
         self.tasks_due_list.sortByColumn(2, Qt.AscendingOrder)
-        self.tasks_due_list.setColumnWidth(0, 24)
+        self.tasks_due_list.setColumnWidth(0, 70)
         self.tasks_due_list.setColumnWidth(2, 90)
-        self.tasks_due_list.setColumnWidth(3, 140)
+        header = self.tasks_due_list.header()
+        header.setStretchLastSection(False)
+        try:
+            from PySide6.QtWidgets import QHeaderView
+            header.setSectionResizeMode(0, QHeaderView.Interactive)
+            header.setSectionResizeMode(1, QHeaderView.Interactive)
+            header.setSectionResizeMode(2, QHeaderView.Interactive)
+        except Exception:
+            pass
         saved_header = config.load_header_state(self._header_state_key)
         if saved_header:
             try:
@@ -458,9 +469,9 @@ class CalendarPanel(QWidget):
         self.journal_tree.setAlternatingRowColors(True)
         # Match search results alternating colors
         palette = QApplication.palette()
-        window_color = palette.color(QPalette.Window)
-        alt_color = "rgb(220, 220, 220)" if window_color.lightness() > 128 else "rgb(70, 70, 70)"
-        self.journal_tree.setStyleSheet(f"QTreeWidget::item:alternate {{ background: {alt_color}; }}")
+        base_color = palette.color(QPalette.Base)
+        alt_color = base_color.darker(105) if base_color.lightness() > 128 else base_color.lighter(110)
+        self.journal_tree.setStyleSheet(f"QTreeWidget::item:alternate {{ background: {alt_color.name()}; }}")
         self.journal_tree.itemClicked.connect(self._on_tree_activated)
         self.journal_tree.itemActivated.connect(self._on_tree_activated)
         self.journal_tree.setFocusPolicy(Qt.StrongFocus)
@@ -1409,7 +1420,6 @@ class CalendarPanel(QWidget):
                     except Exception:
                         pass
                     return True
-
         return super().eventFilter(obj, event)
 
     def _date_from_pos(self, pos) -> QDate:
@@ -1694,10 +1704,12 @@ class CalendarPanel(QWidget):
         self.subpage_list.addItem(item)
 
     def _clear_due_tasks(self, message: Optional[str] = None) -> None:
+        self._configure_task_columns()
         self.tasks_due_list.clear()
         self._due_task_count = 0
         if message:
-            row = QTreeWidgetItem(["", message, "", ""])
+            row = QTreeWidgetItem([""] * self.tasks_due_list.columnCount())
+            row.setText(1, message)
             row.setFlags(Qt.NoItemFlags)
             self.tasks_due_list.addTopLevelItem(row)
 
@@ -1782,12 +1794,17 @@ class CalendarPanel(QWidget):
         if level <= 0:
             return None
         colors = [
-            {"bg": QColor("#FFF9C4"), "fg": QColor("#444444")},
-            {"bg": QColor("#F57900"), "fg": QColor("#3A1D00")},
-            {"bg": QColor("#CC0000"), "fg": QColor("#FFFFFF")},
+            {"bg": QColor("#FFF9C4")},
+            {"bg": QColor("#F57900")},
+            {"bg": QColor("#CC0000")},
         ]
         idx = min(level - 1, len(colors) - 1)
-        return colors[idx]
+        bg = colors[idx]["bg"]
+        return {"bg": bg, "fg": self._contrast_text_color(bg)}
+
+    def _contrast_text_color(self, bg: QColor) -> QColor:
+        """Return a readable text color for the given background."""
+        return QColor("#FFFFFF") if bg.lightness() < 128 else QColor("#000000")
 
     def _due_colors(self, due_str: str) -> Optional[tuple]:
         """Return (fg, bg) for due column with red/orange/yellow emphasis."""
@@ -1805,6 +1822,88 @@ class CalendarPanel(QWidget):
             return QColor("#3A1D00"), QColor("#F57900")
         return None
 
+    def _load_task_display_prefs(self) -> tuple[bool, bool]:
+        show_start = config.load_show_task_start_date()
+        show_page = config.load_show_task_page()
+        return bool(show_start), bool(show_page)
+
+    def _configure_task_columns(self, force: bool = False) -> None:
+        show_start, show_page = self._load_task_display_prefs()
+        if (
+            not force
+            and show_start == self._show_task_start_column
+            and show_page == self._show_task_page_column
+        ):
+            return
+        self._show_task_start_column = show_start
+        self._show_task_page_column = show_page
+        headers = ["!", "Task", "Due"]
+        if show_start:
+            headers.append("Start")
+        if show_page:
+            headers.append("Path")
+        self.tasks_due_list.setColumnCount(len(headers))
+        self.tasks_due_list.setHeaderLabels(headers)
+        header = self.tasks_due_list.header()
+        try:
+            from PySide6.QtWidgets import QHeaderView
+            header.setSectionResizeMode(0, QHeaderView.Interactive)
+            header.setSectionResizeMode(1, QHeaderView.Interactive)
+            if self._show_task_start_column:
+                header.setSectionResizeMode(2, QHeaderView.Interactive)
+                header.setSectionResizeMode(3, QHeaderView.Interactive)
+                if self._show_task_page_column:
+                    header.setSectionResizeMode(4, QHeaderView.Interactive)
+            else:
+                header.setSectionResizeMode(2, QHeaderView.Interactive)
+                if self._show_task_page_column:
+                    header.setSectionResizeMode(3, QHeaderView.Interactive)
+        except Exception:
+            pass
+
+    def _relative_day_label(self, target: Date, prefix: str = "") -> str:
+        today = Date.today()
+        delta_days = (target - today).days
+        if delta_days <= 13:
+            label = f"{max(delta_days, 0)}d"
+        elif delta_days < 56:
+            label = f"{max(1, math.ceil(delta_days / 7))}w"
+        elif delta_days < 365:
+            label = f"{max(1, math.ceil(delta_days / 30))}m"
+        else:
+            label = f"{max(1, math.ceil(delta_days / 365))}y"
+        return f"{prefix}{label}" if label else ""
+
+    def _priority_time_label(self, task: dict) -> tuple[str, bool]:
+        priority_level = min(task.get("priority", 0) or 0, 3)
+        priority = "!" * priority_level
+        due_str = (task.get("due") or "").strip()
+        start_str = (task.get("starts") or task.get("start") or "").strip()
+        label = ""
+        overdue = False
+        if due_str:
+            try:
+                due_dt = Date.fromisoformat(due_str)
+                if due_dt < Date.today():
+                    label = "OD"
+                    overdue = True
+                else:
+                    label = self._relative_day_label(due_dt)
+            except Exception:
+                label = ""
+        elif start_str:
+            try:
+                start_dt = Date.fromisoformat(start_str)
+                if start_dt > Date.today():
+                    label = self._relative_day_label(start_dt, prefix=">")
+            except Exception:
+                label = ""
+        if label and priority:
+            return f"{label} {priority}", overdue
+        if label:
+            return label, overdue
+        return priority, overdue
+
     @staticmethod
     def _parse_date(value: str) -> Optional[Date]:
         try:
@@ -1814,6 +1913,7 @@ class CalendarPanel(QWidget):
 
     def _update_due_tasks(self, dates: list[QDate]) -> None:
         """List tasks due on any of the selected dates."""
+        self._configure_task_columns()
         if not dates or not config.has_active_vault():
             self._clear_due_tasks("No due tasks for selection")
             return
@@ -1852,9 +1952,9 @@ class CalendarPanel(QWidget):
             is_overdue = bool(due_dt and due_dt < range_start)
             is_due_in_range = bool(due_dt and range_start <= due_dt <= range_end)
             starts_in_range = bool(start_dt_val and range_start <= start_dt_val <= range_end)
-            # Respect overdue checkbox: if unchecked, exclude overdue items unless they start in range
+            # Respect overdue checkbox: if unchecked, exclude all overdue items
             show_overdue = bool(getattr(self, "overdue_checkbox", True) and self.overdue_checkbox.isChecked())
-            if (is_overdue and not show_overdue) and not (starts_in_range or is_due_in_range):
+            if is_overdue and not show_overdue:
                 continue
             if is_overdue or is_due_in_range or starts_in_range:
                 matches.append(task)
@@ -1867,15 +1967,27 @@ class CalendarPanel(QWidget):
             if not path.startswith("/"):
                 path = "/" + path.lstrip("/")
             line = task.get("line") or 1
-            priority_txt = "!" * max(0, int(task.get("priority") or 0))
-            row = QTreeWidgetItem([priority_txt, task.get("text") or "(task)", task.get("due") or "", path_to_colon(path)])
+            due_idx = 2
+            start_idx = 3 if self._show_task_start_column else None
+            path_idx = 3 if (not self._show_task_start_column and self._show_task_page_column) else 4
+            start_value = (task.get("starts") or task.get("start") or "").strip()
+            priority_txt, is_overdue = self._priority_time_label(task)
+            row_values = [""] * self.tasks_due_list.columnCount()
+            row_values[0] = priority_txt
+            row_values[1] = task.get("text") or "(task)"
+            row_values[due_idx] = task.get("due") or ""
+            if self._show_task_start_column and start_idx is not None:
+                row_values[start_idx] = start_value
+            if self._show_task_page_column:
+                row_values[path_idx] = path_to_colon(path)
+            row = QTreeWidgetItem(row_values)
             row.setData(0, Qt.UserRole, task)
             row.setData(0, PATH_ROLE, path)
             row.setData(0, LINE_ROLE, line)
             tooltip_parts = []
             if due_str := (task.get("due") or "").strip():
                 tooltip_parts.append(f"Due: {due_str}")
-            if start_str:
+            if start_str := start_value:
                 tooltip_parts.append(f"Start: {start_str}")
             if tooltip_parts:
                 row.setToolTip(1, " • ".join(tooltip_parts))
@@ -1885,11 +1997,15 @@ class CalendarPanel(QWidget):
                     row.setBackground(0, pri_brush["bg"])
                 if pri_brush.get("fg"):
                     row.setForeground(0, pri_brush["fg"])
+            if is_overdue:
+                font = row.font(0)
+                font.setUnderline(True)
+                row.setFont(0, font)
             due_colors = self._due_colors(task.get("due") or "")
             if due_colors:
                 fg, bg = due_colors
-                row.setForeground(2, fg)
-                row.setBackground(2, bg)
+                row.setForeground(due_idx, fg)
+                row.setBackground(due_idx, bg)
             self.tasks_due_list.addTopLevelItem(row)
         self._due_task_count = len(matches)
 

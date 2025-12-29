@@ -171,6 +171,13 @@ def save_last_vault(path: str) -> None:
     _update_global_config({"last_vault": path})
 
 
+def _is_help_vault_path(path: str) -> bool:
+    try:
+        return Path(path).name.lower() == "help-vault"
+    except Exception:
+        return False
+
+
 def load_known_vaults() -> list[dict[str, str]]:
     """Load previously used vaults with display names."""
     payload = _read_global_config()
@@ -183,6 +190,8 @@ def load_known_vaults() -> list[dict[str, str]]:
             path = entry.get("path")
             if not path:
                 continue
+            if _is_help_vault_path(path):
+                continue
             name = entry.get("name") or Path(path).name
             result.append({"name": str(name), "path": str(path)})
     return result
@@ -191,6 +200,18 @@ def load_known_vaults() -> list[dict[str, str]]:
 def remember_vault(path: str, name: Optional[str] = None) -> None:
     """Add or move a vault to the top of the known vault list."""
     normalized_path = str(Path(path))
+    if _is_help_vault_path(normalized_path):
+        payload = _read_global_config()
+        vaults = payload.get("vaults", [])
+        if isinstance(vaults, list):
+            filtered = [
+                entry
+                for entry in vaults
+                if not _is_help_vault_path(str(entry.get("path", "")))
+            ]
+            if filtered != vaults:
+                _update_global_config({"vaults": filtered})
+        return
     display_name = name or Path(normalized_path).name
     vaults = [v for v in load_known_vaults() if v.get("path") != normalized_path]
     vaults.insert(0, {"name": display_name, "path": normalized_path})
@@ -926,6 +947,54 @@ def save_show_future_tasks(show: bool) -> None:
     )
     conn.commit()
 
+
+def load_show_task_start_date() -> bool:
+    """Load preference for showing Start date in task lists."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("show_task_start_date",))
+    row = cur.fetchone()
+    if not row:
+        return False
+    return str(row[0]).lower() == "true"
+
+
+def save_show_task_start_date(show: bool) -> None:
+    """Persist preference for showing Start date in task lists."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute(
+        "REPLACE INTO kv(key, value) VALUES(?, ?)",
+        ("show_task_start_date", "true" if show else "false"),
+    )
+    conn.commit()
+
+
+def load_show_task_page() -> bool:
+    """Load preference for showing Page/Path in task lists."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("show_task_page",))
+    row = cur.fetchone()
+    if not row:
+        return False
+    return str(row[0]).lower() == "true"
+
+
+def save_show_task_page(show: bool) -> None:
+    """Persist preference for showing Page/Path in task lists."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute(
+        "REPLACE INTO kv(key, value) VALUES(?, ?)",
+        ("show_task_page", "true" if show else "false"),
+    )
+    conn.commit()
+
 def load_link_navigator_mode(default: str = "graph") -> str:
     """Load preferred Link Navigator view mode (graph|raw) for the active vault."""
     conn = _get_conn()
@@ -1655,9 +1724,9 @@ def _delete_index_for_prefix(conn: sqlite3.Connection, folder_prefix: str) -> No
                 (new_rev, path)
             )
         
-        # Bump global sync revision for each deleted page
-        for _ in rows:
-            bump_sync_revision()
+        # Bump global sync revision for each deleted page (use same connection to avoid locks)
+        if rows:
+            _bump_sync_revision_in_conn(conn, count=len(rows))
         
         # Remove related data (tags, links, tasks, etc.) - these can be hard deleted
         conn.execute("DELETE FROM page_tags WHERE page LIKE ?", (like_pattern,))
@@ -1787,6 +1856,10 @@ def move_tree_index(old_folder_path: str, new_folder_path: str, root: Path, *, s
                 conn.execute("UPDATE page_tags SET page = ? WHERE page = ?", (new_path, old_path))
                 conn.execute("UPDATE links SET from_path = ? WHERE from_path = ?", (new_path, old_path))
                 conn.execute("UPDATE links SET to_path = ? WHERE to_path = ?", (new_path, old_path))
+                try:
+                    conn.execute("UPDATE pages_search_index SET path = ? WHERE path = ?", (new_path, old_path))
+                except sqlite3.OperationalError:
+                    pass
                 conn.execute(
                     "UPDATE tasks SET path = ?, task_id = REPLACE(task_id, ?, ?) WHERE path = ?",
                     (new_path, f"{old_path}:", f"{new_path}:", old_path),
@@ -1995,6 +2068,23 @@ def bump_sync_revision() -> int:
     return new_val
 
 
+def _bump_sync_revision_in_conn(conn: sqlite3.Connection, count: int = 1) -> int:
+    """Increment sync_revision using an existing connection."""
+    if count <= 0:
+        return get_sync_revision()
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key = 'sync_revision'").fetchone()
+        current = int(row[0]) if row else 0
+    except Exception:
+        current = 0
+    new_val = current + count
+    try:
+        conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("sync_revision", str(new_val)))
+    except Exception:
+        pass
+    return new_val
+
+
 def fetch_display_order_map() -> dict[str, int]:
     """Return mapping of page path -> display_order for tree sorting."""
     try:
@@ -2008,6 +2098,34 @@ def fetch_display_order_map() -> dict[str, int]:
         return {}
     finally:
         conn.close()
+
+
+def get_home_page_path() -> Optional[str]:
+    """Return the page path with the lowest display_order at the vault root."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT path FROM pages WHERE parent_path = ? "
+            "ORDER BY display_order IS NULL, display_order, path LIMIT 1",
+            ("/",),
+        ).fetchone()
+        return row[0] if row else None
+    except sqlite3.OperationalError:
+        return None
+
+
+def page_exists(path: str) -> bool:
+    """Return True if the given page path exists in the current vault index."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        row = conn.execute("SELECT 1 FROM pages WHERE path = ? LIMIT 1", (path,)).fetchone()
+        return row is not None
+    except sqlite3.OperationalError:
+        return False
 
 
 def count_folders() -> int:

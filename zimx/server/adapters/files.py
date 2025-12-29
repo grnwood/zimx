@@ -1,10 +1,27 @@
 from __future__ import annotations
+import os
+import traceback
 
-import datetime as dt
-from pathlib import Path
-import shutil
-from typing import Dict, List
-from datetime import date, datetime
+def assert_not_vault_root_write(path):
+    """
+    Raise an exception if attempting to write a file directly in a vault root folder.
+    Only allow writing files inside subfolders of the vault root.
+    """
+    # Accept both Path and str
+    if hasattr(path, 'parent'):
+        parent = path.parent
+        name = path.name
+        path_str = str(path)
+    else:
+        parent = os.path.dirname(path)
+        name = os.path.basename(path)
+        path_str = path
+    # If the file's parent contains no parent (i.e. is the vault root), block
+    # Only allow files in vaultroot/somefolder/...
+    if parent and os.path.isdir(parent):
+        # If the parent folder contains no subfolders, it's likely the vault root
+        if not any(os.path.isdir(os.path.join(parent, f)) for f in os.listdir(parent)):
+            raise RuntimeError(f"Attempted to write file '{path_str}' in vault root folder!\n" + ''.join(traceback.format_stack()))
 
 
 PAGE_SUFFIX = ".md"
@@ -55,7 +72,7 @@ def _ensure_page_scaffold(directory: Path) -> Path:
     page_file = _page_file_for(directory)
     if not page_file.exists():
         directory.mkdir(parents=True, exist_ok=True)
-        page_file.write_text(f"# {directory.name}\n\n", encoding="utf-8")
+        #page_file.write_text(f"# {directory.name}\n\n", encoding="utf-8")
     return page_file
 
 
@@ -119,6 +136,8 @@ def write_file(root: Path, path: str, content: str) -> None:
         target = _page_file_for(target, PAGE_SUFFIX)
     elif target.suffix.lower() == LEGACY_SUFFIX:
         target = target.with_suffix(PAGE_SUFFIX)
+    if target.parent == root and target.suffix.lower() in PAGE_SUFFIXES:
+        raise FileAccessError("Vault root files are not allowed; create a folder and save inside it.")
     _ensure_valid_page_name(target, allow_legacy=False)
     target.write_text(content, encoding="utf-8")
 
@@ -247,6 +266,8 @@ def create_markdown_file(root: Path, path: str, content: str = "") -> None:
         target = _page_file_for(target, PAGE_SUFFIX)
     elif target.suffix.lower() == LEGACY_SUFFIX:
         target = target.with_suffix(PAGE_SUFFIX)
+    if target.parent == root and target.suffix.lower() in PAGE_SUFFIXES:
+        raise FileAccessError("Vault root files are not allowed; create a folder and save inside it.")
     _ensure_valid_page_name(target, allow_legacy=False)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")

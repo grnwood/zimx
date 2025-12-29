@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from zimx.app import config
+from zimx.server.adapters.files import PAGE_SUFFIX
 
 
 class AddVaultDialog(QDialog):
@@ -284,6 +285,7 @@ class OpenVaultDialog(QDialog):
         result = dlg.selected_vault()
         if not result:
             return
+        self._seed_new_vault(Path(result["path"]))
         self.vaults = [v for v in self.vaults if v.get("path") != result["path"]]
         self.vaults.insert(0, result)
         config.remember_vault(result["path"], result["name"])
@@ -322,3 +324,34 @@ class OpenVaultDialog(QDialog):
         path = self.default_combo.itemData(index)
         self.default_vault = path
         config.save_default_vault(path)
+
+    def _seed_new_vault(self, root: Path) -> None:
+        """
+        Ensure vault is seeded only in subfolder: /vaultfolder/vaultfolder/vaultfolder.md
+        Never create a file in /vaultfolder/vaultfolder.md
+        """
+        try:
+            existing_items = list(root.iterdir())
+        except Exception:
+            return
+        # Only seed if the root folder is empty
+        if existing_items:
+            return
+        root_dir = root / root.name
+        try:
+            root_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return
+        root_page = root_dir / f"{root.name}{PAGE_SUFFIX}"
+        if not root_page.exists():
+            root_page.write_text(
+                f"# {root.name}\n\nWelcome to your vault. Use the tree to add new pages.\n",
+                encoding="utf-8",
+            )
+        # Ensure no file is created in the root vault folder (root/vaultname.md)
+        root_file = root / f"{root.name}{PAGE_SUFFIX}"
+        if root_file.exists():
+            try:
+                root_file.unlink()
+            except Exception:
+                pass

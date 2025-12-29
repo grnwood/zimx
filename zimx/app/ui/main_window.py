@@ -16,6 +16,7 @@ import faulthandler
 import re
 
 import httpx
+import traceback
 from PySide6.QtCore import (
     QEvent,
     QModelIndex,
@@ -904,7 +905,7 @@ class MainWindow(QMainWindow):
         self.autosave_timer = QTimer(self)
         self.autosave_timer.setInterval(30_000)
         self.autosave_timer.setSingleShot(True)
-        self.autosave_timer.timeout.connect(lambda: self._save_current_file(auto=True))
+        self.autosave_timer.timeout.connect(lambda: self._save_current_file(auto=True, reason="autosave timer"))
         self.editor.imageSaved.connect(self._on_image_saved)
         self.editor.textChanged.connect(lambda: self.autosave_timer.start())
         self.editor.focusLost.connect(self._on_editor_focus_lost)
@@ -1499,7 +1500,7 @@ class MainWindow(QMainWindow):
 
     def _register_shortcuts(self) -> None:
         save_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
-        save_shortcut.activated.connect(self._save_current_file)
+        save_shortcut.activated.connect(lambda: self._save_current_file(reason="manual save"))
         zoom_in = QShortcut(QKeySequence.ZoomIn, self)
         zoom_out = QShortcut(QKeySequence.ZoomOut, self)
         zoom_in.setContext(Qt.ApplicationShortcut)
@@ -2074,23 +2075,37 @@ class MainWindow(QMainWindow):
         self._set_vault(str(target), vault_name=target.name)
 
     def _seed_vault(self, root: Path) -> None:
-        root_page = root / f"{root.name}{PAGE_SUFFIX}"
+        root_dir = root / root.name
+        root_dir.mkdir(parents=True, exist_ok=True)
+        root_page = root_dir / f"{root.name}{PAGE_SUFFIX}"
         if not root_page.exists():
             root_page.write_text(
-                f"# {root.name}\n\nWelcome to your vault. Use the tree to add new pages or jump into Inbox to capture ideas.\n",
+                f"# {root.name}\n\nWelcome to your vault. Use the tree to add new pages.\n",
                 encoding="utf-8",
             )
-        starter_pages = [
-            ("Inbox", "# Inbox\n\nCapture quick notes here.\n"),
-            ("Journal", "# Journal\n\nUse the New Today action to create a dated entry.\n"),
-            ("README", "# README\n\nDescribe how you plan to use this space.\n"),
-        ]
-        for name, body in starter_pages:
-            page_dir = root / name
-            page_dir.mkdir(parents=True, exist_ok=True)
-            page_file = page_dir / f"{name}{PAGE_SUFFIX}"
-            if not page_file.exists():
-                page_file.write_text(body, encoding="utf-8")
+
+    def _ensure_vault_root_page(self) -> bool:
+        """
+        Ensure the vault root page is only created in the subfolder: /VaultRoot/VaultRoot/VaultRoot.md
+        Never create /VaultRoot/VaultRoot.md (legacy).
+        """
+        if not self.vault_root or not self.vault_root_name:
+            return False
+        if self._remote_mode or self._read_only:
+            return False
+        root = Path(self.vault_root)
+        new_root = root / self.vault_root_name / f"{self.vault_root_name}{PAGE_SUFFIX}"
+        if new_root.exists():
+            return False
+        try:
+            new_root.parent.mkdir(parents=True, exist_ok=True)
+            new_root.write_text(
+                f"# {self.vault_root_name}\n\nWelcome to your vault. Use the tree to add new pages.\n",
+                encoding="utf-8",
+            )
+            return True
+        except OSError:
+            return False
 
     def _is_pid_active(self, pid: int, host: str) -> bool:
         """Best-effort check if a PID is alive on this host."""
@@ -2630,6 +2645,8 @@ class MainWindow(QMainWindow):
                 if not self._ensure_remote_auth_for_vault():
                     self.statusBar().showMessage("Login required to access this vault.", 4000)
                     return False
+            else:
+                self._ensure_vault_root_page()
             index_dir_missing = False
             if self.vault_root and not self._remote_mode:
                 index_dir = Path(self.vault_root) / ".zimx"
@@ -2925,21 +2942,24 @@ class MainWindow(QMainWindow):
         
         # Get last 25 items from history (most recent last)
         recent_history = self.page_history[-18:] if len(self.page_history) > 18 else self.page_history[:]
-        
+
+        # Remove calendar pages (e.g., /Journal/) from recent history
+        filtered_history = [p for p in recent_history if "/Journal/" not in p and "/journal/" not in p]
+
         # Remove duplicates while preserving order (keep most recent occurrence)
         seen = set()
         unique_history = []
-        for page_path in reversed(recent_history):
+        for page_path in reversed(filtered_history):
             if page_path not in seen:
                 seen.add(page_path)
                 unique_history.append(page_path)
         unique_history.reverse()  # Restore original order (oldest to newest)
-        
+
         # Add buttons for each history item
         for page_path in unique_history:
             # Extract page name
             page_name = Path(page_path).stem
-            
+
             # Create button with border styling
             btn = QPushButton(page_name)
             btn.setStyleSheet("QPushButton { border: 1px solid #555; padding: 2px 6px; border-radius: 3px; }")
@@ -2947,10 +2967,10 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(lambda checked=False, p=page_path: self._open_history_page(p))
             btn.setContextMenuPolicy(Qt.CustomContextMenu)
             btn.customContextMenuRequested.connect(lambda pos, p=page_path, b=btn: self._show_history_context_menu(pos, p, b))
-            
+
             # Store button
             self.history_buttons.append(btn)
-            
+
             # Add to layout
             self.history_layout.addWidget(btn)
 
@@ -2987,21 +3007,74 @@ class MainWindow(QMainWindow):
         # Fall back to vault home page
         self._go_home()
     
+    def _page_exists(self, rel_path: str) -> bool:
+        if not rel_path:
+            return False
+        if self.vault_root and not self._remote_mode:
+            return (Path(self.vault_root) / rel_path.lstrip("/")).exists()
+        try:
+            return config.page_exists(rel_path)
+        except Exception:
+            return False
+
+    def _vault_root_page_path(self) -> Optional[str]:
+        if not self.vault_root_name:
+            return None
+        return f"/{self.vault_root_name}/{self.vault_root_name}{PAGE_SUFFIX}"
+
+    def _normalize_root_page_path(self, path: str) -> str:
+        if not path or not self.vault_root_name:
+            return path
+        cleaned = path.strip()
+        if not cleaned:
+            return cleaned
+        if not cleaned.startswith("/"):
+            cleaned = "/" + cleaned.lstrip("/")
+        root_file = f"/{self.vault_root_name}{PAGE_SUFFIX}"
+        root_folder_file = f"/{self.vault_root_name}/{self.vault_root_name}{PAGE_SUFFIX}"
+        if cleaned.rstrip("/") in (f"/{self.vault_root_name}", root_file):
+            return root_folder_file
+        return cleaned
+
+    def _home_page_path(self) -> Optional[str]:
+        if not self.vault_root_name:
+            return None
+        home_path = None
+        try:
+            home_path = config.get_home_page_path()
+        except Exception:
+            home_path = None
+        if home_path:
+            return self._normalize_root_page_path(home_path)
+        try:
+            model = self.tree_model
+            if model and model.rowCount() > 0:
+                index = model.index(0, 0)
+                candidate = index.data(OPEN_ROLE) or index.data(PATH_ROLE)
+                if candidate:
+                    return self._normalize_root_page_path(candidate)
+        except Exception:
+            pass
+        return self._vault_root_page_path()
+
     def _go_home(self) -> None:
-        """Navigate to the vault's root page (page with same name as vault)."""
+        """Navigate to the vault's home page (display position 0)."""
         if not self.vault_root or not self.vault_root_name:
             self.statusBar().showMessage("No vault selected", 3000)
             return
         
-        # Construct path to root page: /VaultName/VaultName.txt
-        home_path = f"/{self.vault_root_name}{PAGE_SUFFIX}"
+        home_path = self._home_page_path()
+        if not home_path:
+            self.statusBar().showMessage("No home page found", 3000)
+            return
         
         # Clear tree selection
         self.tree_view.clearSelection()
         
         # Open the home page
         self._open_file(home_path)
-        self.statusBar().showMessage(f"Home: {self.vault_root_name}", 2000)
+        display = path_to_colon(home_path) or self.vault_root_name
+        self.statusBar().showMessage(f"Home: {display}", 2000)
 
     def _open_bookmark(self, path: str) -> None:
         """Open a bookmarked page."""
@@ -3721,6 +3794,8 @@ class MainWindow(QMainWindow):
             raise
 
     def _open_file(self, path: str, retry: bool = False, add_to_history: bool = True, force: bool = False, cursor_at_end: bool = False, restore_history_cursor: bool = False) -> None:
+        if path:
+            path = self._normalize_root_page_path(path)
         if not path or (path == self.current_path and not force):
             return
         if getattr(self, "_mode_window_pending", False) or getattr(self, "_mode_window", None):
@@ -3732,7 +3807,7 @@ class MainWindow(QMainWindow):
         tracer = PageLoadLogger(path) if PAGE_LOGGING_ENABLED else None
         # Save current page if dirty before switching
         if self.current_path and path != self.current_path:
-            self._save_dirty_page()
+            self._save_dirty_page(reason="page switch")
         
         # Clean up current page if it's an unchanged virtual page
         if self.current_path and self.current_path in self.virtual_pages:
@@ -4020,6 +4095,7 @@ class MainWindow(QMainWindow):
         local_content: str,
         conflict: dict,
         auto: bool,
+        reason: str = "conflict merge",
     ) -> bool:
         if self._merge_dialog_open:
             return False
@@ -4047,6 +4123,7 @@ class MainWindow(QMainWindow):
                 headers = {"If-Match": f"rev:{int(current_rev)}"}
             except (TypeError, ValueError):
                 headers = None
+        self._log_write(reason, path, merged, auto=auto)
         try:
             resp = self.http.post("/api/file/write", json={"path": path, "content": merged}, headers=headers)
             if resp.status_code == 401 and self._remote_mode:
@@ -4075,7 +4152,7 @@ class MainWindow(QMainWindow):
         self._finalize_save(path, merged, resp.json(), message)
         return True
 
-    def _save_current_file(self, auto: bool = False) -> None:
+    def _save_current_file(self, auto: bool = False, reason: str = "save") -> None:
         if getattr(self, "_heading_picker_active", False):
             # Skip saves triggered while the heading picker popup is active (vi 't')
             return
@@ -4154,6 +4231,7 @@ class MainWindow(QMainWindow):
         
         payload = {"path": self.current_path, "content": payload_content}
         headers = self._if_match_headers(self.current_path)
+        self._log_write(reason, self.current_path, payload_content, auto=auto)
         try:
             resp = self.http.post("/api/file/write", json=payload, headers=headers)
             if resp.status_code == 401 and self._remote_mode:
@@ -4164,7 +4242,13 @@ class MainWindow(QMainWindow):
                 if conflict_payload:
                     if self._accept_noop_conflict(self.current_path, payload_content, conflict_payload, auto):
                         return
-                    self._resolve_conflict_and_save(self.current_path, payload_content, conflict_payload, auto)
+                    self._resolve_conflict_and_save(
+                        self.current_path,
+                        payload_content,
+                        conflict_payload,
+                        auto,
+                        reason=f"{reason} (conflict merge)",
+                    )
                     return
             resp.raise_for_status()
         except httpx.HTTPError as exc:
@@ -4226,6 +4310,7 @@ class MainWindow(QMainWindow):
         else:
             new_content = snippet + "\n"
 
+        self._log_write("append text", dest_path, new_content, auto=None)
         try:
             write_resp = self.http.post("/api/file/write", json={"path": dest_path, "content": new_content})
             write_resp.raise_for_status()
@@ -4252,14 +4337,14 @@ class MainWindow(QMainWindow):
             return False
         return bool(getattr(self, "_dirty_flag", False))
 
-    def _save_dirty_page(self) -> None:
+    def _save_dirty_page(self, reason: str = "dirty page") -> None:
         """Save the current page if there are unsaved edits."""
         if getattr(self, "_heading_picker_active", False):
             return
         if self._read_only:
             return
         if self._is_editor_dirty():
-            self._save_current_file(auto=True)
+            self._save_current_file(auto=True, reason=reason)
             return
         # If Qt reports clean but we still think dirty, ensure badge reflects it
         if getattr(self, "_dirty_flag", False):
@@ -4453,7 +4538,7 @@ class MainWindow(QMainWindow):
         else:
             # Focus is going elsewhere, save normally
             self._remember_history_cursor()
-            self._save_current_file(auto=True)
+            self._save_current_file(auto=True, reason="focus lost")
 
     def _find_asset(self, name: str) -> Optional[Path]:
         """Locate an asset in development or PyInstaller layouts."""
@@ -4665,7 +4750,7 @@ class MainWindow(QMainWindow):
 
     def _on_attachment_dropped(self, filename: str) -> None:
         """Force-save the current page after a dropped attachment inserts content."""
-        self._save_current_file(auto=True)
+        self._save_current_file(auto=True, reason="attachment dropped")
         self.statusBar().showMessage(f"Saved after dropping {filename}", 3000)
 
     def _jump_to_page(self) -> None:
@@ -4703,7 +4788,7 @@ class MainWindow(QMainWindow):
         # Save current page before inserting link to ensure it's indexed
         # Note: Save may reset cursor, but we've already captured the position as integers
         if self.current_path:
-            self._save_current_file(auto=True)
+            self._save_current_file(auto=True, reason="insert link")
         
         if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
             print(f"[DEBUG _insert_link] AFTER save: cursor.pos={self.editor.textCursor().position()}, doc_len={len(self.editor.toPlainText())}")
@@ -5014,7 +5099,7 @@ class MainWindow(QMainWindow):
         path = self._normalize_editor_path(base)
         # Special case: if the path matches the vault root name or is the vault root folder, open the main page
         if self.vault_root_name:
-            # Accept /VaultRoot, VaultRoot, /VaultRoot/, or /VaultRoot/VaultRoot.txt as vault root
+            # Accept /VaultRoot, VaultRoot, /VaultRoot/, or /VaultRoot/VaultRoot.md as vault root
             normalized = path.strip().strip("/")
             if (
                 normalized == self.vault_root_name
@@ -5022,9 +5107,10 @@ class MainWindow(QMainWindow):
                 or normalized == f"{self.vault_root_name}{PAGE_SUFFIX}"
                 or normalized == f"{self.vault_root_name}/{self.vault_root_name}{PAGE_SUFFIX}"
             ):
-                main_page = f"/{self.vault_root_name}{PAGE_SUFFIX}"
-                self._open_file(main_page)
-                self.right_panel.focus_link_tab(main_page)
+                main_page = self._vault_root_page_path()
+                if main_page:
+                    self._open_file(main_page)
+                    self.right_panel.focus_link_tab(main_page)
                 self._apply_navigation_focus("navigator")
                 return
         self._open_file(path)
@@ -5464,7 +5550,7 @@ class MainWindow(QMainWindow):
             # Save current buffer if it is dirty before reloading.
             try:
                 if self.editor.document().isModified() and not self._read_only:
-                    self._save_current_file(auto=True)
+                    self._save_current_file(auto=True, reason="pre-reload save")
             except Exception:
                 pass
         QTimer.singleShot(0, lambda: self.editor.setFocus(Qt.ShortcutFocusReason))
@@ -5893,7 +5979,7 @@ class MainWindow(QMainWindow):
             file_path = self._folder_to_file_path(cleaned)
             if file_path:
                 cleaned = file_path
-        return cleaned
+        return self._normalize_root_page_path(cleaned)
 
     def _is_attachment_link(self, name: str) -> bool:
         cleaned = (name or "").strip()
@@ -5993,7 +6079,7 @@ class MainWindow(QMainWindow):
             return
         
         # Save current page before following link to ensure it's indexed
-        self._save_current_file(auto=True)
+        self._save_current_file(auto=True, reason="follow link")
 
         # Attachment file link: detect filename with extension (non .txt) and open via OS
         if self._is_attachment_link(name):
@@ -6005,11 +6091,24 @@ class MainWindow(QMainWindow):
         
         # Check if this is a colon notation link (PageA:PageB:PageC or :VaultRoot)
         if ":" in target_name:
-            # Special case: :VaultRoot or :<vault_root_name> means open the vault's main page
-            vault_root_colon = f":{self.vault_root_name}"
-            if target_name.strip() in (":VaultRoot", vault_root_colon):
-                # Open the vault's main page (fake root concept)
-                main_page = f"/{self.vault_root_name}{PAGE_SUFFIX}"
+            # Special case: :VaultRoot means open the current home page
+            if target_name.strip() == ":VaultRoot":
+                main_page = self._home_page_path() or self._vault_root_page_path()
+                if not main_page:
+                    return
+                if refresh_only and self.current_path == main_page:
+                    self._reload_page_preserve_cursor(main_page)
+                else:
+                    self._open_file(main_page, force=force)
+                    self._scroll_to_anchor_slug(anchor_slug)
+                    self._apply_navigation_focus(focus_target)
+                return
+            # Special case: :<vault_root_name> maps to the vault root page
+            vault_root_colon = f":{self.vault_root_name}" if self.vault_root_name else ""
+            if vault_root_colon and target_name.strip() == vault_root_colon:
+                main_page = self._vault_root_page_path()
+                if not main_page:
+                    return
                 if refresh_only and self.current_path == main_page:
                     self._reload_page_preserve_cursor(main_page)
                 else:
@@ -6018,11 +6117,14 @@ class MainWindow(QMainWindow):
                     self._apply_navigation_focus(focus_target)
                 return
             # Colon notation is absolute - convert directly to path
-            # Prevent duplicate vault root in path (e.g., VaultRoot/VaultRoot.txt)
+            # Prevent duplicate vault root in path (e.g., VaultRoot/VaultRoot.md)
             target_file = colon_to_path(target_name, self.vault_root_name)
-            # If the resolved file is the vault root's main page, force it to /VaultRoot.txt
-            vault_main_page = f"/{self.vault_root_name}{PAGE_SUFFIX}"
-            if target_file.replace("\\", "/").strip("/") in (self.vault_root_name + PAGE_SUFFIX, vault_main_page.strip("/")):
+            # If the resolved file is the vault root's main page, normalize to its canonical path
+            vault_main_page = self._vault_root_page_path()
+            if vault_main_page and target_file.replace("\\", "/").strip("/") in (
+                self.vault_root_name + PAGE_SUFFIX if self.vault_root_name else "",
+                vault_main_page.strip("/"),
+            ):
                 target_file = vault_main_page
             if not target_file:
                 self._alert(f"Invalid link format: {name}")
@@ -6052,12 +6154,13 @@ class MainWindow(QMainWindow):
                 self._apply_navigation_focus(focus_target)
         else:
             # CamelCase link is relative to current page
-            # Special case: if the link target matches the vault root name, open /VaultRoot.txt
+            # Special case: if the link target matches the vault root name, open the vault root page
             if target_name == self.vault_root_name:
-                target_file = f"/{self.vault_root_name}{PAGE_SUFFIX}"
-                self._open_file(target_file)
-                self._scroll_to_anchor_slug(anchor_slug)
-                self._apply_navigation_focus(focus_target)
+                target_file = self._vault_root_page_path()
+                if target_file:
+                    self._open_file(target_file)
+                    self._scroll_to_anchor_slug(anchor_slug)
+                    self._apply_navigation_focus(focus_target)
                 return
             rel_current = Path(self.current_path.lstrip("/"))
             parent_folder = rel_current.parent
@@ -6374,7 +6477,7 @@ class MainWindow(QMainWindow):
             return None
         cleaned = (folder_path or "/").strip()
         if cleaned in ("", "/"):
-            return f"/{self.vault_root_name}{PAGE_SUFFIX}"
+            return self._vault_root_page_path()
         rel = Path(cleaned.lstrip("/"))
         name = rel.name or self.vault_root_name
         rel_file = rel / f"{name}{PAGE_SUFFIX}"
@@ -7054,7 +7157,7 @@ class MainWindow(QMainWindow):
             return
         old_open_path = self._folder_to_file_path(old_path)
         if self.current_path and old_open_path and self.current_path == old_open_path:
-            self._save_dirty_page()
+            self._save_dirty_page(reason="pre-rename save")
         try:
             resp = self.http.post("/api/file/rename", json={"from": old_path, "to": dest_path})
             resp.raise_for_status()
@@ -7091,7 +7194,7 @@ class MainWindow(QMainWindow):
             return
         old_open_path = self._folder_to_file_path(folder_path)
         if self.current_path and old_open_path and self.current_path == old_open_path:
-            self._save_dirty_page()
+            self._save_dirty_page(reason="pre-move save")
         try:
             resp = self.http.post("/api/file/move", json={"from": folder_path, "to": dest_path})
             resp.raise_for_status()
@@ -7107,7 +7210,7 @@ class MainWindow(QMainWindow):
             return
         old_open_path = self._folder_to_file_path(from_path)
         if self.current_path and old_open_path and self.current_path == old_open_path:
-            self._save_dirty_page()
+            self._save_dirty_page(reason="pre-move save")
         try:
             resp = self.http.post("/api/file/move", json={"from": from_path, "to": dest_path})
             resp.raise_for_status()
@@ -7252,6 +7355,7 @@ class MainWindow(QMainWindow):
             )
             QApplication.processEvents()
             try:
+                self._log_write("import page", page.dest_path, page.content, auto=None)
                 resp = self.http.post("/api/file/write", json={"path": page.dest_path, "content": page.content})
                 resp.raise_for_status()
             except httpx.HTTPError as exc:
@@ -8880,7 +8984,7 @@ class MainWindow(QMainWindow):
             pass
         
         # Save current file and geometry
-        self._save_current_file(auto=True)
+        self._save_current_file(auto=True, reason="window close")
         self._save_geometry()
         self._persist_recent_history()
         try:
@@ -8904,6 +9008,25 @@ class MainWindow(QMainWindow):
 
     def _debug(self, message: str) -> None:
         print(f"[ZimX] {message}")
+
+    def _log_write(self, reason: str, path: str, content: str | None, auto: bool | None = None) -> None:
+        label = reason or "save"
+        try:
+            size = len(content.encode("utf-8")) if content is not None else 0
+        except Exception:
+            size = len(content or "")
+        if auto is None:
+            mode = "n/a"
+        else:
+            mode = "auto" if auto else "manual"
+        try:
+            rel = Path((path or "").lstrip("/"))
+            if len(rel.parts) == 1 and rel.suffix.lower() in PAGE_SUFFIXES:
+                trace = "".join(traceback.format_stack(limit=12))
+                self._debug(f"Invalid root write requested path={path} reason={label}\n{trace}")
+        except Exception:
+            pass
+        self._debug(f"Write request reason={label} path={path} bytes={size} mode={mode}")
     def _history_leaf_label(self, path: str) -> str:
         display = path_to_colon(path) or path
         if ":" in display:

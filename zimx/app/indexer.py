@@ -10,7 +10,7 @@ from zimx.app.ui.path_utils import colon_to_path, normalize_link_target
 from zimx.server.adapters.files import PAGE_SUFFIX, PAGE_SUFFIXES
 
 # Bump this when task parsing logic changes to force re-index even if file hash is unchanged.
-INDEX_SCHEMA_VERSION = "task-parse-v4"
+INDEX_SCHEMA_VERSION = "task-parse-v5"
 
 # Match @tags that are not part of email addresses or similar identifiers.
 TAG_PATTERN = re.compile(r"(?<![\w.+-])@([A-Za-z0-9_]+)")
@@ -22,10 +22,10 @@ MARKDOWN_LINK_PATTERN = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 WIKI_LINK_PATTERN = re.compile(r"\[(?P<link>[^\]|]+)\|[^\]]*\]")
 # Plain colon links written directly in text, e.g., :Journal:2024:01:05:05#Morning
 PLAIN_COLON_LINK_PATTERN = re.compile(r"(?<!\w):(?P<link>[^\s\[\]<>\"'()]+)")
-# Tasks: support markdown checkboxes "- [ ]" and "- [x]"
+# Tasks: support markdown checkboxes "- [ ]" and "- [x]" plus symbol bullets "☐/☑"
 TASK_PATTERN = re.compile(
     r"^(?P<indent>\s*)"
-    r"(?:[-*]\s*\[(?P<state1>[ xX])\])"
+    r"(?:[-*]\s*\[(?P<state1>[ xX])\]|(?P<symbol>[☐☑]))"
     r"\s+(?P<body>.+)$"
 )
 DUE_PATTERN = re.compile(r"<([0-9]{4}-[0-9]{2}-[0-9]{2})")
@@ -218,7 +218,10 @@ def extract_tasks(path: str, content: str) -> List[dict]:
         parent = stack[-1][1] if stack else None
 
         body = match.group("body")
-        state = match.group("state1") or " "
+        state = match.group("state1")
+        if not state:
+            symbol = match.group("symbol")
+            state = "x" if symbol == "☑" else " "
         # Inherit tags from parent, add own tags
         own_tags = set(_extract_tags(body))
         parent_tags = set(parent["tags"]) if parent else set()
