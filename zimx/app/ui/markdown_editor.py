@@ -3088,6 +3088,8 @@ class MarkdownEditor(QTextEdit):
             edit_sub = menu.addMenu("Edit")
             for act in base_menu.actions():
                 edit_sub.addAction(act)
+            insert_link_action = menu.addAction("Insert Link…")
+            insert_link_action.triggered.connect(self._request_insert_link)
 
             link_sub = menu.addMenu("Link")
             edit_action = link_sub.addAction("Edit Link…")
@@ -3157,6 +3159,8 @@ class MarkdownEditor(QTextEdit):
             edit_sub = menu.addMenu("Edit")
             for act in base_menu.actions():
                 edit_sub.addAction(act)
+            insert_link_action = menu.addAction("Insert Link…")
+            insert_link_action.triggered.connect(self._request_insert_link)
 
             page_sub = menu.addMenu("Page")
             copy_page_action = page_sub.addAction("Copy link to this Page")
@@ -3202,6 +3206,14 @@ class MarkdownEditor(QTextEdit):
        
         self._context_menu_selection = None
         super().contextMenuEvent(event)
+
+    def _request_insert_link(self) -> None:
+        window = self.window()
+        if window and hasattr(window, "_insert_link"):
+            try:
+                window._insert_link()
+            except Exception:
+                pass
 
     def _ai_chat_payload_text(self) -> str:
         cursor = self.textCursor()

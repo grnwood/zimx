@@ -11,6 +11,7 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="site.css" />
+    <script src="site.js" defer></script>
   </head>
   <body>
     <header class="site-header">
@@ -21,6 +22,8 @@
           <a href="philo.html">Philosophy</a>
           <a href="cal.html">Journal</a>
           <a href="tasks.html">Tasks</a>
+          <a href="editing.html">Editing</a>
+          <a href="modes.html">Focus Modes</a>
           <a href="thegraph.html">The Graph</a>
           <a href="uses.html">Use Cases</a>
           <a href="ai.html">AI Infused</a>
@@ -44,11 +47,11 @@
         </div>
         <div class="image-stack">
           <img
-            src="https://thesweetsetup.com/wp-content/uploads/2021/09/Craft-Part-3-Daily-Notes-1.png"
+            src="img/mini-graph.png"
             alt="Daily notes layout"
           />
           <img
-            src="https://www.researchgate.net/publication/373048455/figure/fig2/AS%3A11431281203913794%401699520584706/Examples-of-different-personal-knowledge-graphs-a-Personal-knowledge-graph-based-on.png"
+            src="img/raw-links.png"
             alt="Personal knowledge graph"
           />
         </div>
@@ -102,14 +105,18 @@
           </p>
         </div>
         <div class="image-stack">
-          <img
-            src="https://noduslabs.com/wp-content/uploads/2020/08/structural-gap-text-network.png"
-            alt="Network diagram"
-          />
-          <img
-            src="https://camo.githubusercontent.com/fae938de0896ec8e084459f0262f3ed45d9c6dbbae9d9b38710eab9db404603b/68747470733a2f2f7777772e6e6f74657369756d2e636f6d2f696d616765732f73637265656e73686f742d313730363237343635382e706e67"
-            alt="Graph visualization"
-          />
+          <button class="lightbox-trigger" type="button" data-lightbox="img/graph-day-link.png" data-lightbox-caption="A daily note linking out to projects and ideas, making the graph feel alive without extra work.">
+            <img
+              src="img/graph-day-link.png"
+              alt="Network diagram"
+            />
+          </button>
+          <button class="lightbox-trigger" type="button" data-lightbox="img/graph-panel.png" data-lightbox-caption="The link navigator graph surfaces relationships across your vault, showing how topics connect at a glance.">
+            <img
+              src="img/graph-panel.png"
+              alt="Graph visualization"
+            />
+          </button>
         </div>
       </section>
 

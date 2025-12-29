@@ -53,6 +53,7 @@ export const HomePage: React.FC<HomePageProps> = ({ headerLeft, onLogout }) => {
   const [audioPlayback, setAudioPlayback] = useState<{ src: string; label: string; playing: boolean; current: number; duration: number } | null>(null);
   const [recordElapsed, setRecordElapsed] = useState(0);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
+  const contentTopRef = useRef<HTMLDivElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
   const micInputRef = useRef<HTMLInputElement | null>(null);
@@ -670,7 +671,7 @@ export const HomePage: React.FC<HomePageProps> = ({ headerLeft, onLogout }) => {
     setConflictRev(null);
     setConflictMtime(null);
     setAttachments([]);
-    setIsEditing(false);
+    setIsEditing(true);
     const cacheKey = `${CACHE_PREFIX}${path}`;
     const cached = localStorage.getItem(cacheKey);
     if (cached !== null) {
@@ -702,6 +703,12 @@ export const HomePage: React.FC<HomePageProps> = ({ headerLeft, onLogout }) => {
     } finally {
       setLoadingPage(false);
       setHydrating(false);
+      requestAnimationFrame(() => {
+        contentTopRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        if (editorRef.current) {
+          editorRef.current.focus();
+        }
+      });
     }
   };
 
@@ -878,6 +885,14 @@ export const HomePage: React.FC<HomePageProps> = ({ headerLeft, onLogout }) => {
         }
         const localContent = contentRef.current;
         const currentServerContent = serverContentRef.current ?? '';
+        if (localContent === result.content) {
+          setServerContent(result.content);
+          setCurrentRev(nextRev);
+          setServerRev(nextRev);
+          setCurrentMtime(nextMtime);
+          setServerMtime(nextMtime);
+          return;
+        }
         if (localContent === currentServerContent) {
           setContent(result.content);
           setServerContent(result.content);
@@ -1072,7 +1087,7 @@ export const HomePage: React.FC<HomePageProps> = ({ headerLeft, onLogout }) => {
   };
 
   return (
-    <div style={{ padding: '20px', maxWidth: '800px', margin: '0 auto' }}>
+    <div style={{ padding: '20px', width: '100%', minHeight: '100vh', boxSizing: 'border-box' }}>
       <input
         ref={imageInputRef}
         type="file"
@@ -1414,6 +1429,7 @@ export const HomePage: React.FC<HomePageProps> = ({ headerLeft, onLogout }) => {
                 Edit
               </button>
             </div>
+            <div ref={contentTopRef} />
             {conflict && (
               <div style={{
                 marginTop: '8px',

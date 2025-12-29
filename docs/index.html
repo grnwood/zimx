@@ -11,6 +11,7 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="site.css" />
+    <script src="site.js" defer></script>
   </head>
   <body>
     <header class="site-header">
@@ -21,6 +22,8 @@
           <a href="philo.html">Philosophy</a>
           <a href="cal.html">Journal</a>
           <a href="tasks.html">Tasks</a>
+          <a href="editing.html">Editing</a>
+          <a href="modes.html">Focus Modes</a>
           <a href="thegraph.html">The Graph</a>
           <a href="uses.html">Use Cases</a>
           <a href="ai.html">AI Infused</a>
@@ -108,18 +111,38 @@
       </section>
 
       <section class="section reveal" style="--d: 0.35s">
-        <div class="eyebrow">Build the backbone</div>
-        <h2>A calendar that reflects real work</h2>
+        <div class="eyebrow">Second brain</div>
+        <h2>Writing, tasks, calendar, and links all in one flow</h2>
         <p>
-          In ZimX, the calendar is a set of dated note pages, not a grid of time slots. Each
-          day captures plans, outcomes, and links to everything else in your system.
+          ZimX connects what you write to what you need to do, when it happened, and how it
+          relates to everything else. Pages link to tasks, tasks link to dates, and the graph
+          shows how your thinking evolves. It becomes a second brain you can trust to hold
+          the full story.
         </p>
         <div class="image-stack">
-          <img
-            src="img/cal-day.png"
-            alt="Knowledge graph of connected notes"
-          />
-         </div>
+          <div class="carousel" data-carousel>
+            <div class="carousel-track" data-carousel-track>
+              <button class="carousel-slide lightbox-trigger" type="button" data-carousel-item data-lightbox="img/full-notebook-app.png" data-lightbox-caption="Full notebook view showing the file navigator on the left, the editor in the center, and linked graph insights on the right.">
+                <img
+                  src="img/full-notebook-app.png"
+                  alt="ZimX showing left nav, article content, and a link graph"
+                />
+              </button>
+              <button class="carousel-slide lightbox-trigger" type="button" data-carousel-item data-lightbox="img/tasks-view.png" data-lightbox-caption="Task panel view where tasks live beside your writing, link back to the source page, and stay filterable by tags and due dates.">
+                <img
+                  src="img/tasks-view.png"
+                  alt="ZimX task page with checklists and tags"
+                />
+              </button>
+              <button class="carousel-slide lightbox-trigger" type="button" data-carousel-item data-lightbox="img/calendar-page.png" data-lightbox-caption="Calendar page view showing daily plans and actuals, with linked notes and relevant tasks right alongside the journal entry.">
+                <img
+                  src="img/calendar-page.png"
+                  alt="ZimX calendar page with daily notes"
+                />
+              </button>
+            </div>
+          </div>
+        </div>
       </section>
 
       <section class="section reveal" id="download" style="--d: 0.45s">

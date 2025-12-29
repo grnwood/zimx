@@ -1,0 +1,100 @@
+# Links and Backlinks
+
+Links are how ZimX turns folders of Markdown into a connected "thinking space".
+
+**Organize your way. Not ours.** Trees, links, tags, tasks, or all of them together. ZimX adapts to how your brain works.
+
+## Wiki-Style Links (Recommended)
+ZimX supports wiki-style links with a target and an optional label:
+
+**Basic syntax**:
+```
+[:Page_Name]
+[:Page_Name|Nice Label]
+```
+
+**Nested pages** (use colons):
+```
+[:AI:Setup]
+[:AI:Setup|Setting up AI]
+```
+
+**Notes**:
+- Use underscores in targets for spaces (`Getting_Started` → `Getting Started`)
+- Use `:` to make the link root-relative (so it always resolves the same way)
+- Links are case-sensitive but ZimX tries to be forgiving
+
+## Creating Links
+**Method 1: Type manually**
+Just type `[:Page_Name|Label]` in the editor.
+
+**Method 2: Insert Link Dialog**
+1. Select text you want to turn into a link
+2. Right-click → "Insert Link"
+3. Choose the target page
+4. ZimX wraps the selected text as the link label
+
+**Method 3: Paste as Link**
+1. Copy text from another page
+2. Select target text in current page
+3. Use "Paste as Link" action (if available)
+
+## Following Links
+- **Click** a link to navigate to that page
+- Links open in the same editor (use history to go back)
+- If the target page doesn't exist, ZimX can create it
+
+## Backlinks
+**Find anything instantly.** The Link Navigator panel shows:
+- **Outgoing links**: Where this page links to
+- **Incoming links**: Where this page is referenced from
+
+Open Link Navigator: `G,L` or `Go → Link Navigator`
+
+Backlinks let you discover where a note is referenced—crucial for understanding context over time.
+
+## Why Link So Much?
+**Built for long-term thinking.** Links create a web of related ideas that grows more valuable over time:
+
+- Faster navigation than the tree once your vault grows
+- Build "hub" pages that act as dashboards
+- Discover unexpected connections through backlinks
+- Create a personal knowledge graph naturally
+
+## A Simple Pattern
+Create a page per concept and a page per project:
+
+- **Concept pages** (evergreen): "Search", "Meeting Notes", "PlantUML", "Design Patterns"
+- **Project pages** (time-bound): "Project Phoenix", "Q4 Planning", "Client X Migration"
+
+Then link projects to concepts as you use them. Over time, concept pages accumulate backlinks showing where they've been applied.
+
+## HTTP Links
+Standard Markdown links also work:
+```
+[Google](https://google.com)
+<https://example.com>
+```
+
+These open in your default browser.
+
+## Example Hub Page Pattern
+Create a page called "Projects" or "Work" that links to all active projects:
+
+```markdown
+# Projects
+
+## Active
+- [:Project_Phoenix|Project Phoenix] @high
+- [:Client_X_Migration|Client X] @work
+
+## Archived
+- [:Q3_Planning|Q3 Planning] (completed 2025-09-30)
+```
+
+Now you have a dashboard you can bookmark or link from other pages.
+
+## Next Steps
+- Learn about searching and tags: [:Search_and_Filtering|Search and Filtering]
+- Track project tasks: [:Tasks|Tasks]
+- Understand the navigation system: [:Navigation|Navigation]

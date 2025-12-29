@@ -1,32 +1,21 @@
-# FormattingTest
+# Markdown Formatting
 Created Tuesday 25 November 2025
 ---
 # Heading One
+Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+
 ## Heading Two
-### Heading Three
-#### Heading Four
-##### Heading Five
+Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
 
-- [ ] uncompleted checkbox
-  - [ ] checkbox one @todo
-- [x] completed task!  @todo <2025-12-27
-
+## Links
 This is a [https://www.google.com|Google link]
-
 this is a [:FormattingTest|] page link.
 
+## Formatting
 this is **bold**.
-
 this is ***bold and italic***.
-
 this is just *italic*
-
 this is ~~strikethrough~~.
-
-~~this is a~~
-~~multiline strike through~~
-~~of stuff~~
-
 this is a `single fixed width` thing.
 
 ```
@@ -35,29 +24,10 @@ a multine fixed width
 thing.
 ```
 
+## Inline Blocks
 ```javascript
 var joe = Joe();
 ```
-
-```python
- def _is_plain_markdown(self, rendered_html: str) -> bool:
-        """Heuristic: detect if the markdown output is just a <p> block without rich tags."""
-        if not rendered_html.startswith("<p>") or not rendered_html.endswith("</p>"):
-            return False
-        heavy_tags = ("<ul", "<ol", "<pre", "<code", "<h", "<table", "<blockquote", "<li", "<hr", "<img", "<a ")
-        return not any(tag in rendered_html for tag in heavy_tags)
-```
-
-
 The following is a quote:
 >asdfasdfasdfasdf
 >asdfasdf
-
->you never close your eyes
->anymore
->>when i kiss
-> your lips.
-
-
-
--Joe

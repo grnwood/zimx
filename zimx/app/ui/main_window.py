@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -1266,6 +1267,11 @@ class MainWindow(QMainWindow):
         ai_action.triggered.connect(self._open_ai_chat_window)
         go_menu.addAction(ai_action)
 
+        jump_action = QAction("Jump To Page… (Ctrl+J)", self)
+        jump_action.setToolTip("Jump to a page (Ctrl+J)")
+        jump_action.triggered.connect(self._jump_to_page)
+        go_menu.addAction(jump_action)
+
         today_action = QAction("T(o)day", self)
         today_action.setShortcut(QKeySequence("G,O"))
         today_action.setToolTip("Today's journal entry (Alt+D)")
@@ -1287,6 +1293,11 @@ class MainWindow(QMainWindow):
         print_page_action.triggered.connect(self._print_current_page)
         file_menu.addAction(print_page_action)
 
+        insert_link_action = QAction("Insert Link…", self)
+        insert_link_action.setToolTip("Insert a link to another page (Ctrl+L)")
+        insert_link_action.triggered.connect(self._insert_link)
+        file_menu.addAction(insert_link_action)
+
         help_menu = self.menuBar().addMenu("Hel&p")
         documentation_action = QAction("Documentation", self)
         documentation_action.setShortcut(QKeySequence(Qt.Key_F1))
@@ -1294,6 +1305,10 @@ class MainWindow(QMainWindow):
         documentation_action.setToolTip("Open the built-in ZimX documentation (F1)")
         documentation_action.triggered.connect(self._open_help_documentation)
         help_menu.addAction(documentation_action)
+        shortcuts_action = QAction("Keyboard Shortcuts", self)
+        shortcuts_action.setToolTip("Open the Keyboard Shortcuts page")
+        shortcuts_action.triggered.connect(self._open_help_keyboard_shortcuts)
+        help_menu.addAction(shortcuts_action)
         about_action = QAction("About", self)
         about_action.triggered.connect(self._show_about_dialog)
         help_menu.addAction(about_action)
@@ -2003,7 +2018,7 @@ class MainWindow(QMainWindow):
 
         for cand in candidates:
             try:
-                if (cand / "help-vault.txt").exists():
+                if (cand / "help-vault" / "help-vault.md").exists() or (cand / "help-vault.txt").exists():
                     return cand
             except Exception:
                 continue
@@ -2019,8 +2034,7 @@ class MainWindow(QMainWindow):
         user_root.parent.mkdir(parents=True, exist_ok=True)
 
         # Only seed when missing or effectively empty; do not overwrite user edits.
-        root_page = user_root / "help-vault.txt"
-        if root_page.exists():
+        if (user_root / "help-vault.md").exists() or (user_root / "help-vault.txt").exists():
             return user_root
 
         # Seed via a temp dir to avoid leaving a half-copied vault behind.
@@ -2045,6 +2059,36 @@ class MainWindow(QMainWindow):
             self._launch_vault_process(str(vault_path))
         except Exception as exc:  # pragma: no cover - UI path
             self._alert(f"Failed to open documentation: {exc}")
+
+    def _set_help_vault_last_file(self, vault_root: Path, rel_path: str) -> bool:
+        db_path = vault_root / ".zimx" / "settings.db"
+        try:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT)")
+                conn.execute(
+                    "REPLACE INTO kv(key, value) VALUES(?, ?)",
+                    ("last_file", rel_path),
+                )
+                conn.commit()
+            return True
+        except Exception:
+            return False
+
+    def _open_help_keyboard_shortcuts(self) -> None:
+        """Open the Keyboard Shortcuts page in the help vault."""
+        if not self._require_local_mode("Open keyboard shortcuts"):
+            return
+        try:
+            vault_path = self._ensure_user_help_vault()
+            rel_path = "/Keyboard Shortcuts/Keyboard Shortcuts.md"
+            if self.vault_root and Path(self.vault_root).resolve() == vault_path.resolve():
+                self._open_file(rel_path)
+                return
+            self._set_help_vault_last_file(vault_path, rel_path)
+            self._launch_vault_process(str(vault_path))
+        except Exception as exc:  # pragma: no cover - UI path
+            self._alert(f"Failed to open keyboard shortcuts: {exc}")
 
     def _create_vault(self) -> None:
         if not self._require_local_mode("Create a new vault"):
@@ -3044,18 +3088,41 @@ class MainWindow(QMainWindow):
             home_path = config.get_home_page_path()
         except Exception:
             home_path = None
-        if home_path:
+        if home_path and self._page_exists(home_path):
             return self._normalize_root_page_path(home_path)
         try:
-            model = self.tree_model
-            if model and model.rowCount() > 0:
-                index = model.index(0, 0)
-                candidate = index.data(OPEN_ROLE) or index.data(PATH_ROLE)
-                if candidate:
-                    return self._normalize_root_page_path(candidate)
+            candidate = self._first_tree_page_path()
+            if candidate:
+                return self._normalize_root_page_path(candidate)
         except Exception:
             pass
         return self._vault_root_page_path()
+
+    def _first_tree_page_path(self) -> Optional[str]:
+        model = self.tree_model
+        if not model:
+            return None
+        root = model.invisibleRootItem()
+
+        def scan(item: QStandardItem) -> Optional[str]:
+            if item.data(PATH_ROLE) == FILTER_BANNER:
+                return None
+            candidate = item.data(OPEN_ROLE) or item.data(PATH_ROLE)
+            if candidate and candidate != "/":
+                return str(candidate)
+            for row in range(item.rowCount()):
+                child = item.child(row)
+                found = scan(child)
+                if found:
+                    return found
+            return None
+
+        for row in range(root.rowCount()):
+            child = root.child(row)
+            found = scan(child)
+            if found:
+                return found
+        return None
 
     def _go_home(self) -> None:
         """Navigate to the vault's home page (display position 0)."""

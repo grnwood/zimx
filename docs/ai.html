@@ -11,6 +11,7 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="site.css" />
+    <script src="site.js" defer></script>
   </head>
   <body>
     <header class="site-header">
@@ -19,12 +20,15 @@
         <nav class="nav-links">
           <a href="index.html">Home</a>
           <a href="philo.html">Philosophy</a>
-          <a href="uses.html">Use Cases</a>
+          <a href="cal.html">Calendar</a>
           <a href="tasks.html">Tasks</a>
+          <a href="editing.html">Editing</a>
+          <a href="modes.html">Focus Modes</a>
           <a href="thegraph.html">The Graph</a>
+          <a href="uses.html">Use Cases</a>
+          <a href="ai.html">AI Infused</a>
           <a href="howitcompares.html">Comparisons</a>
           <a href="power.html">Power</a>
-          <a href="cal.html">Calendar</a>
         </nav>
       </div>
     </header>
@@ -45,7 +49,7 @@
         </div>
         <div>
           <img
-            src="https://cdn.macstories.net/cleanshot-2021-08-10-at-20-50-29-2x-1628646682592.jpg"
+            src="img/ai-chat-panel.png"
             alt="Focused notes and tasks"
           />
         </div>
@@ -113,14 +117,21 @@
           </p>
         </div>
         <div class="image-stack">
-          <img
-            src="https://images.ctfassets.net/lzny33ho1g45/5VUxIpyGIdRKtiXlRtsOwn/ab1620de518d40faf78df602d45ab38a/3-grid-diary.jpeg"
-            alt="Organized journal pages"
-          />
-          <img
-            src="https://www.researchgate.net/publication/373048455/figure/fig2/AS%3A11431281203913794%401699520584706/Examples-of-different-personal-knowledge-graphs-a-Personal-knowledge-graph-based-on.png"
-            alt="Knowledge graph visualization"
-          />
+          <button
+            class="lightbox-trigger"
+            type="button"
+            data-lightbox-video="img/page-chat.mkv"
+            data-lightbox-caption="Page chat demo: summarize, clarify, and pull next steps without leaving the note."
+            style="width: 100%; border: none; background: none; padding: 0; cursor: zoom-in;"
+          >
+            <video
+              src="img/page-chat.mkv"
+              muted
+              playsinline
+              preload="metadata"
+              style="width: 100%; border-radius: 16px; border: 1px solid #e3dbcf;"
+            ></video>
+          </button>
         </div>
       </section>
 
@@ -151,6 +162,51 @@
             <p>
               Convert a rough idea into a crisp plan with milestones, risks, and next steps.
             </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section split reveal" style="--d: 0.4s">
+        <div>
+          <div class="eyebrow">One-shot prompts</div>
+          <h2>Fast, focused boosts for notes in progress.</h2>
+          <p>
+            One-shot prompting is designed for quick augmentation. Highlight a paragraph or
+            drop a rough note into the one-shot panel and get a clean summary, a punchier
+            rewrite, or a short list of next steps without starting a long chat thread.
+          </p>
+          <p class="quote">
+            Think of it as a single, high-quality pass that keeps your notes moving forward.
+          </p>
+        </div>
+        <div class="grid">
+          <div class="card">
+            <h3>Instant polish</h3>
+            <p>Turn rough bullets into clear prose in one action.</p>
+          </div>
+          <div class="card">
+            <h3>Quick summaries</h3>
+            <p>Capture the essence of a page without breaking flow.</p>
+          </div>
+          <div class="card">
+            <h3>Structured outputs</h3>
+            <p>Generate checklists, talking points, or a short outline on demand.</p>
+          </div>
+          <div class="card">
+            <h3>One-shot demo</h3>
+            <button
+              class="lightbox-trigger"
+              type="button"
+              data-lightbox-video="img/one-shot.mkv"
+              data-lightbox-caption="One-shot prompt demo: a quick pass that turns rough notes into clean, usable copy."
+              style="width: 100%; border: none; background: none; padding: 0; cursor: zoom-in;"
+            >
+              <img
+                src="img/one-shot-preview.svg"
+                alt="One-shot prompt demo video"
+                style="width: 100%; border-radius: 16px; border: 1px solid #e3dbcf;"
+              />
+            </button>
           </div>
         </div>
       </section>

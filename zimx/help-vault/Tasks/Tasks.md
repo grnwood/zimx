@@ -1,0 +1,128 @@
+# Tasks
+
+ZimX can extract tasks from your Markdown and show them in a dedicated panel.
+
+**Organize your way.** Track work using trees, links, tags, or tasks—whatever fits your workflow.
+
+## Task Syntax
+Use Markdown checkboxes anywhere in your notes:
+
+```markdown
+- [ ] Write documentation page
+- [x] Fix a bug
+- [ ] Review pull request
+```
+
+**ZimX extracts these automatically** and shows them in the Task panel.
+
+## Enhanced Task Features
+Add metadata inline with your tasks:
+
+```markdown
+- [ ] Draft proposal @work <2025-12-31
+- [ ] Buy groceries @home @errands
+- [ ] Research topic !!! >2025-12-20
+```
+
+**Conventions**:
+- `@tag`: Tag the task (e.g., `@work`, `@home`, `@client-x`)
+- `<YYYY-MM-DD`: Due date
+- `>YYYY-MM-DD`: Start date
+- `!`, `!!`, `!!!`: Priority (more `!` = higher priority)
+
+**No magic. No surprises.** Everything is visible in plain text. Open the page in any editor and you'll see the same thing.
+
+## Task Panel
+Open the Task panel: **G,T** or `Go → Tasks`
+
+**Features**:
+- View all tasks across your vault
+- Filter by tag, date, priority, status
+- Search within tasks
+- Click a task to jump to its source page
+- Check/uncheck tasks directly in the panel
+
+## Hierarchy and Context
+Tasks can be nested:
+
+```markdown
+- [ ] Project Phoenix @project
+  - [ ] Design mockups @design
+  - [ ] Implement backend @dev
+  - [ ] Write tests @dev
+```
+
+ZimX preserves the hierarchy so you understand task relationships.
+
+## Suggested Workflow
+
+### 1. Capture Tasks Where They Happen
+Don't force tasks into a separate "task list":
+- Add tasks to meeting notes
+- Add tasks to project pages
+- Add tasks to daily journal entries
+
+**Built for long-term thinking.** Tasks live alongside the context that created them.
+
+### 2. Use Tags to Separate Contexts
+```markdown
+- [ ] Review contracts @work @legal
+- [ ] Fix leaky faucet @home
+- [ ] Read research paper @reading @someday
+```
+
+Filter the task panel by tag to see context-specific tasks.
+
+### 3. Review Regularly
+Use the Task panel to review:
+- What's due soon? (filter by date)
+- What's high priority? (filter by `!`)
+- What's blocked? (use `@wait` tag)
+- What can I do now? (filter by context like `@work`)
+
+### 4. Mark Complete, Don't Delete
+Change `- [ ]` to `- [x]`:
+```markdown
+- [x] Completed task @done
+```
+
+**Why?** Completed tasks provide a record of what you've accomplished. They're useful when writing status reports or remembering what you did.
+
+## Integration with Calendar
+Combine tasks with dated journal pages:
+
+**Example daily page**:
+```markdown
+# 2025-12-18
+
+## Tasks
+- [x] Morning standup @work
+- [ ] Review PR #123 @dev
+- [ ] Draft blog post @writing
+
+## Notes
+Meeting with Sarah went well. Discussed...
+```
+
+See [:Calendar|Calendar] for more on journal workflows.
+
+## Searching Tasks
+- Use the Task panel's search feature
+- Or use global search for `@tag` to find tagged tasks
+- Or search for date ranges: `<2025-12`
+
+**Find anything instantly.** Tasks are just text, so all search tools work on them.
+
+## Advanced: Task Scripts
+For power users: since tasks are plain text, you can process them with scripts:
+- Export tasks to other tools
+- Generate reports
+- Analyze completion rates
+- Create custom dashboards
+
+Your vault is just files—use any tool you want.
+
+## Next Steps
+- Use calendar for dated tasks: [:Calendar|Calendar]
+- Tag and search tasks: [:Search_and_Filtering|Search and Filtering]
+- Link tasks to project pages: [:Links_and_Backlinks|Links and Backlinks]
