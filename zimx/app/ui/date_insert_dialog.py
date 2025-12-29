@@ -318,7 +318,7 @@ class DateInsertDialog(QDialog):
 
     def _set_invalid(self) -> None:
         self._valid_date = None
-        self.date_edit.setStyleSheet("color: #b00020;")
+        self.date_edit.setStyleSheet(self._default_style)
         ok_btn = self.buttons.button(QDialogButtonBox.Ok)
         if ok_btn:
             ok_btn.setEnabled(False)
@@ -327,4 +327,3 @@ class DateInsertDialog(QDialog):
         if self._valid_date is None:
             return
         self.accept()
-
