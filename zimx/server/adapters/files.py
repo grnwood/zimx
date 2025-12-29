@@ -1,6 +1,11 @@
 from __future__ import annotations
+import datetime as dt
 import os
+import shutil
 import traceback
+from datetime import date
+from pathlib import Path
+from typing import Dict, List
 
 def assert_not_vault_root_write(path):
     """
@@ -242,7 +247,7 @@ def list_files_modified_between(root: Path, start: date, end: date) -> List[Dict
                 mtime = path.stat().st_mtime
             except OSError:
                 continue
-            mod_dt = datetime.fromtimestamp(mtime)
+            mod_dt = dt.datetime.fromtimestamp(mtime)
             mod_date = mod_dt.date()
             if start <= mod_date <= end:
                 rel = f"/{path.relative_to(root).as_posix()}"
