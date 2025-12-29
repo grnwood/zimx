@@ -10,7 +10,10 @@ ZimX is a local-first, Zim-style note system with a PySide6 desktop app and an e
 - Journaling workflows with date navigation and templates.
 - Optional vi-mode navigation/editing.
 - Built-in help vault and keyboard shortcuts guide.
-- Optional AI panels and actions when configured.
+- AI chat panel, one-shot prompts, and AI actions when configured.
+- Focus/Audience modes for distraction-free writing and reading.
+- Link graph / navigator for contextual browsing and filtered views.
+- PlantUML diagramming with AI-assisted generation and templates.
 
 ## Getting Started
 
