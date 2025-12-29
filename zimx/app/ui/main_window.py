@@ -8812,10 +8812,15 @@ class MainWindow(QMainWindow):
         self.right_panel.refresh_tasks()
         self.right_panel.refresh_links(self.current_path)
         
+        page_count = len(txt_files)
+        folder_count = len({p.parent for p in txt_files})
         if progress:
             progress.close()
-            page_count = len(txt_files)
-            self.statusBar().showMessage(f"Index rebuilt: {page_count} pages", 3000)
+            self.statusBar().showMessage(
+                f"Index rebuilt: {page_count} pages across {folder_count} folders",
+                4000,
+            )
+        print(f"[UI] Reindex summary: {page_count} pages across {folder_count} folders")
         print("[UI] Reindex complete")
 
     # --- Utilities -----------------------------------------------------

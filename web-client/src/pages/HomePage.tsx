@@ -245,10 +245,6 @@ export const HomePage: React.FC<HomePageProps> = ({ headerLeft, onLogout }) => {
       // Release memory
       canvas.width = 1;
       canvas.height = 1;
-      // @ts-ignore
-      canvas = null;
-      // @ts-ignore
-      ctx = null;
       if (!blob) return file;
       return new File([blob], file.name, { type: 'image/jpeg', lastModified: Date.now() });
     } catch {
@@ -671,7 +667,7 @@ export const HomePage: React.FC<HomePageProps> = ({ headerLeft, onLogout }) => {
     setConflictRev(null);
     setConflictMtime(null);
     setAttachments([]);
-    setIsEditing(true);
+    setIsEditing(false);
     const cacheKey = `${CACHE_PREFIX}${path}`;
     const cached = localStorage.getItem(cacheKey);
     if (cached !== null) {
@@ -1087,7 +1083,7 @@ export const HomePage: React.FC<HomePageProps> = ({ headerLeft, onLogout }) => {
   };
 
   return (
-    <div style={{ padding: '20px', width: '100%', minHeight: '100vh', boxSizing: 'border-box' }}>
+    <div style={{ padding: 0, width: '100%', minHeight: '100vh', boxSizing: 'border-box' }}>
       <input
         ref={imageInputRef}
         type="file"

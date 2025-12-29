@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -e
+cd ..
 source venv/bin/activate
 # Run the API server over HTTPS using uvicorn.
 # Note: the Python entrypoint only accepts host/port/vault options (no SSL), so we use uvicorn directly.
