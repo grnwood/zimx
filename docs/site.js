@@ -109,6 +109,15 @@
 
       setActive(1);
     });
+
+    document.querySelectorAll('.nav-toggle').forEach((toggle) => {
+      const nav = toggle.parentElement?.querySelector('.nav-links');
+      if (!nav) return;
+      toggle.addEventListener('click', () => {
+        const isOpen = nav.classList.toggle('is-open');
+        toggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+      });
+    });
   };
 
   if (document.readyState === 'loading') {
