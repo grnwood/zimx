@@ -1270,6 +1270,7 @@ class MarkdownEditor(QTextEdit):
         self._overlay_transition: bool = False  # True while a mode overlay is spinning up/down
         self._overlay_active: bool = False  # True while inside a ModeWindow
         self._cursor_events_blocked: bool = False
+        self._last_heading_block_num: Optional[int] = None
         self._search_engine = SearchEngine(self)
         self.setPlaceholderText("Open a Markdown file to begin editing…")
         self.setAcceptRichText(True)
@@ -2645,6 +2646,7 @@ class MarkdownEditor(QTextEdit):
         line_cursor = QTextCursor(block)
         line_cursor.select(QTextCursor.LineUnderCursor)
         line_cursor.insertText(new_line)
+        self.document().findBlock(block.position()).setUserState(-1)
         new_pos = block.position() + len(indent) + len(sentinel)
         cursor.setPosition(min(new_pos, block.position() + len(new_line)))
         cursor.endEditBlock()
@@ -2664,10 +2666,73 @@ class MarkdownEditor(QTextEdit):
         line_cursor = QTextCursor(block)
         line_cursor.select(QTextCursor.LineUnderCursor)
         line_cursor.insertText(new_line)
+        self.document().findBlock(block.position()).setUserState(-1)
         cursor.setPosition(block.position() + len(indent))
         cursor.endEditBlock()
         self.setTextCursor(cursor)
         self._schedule_heading_outline()
+
+    def _prepare_heading_edit_on_input(self, cursor: QTextCursor) -> bool:
+        """Strip heading sentinel for editing and remember prior heading level."""
+        block = cursor.block()
+        if not block.isValid():
+            return False
+        text = block.text()
+        stripped = text.lstrip(" \t")
+        if not stripped:
+            return False
+        indent = text[: len(text) - len(stripped)]
+        level = heading_level_from_char(stripped[0])
+        if not level:
+            return False
+        post_sentinel = stripped[1:]
+        space_count = len(post_sentinel) - len(post_sentinel.lstrip())
+        content = post_sentinel.lstrip()
+        new_line = indent + content
+        if new_line == text:
+            return False
+
+        line_start = block.position()
+
+        def _adjust_rel(rel: int) -> int:
+            if rel <= len(indent):
+                return rel
+            content_start = len(indent) + 1 + space_count
+            if rel > content_start:
+                return max(len(indent), rel - (1 + space_count))
+            return len(indent)
+
+        if cursor.hasSelection():
+            sel_start = cursor.selectionStart()
+            sel_end = cursor.selectionEnd()
+            rel_start = max(0, sel_start - line_start)
+            rel_end = max(0, sel_end - line_start)
+            new_rel_start = _adjust_rel(rel_start)
+            new_rel_end = _adjust_rel(rel_end)
+        else:
+            rel_pos = max(0, cursor.position() - line_start)
+            new_rel_pos = _adjust_rel(rel_pos)
+
+        cursor.beginEditBlock()
+        line_cursor = QTextCursor(block)
+        line_cursor.select(QTextCursor.LineUnderCursor)
+        line_cursor.insertText(new_line)
+        new_block = self.document().findBlock(line_start)
+        new_block.setUserState(level)
+        new_len = max(0, new_block.length() - 1)
+        new_cursor = self.textCursor()
+        if cursor.hasSelection():
+            new_abs_start = line_start + min(new_rel_start, new_len)
+            new_abs_end = line_start + min(new_rel_end, new_len)
+            new_cursor.setPosition(new_abs_start)
+            new_cursor.setPosition(new_abs_end, QTextCursor.KeepAnchor)
+        else:
+            new_abs = line_start + min(new_rel_pos, new_len)
+            new_cursor.setPosition(new_abs)
+        self.setTextCursor(new_cursor)
+        cursor.endEditBlock()
+        self._schedule_heading_outline()
+        return True
 
     def _selected_blocks(self) -> list:
         """Return all blocks touched by the selection (or current line)."""
@@ -2904,6 +2969,10 @@ class MarkdownEditor(QTextEdit):
         is_bullet, indent, content = self._is_bullet_line(text)
         is_dash, dash_indent, dash_content = self._is_dash_line(text)
         is_task, task_indent, task_state, task_content = self._is_task_line(text)
+        if not (meaningful_modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) and (
+            event.text() or event.key() in (Qt.Key_Backspace, Qt.Key_Delete)
+        ):
+            self._prepare_heading_edit_on_input(cursor)
         # Ctrl+E: edit link under cursor
         if event.key() == Qt.Key_E and event.modifiers() == Qt.ControlModifier:
             self._edit_link_at_cursor(cursor)
@@ -4229,6 +4298,15 @@ class MarkdownEditor(QTextEdit):
         if self._in_mode_window_transition():
             return
         cursor = self.textCursor()
+        current_block_num = cursor.blockNumber()
+        prev_block_num = self._last_heading_block_num
+        if prev_block_num is None:
+            self._last_heading_block_num = current_block_num
+        elif prev_block_num != current_block_num:
+            prev_block = self.document().findBlockByNumber(prev_block_num)
+            if prev_block.isValid():
+                self._finalize_heading_block(prev_block)
+            self._last_heading_block_num = current_block_num
         self.cursorMoved.emit(cursor.position())
         # Check if cursor is over a link and emit link path
         link = self._link_under_cursor(cursor)
@@ -5431,10 +5509,18 @@ class MarkdownEditor(QTextEdit):
         stripped = text.lstrip()
         # Skip if already rendered (sentinel present)
         if stripped and heading_level_from_char(stripped[0]):
+            block.setUserState(-1)
             return
         converted = HEADING_MARK_PATTERN.sub(self._encode_heading, text)
         if converted == text:
-            return
+            pending_level = block.userState()
+            if not (1 <= pending_level <= HEADING_MAX_LEVEL):
+                return
+            if not stripped:
+                block.setUserState(-1)
+                return
+            indent = text[: len(text) - len(stripped)]
+            converted = f"{indent}{heading_sentinel(pending_level)}{stripped}"
 
         current = self.textCursor()
         current_pos = current.position()
@@ -5448,6 +5534,7 @@ class MarkdownEditor(QTextEdit):
             line_cursor.insertText(converted)
         finally:
             self._display_guard = False
+            block.setUserState(-1)
 
         if delta and current_pos > block_start + len(text):
             new_cursor = self.textCursor()
