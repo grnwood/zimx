@@ -1700,6 +1700,10 @@ class MarkdownEditor(QTextEdit):
                     self._cursor_signals_connected = False
                 except Exception:
                     pass
+            # Remember cursor position so we can restore it after repopulating
+            cur = self.textCursor()
+            orig_block_num = cur.blockNumber()
+            orig_col = cur.position() - cur.block().position()
             blocker = QSignalBlocker(self)
             try:
                 self.document().clear()
@@ -1728,9 +1732,27 @@ class MarkdownEditor(QTextEdit):
                             batches += 1
                             buf = []
                     t3 = time.perf_counter()
+                    # Restore cursor after incremental insertion
+                    try:
+                        restored_block = self.document().findBlockByNumber(orig_block_num)
+                        target_pos = restored_block.position() + min(orig_col, max(0, restored_block.length() - 1))
+                        new_cursor = self.textCursor()
+                        new_cursor.setPosition(min(target_pos, len(display)))
+                        self.setTextCursor(new_cursor)
+                    except Exception:
+                        pass
                 else:
                     self.setPlainText(display)
                     t3 = time.perf_counter()
+                    # Restore cursor after full setPlainText
+                    try:
+                        restored_block = self.document().findBlockByNumber(orig_block_num)
+                        target_pos = restored_block.position() + min(orig_col, max(0, restored_block.length() - 1))
+                        new_cursor = self.textCursor()
+                        new_cursor.setPosition(min(target_pos, len(display)))
+                        self.setTextCursor(new_cursor)
+                    except Exception:
+                        pass
                 self._mark_page_load("document populated")
                 self.textChanged.connect(self._enforce_display_symbols)
                 self.textChanged.connect(self._schedule_heading_outline)
