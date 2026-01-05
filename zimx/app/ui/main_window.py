@@ -98,6 +98,7 @@ from zimx.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from zimx.app import zim_import
 
 _ONE_SHOT_PROMPT_CACHE: Optional[str] = None
+APP_VERSION = "1.0.0"
 
 
 def _load_one_shot_prompt() -> str:
@@ -8861,10 +8862,12 @@ class MainWindow(QMainWindow):
                     box.setIconPixmap(pix.scaledToWidth(96, Qt.SmoothTransformation))
             except Exception:
                 pass
-        box.setText(
-            "ZimX\n\nA lightweight desktop note system for Markdown vaults with linking, tasks, and AI helpers.\n\n"
-            "Author: Joseph Greenwood (grnwood@gmail.com)"
-        )
+        boxText = "ZimX\n\nA lightweight desktop note system for Markdown vaults with linking, tasks, and AI helpers.\n\n" \
+            "Author: Joseph Greenwood (grnwood@gmail.com)" \
+            f"\nVersion: {APP_VERSION}" \
+            f"\nReport Issues: https://github.com/grnwood/zimx/issues" \
+            f"\nDocs: https://grnwood.github.io/zimx "
+        box.setText(boxText)
         box.setStandardButtons(QMessageBox.Ok)
         box.exec()
 
