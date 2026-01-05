@@ -1704,6 +1704,21 @@ class MarkdownEditor(QTextEdit):
             cur = self.textCursor()
             orig_block_num = cur.blockNumber()
             orig_col = cur.position() - cur.block().position()
+            def restore_cursor_after_load(display_len: int) -> None:
+                try:
+                    block_count = self.document().blockCount()
+                    if block_count <= 0:
+                        return
+                    restore_block_num = min(orig_block_num, max(0, block_count - 1))
+                    restored_block = self.document().findBlockByNumber(restore_block_num)
+                    if not restored_block.isValid():
+                        restored_block = self.document().lastBlock()
+                    target_pos = restored_block.position() + min(orig_col, max(0, restored_block.length() - 1))
+                    new_cursor = self.textCursor()
+                    new_cursor.setPosition(min(max(0, target_pos), max(0, display_len)))
+                    self.setTextCursor(new_cursor)
+                except Exception:
+                    pass
             blocker = QSignalBlocker(self)
             try:
                 self.document().clear()
@@ -1733,26 +1748,12 @@ class MarkdownEditor(QTextEdit):
                             buf = []
                     t3 = time.perf_counter()
                     # Restore cursor after incremental insertion
-                    try:
-                        restored_block = self.document().findBlockByNumber(orig_block_num)
-                        target_pos = restored_block.position() + min(orig_col, max(0, restored_block.length() - 1))
-                        new_cursor = self.textCursor()
-                        new_cursor.setPosition(min(target_pos, len(display)))
-                        self.setTextCursor(new_cursor)
-                    except Exception:
-                        pass
+                    restore_cursor_after_load(len(display))
                 else:
                     self.setPlainText(display)
                     t3 = time.perf_counter()
                     # Restore cursor after full setPlainText
-                    try:
-                        restored_block = self.document().findBlockByNumber(orig_block_num)
-                        target_pos = restored_block.position() + min(orig_col, max(0, restored_block.length() - 1))
-                        new_cursor = self.textCursor()
-                        new_cursor.setPosition(min(target_pos, len(display)))
-                        self.setTextCursor(new_cursor)
-                    except Exception:
-                        pass
+                    restore_cursor_after_load(len(display))
                 self._mark_page_load("document populated")
                 self.textChanged.connect(self._enforce_display_symbols)
                 self.textChanged.connect(self._schedule_heading_outline)
