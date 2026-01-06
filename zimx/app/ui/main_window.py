@@ -3370,10 +3370,10 @@ class MainWindow(QMainWindow):
         """Return a cursor clamped to the document length."""
         cursor = self.editor.textCursor()
         try:
-            length = len(self.editor.toPlainText())
-        except Exception:
             length = cursor.document().characterCount()
-        safe_max = max(0, length)
+        except Exception:
+            length = len(self.editor.toPlainText())
+        safe_max = max(0, length - 1)
         cursor.setPosition(max(0, min(pos, safe_max)))
         return cursor
 

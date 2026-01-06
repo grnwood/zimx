@@ -6291,6 +6291,11 @@ class MarkdownEditor(QTextEdit):
                 ),
             )
             return
+        # QTextCursor positions are UTF-16 based; Python string indices are code points.
+        # Build a map to keep positions aligned when emoji/non-BMP chars are present.
+        utf16_positions = [0]
+        for ch in display_text:
+            utf16_positions.append(utf16_positions[-1] + (2 if ord(ch) > 0xFFFF else 1))
         
         if _DETAILED_LOGGING:
             print(f"[TIMING] Rendering {len(matches)} images...")
@@ -6301,8 +6306,10 @@ class MarkdownEditor(QTextEdit):
             for idx, match in enumerate(reversed(matches)):
                 t_img_start = time.perf_counter()
                 start, end = match.span()
-                cursor.setPosition(start)
-                cursor.setPosition(end, QTextCursor.KeepAnchor)
+                start_pos = utf16_positions[start]
+                end_pos = utf16_positions[end]
+                cursor.setPosition(start_pos)
+                cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
                 
                 path = match.group("path")
                 fmt = self._create_image_format(
