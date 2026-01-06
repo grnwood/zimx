@@ -6349,6 +6349,12 @@ class MarkdownEditor(QTextEdit):
                     cursor.setPosition(start_pos)
                     cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
 
+                    selected = cursor.selectedText()
+                    expected = match.group(0)
+                    if selected != expected:
+                        # If selection drifted, skip to avoid corrupting the document.
+                        continue
+
                     path = match.group("path")
                     fmt = self._create_image_format(
                         path,
