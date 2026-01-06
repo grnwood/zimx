@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import os
 import re
 import itertools
@@ -1496,6 +1497,9 @@ class MarkdownEditor(QTextEdit):
 
     def paintEvent(self, event):  # type: ignore[override]
         """Custom paint to draw horizontal rules as visual lines."""
+        if sys.platform.startswith("win"):
+            super().paintEvent(event)
+            return
         if self._suppress_paint or self._suppress_paint_depth:
             return
         if self._vi_paint_in_progress:
