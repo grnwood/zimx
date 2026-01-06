@@ -781,6 +781,29 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                 break
             fence = fence.previous()
 
+    def _apply_inline_code_formatting(self, text: str) -> None:
+        """Hide backticks and apply inline code formatting for a line."""
+        iterator = self._code_pattern.globalMatch(text)
+        while iterator.hasNext():
+            match = iterator.next()
+            start = match.capturedStart()
+            length = match.capturedLength()
+
+            # Pattern: `content`
+            if length >= 2:  # At least `x`
+                content_start = start + 1  # Skip opening `
+                content_length = length - 2  # Exclude both ` markers
+
+                # Hide opening `
+                self.setFormat(start, 1, self.hidden_format)
+
+                # Apply code format to content
+                if content_length > 0:
+                    self.setFormat(content_start, content_length, self.code_format)
+
+                # Hide closing `
+                self.setFormat(start + length - 1, 1, self.hidden_format)
+
     def highlightBlock(self, text: str) -> None:  # type: ignore[override]
         import time
         t0 = time.perf_counter() if self._timing_enabled else 0.0
@@ -841,6 +864,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         # If we styled a heading, stop here so later rules (links, tags, etc.) don't override
         # the heading font size/color and leave trailing characters unstyled.
         if heading_applied:
+            self._apply_inline_code_formatting(text)
             if self._timing_enabled:
                 self._timing_blocks += 1
                 self._timing_total += time.perf_counter() - t0
@@ -880,26 +904,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
             self.setFormat(0, len(text), self.table_format)
         
         # Inline code - hide backticks and style content
-        iterator = self._code_pattern.globalMatch(text)
-        while iterator.hasNext():
-            match = iterator.next()
-            start = match.capturedStart()
-            length = match.capturedLength()
-            
-            # Pattern: `content`
-            if length >= 2:  # At least `x`
-                content_start = start + 1  # Skip opening `
-                content_length = length - 2  # Exclude both ` markers
-                
-                # Hide opening `
-                self.setFormat(start, 1, self.hidden_format)
-                
-                # Apply code format to content
-                if content_length > 0:
-                    self.setFormat(content_start, content_length, self.code_format)
-                
-                # Hide closing `
-                self.setFormat(start + length - 1, 1, self.hidden_format)
+        self._apply_inline_code_formatting(text)
         
         # Bold+Italic (must be checked before bold and italic separately)
         iterator = self._bold_italic_pattern.globalMatch(text)
@@ -1271,6 +1276,8 @@ class MarkdownEditor(QTextEdit):
         self._overlay_active: bool = False  # True while inside a ModeWindow
         self._cursor_events_blocked: bool = False
         self._last_heading_block_num: Optional[int] = None
+        self._pending_heading_block_num: Optional[int] = None
+        self._pending_heading_level: Optional[int] = None
         self._search_engine = SearchEngine(self)
         self.setPlaceholderText("Open a Markdown file to begin editing…")
         self.setAcceptRichText(True)
@@ -2646,11 +2653,12 @@ class MarkdownEditor(QTextEdit):
         line_cursor = QTextCursor(block)
         line_cursor.select(QTextCursor.LineUnderCursor)
         line_cursor.insertText(new_line)
-        self.document().findBlock(block.position()).setUserState(-1)
         new_pos = block.position() + len(indent) + len(sentinel)
         cursor.setPosition(min(new_pos, block.position() + len(new_line)))
         cursor.endEditBlock()
         self.setTextCursor(cursor)
+        self._pending_heading_block_num = None
+        self._pending_heading_level = None
         self._schedule_heading_outline()
 
     def _remove_heading(self) -> None:
@@ -2666,10 +2674,11 @@ class MarkdownEditor(QTextEdit):
         line_cursor = QTextCursor(block)
         line_cursor.select(QTextCursor.LineUnderCursor)
         line_cursor.insertText(new_line)
-        self.document().findBlock(block.position()).setUserState(-1)
         cursor.setPosition(block.position() + len(indent))
         cursor.endEditBlock()
         self.setTextCursor(cursor)
+        self._pending_heading_block_num = None
+        self._pending_heading_level = None
         self._schedule_heading_outline()
 
     def _prepare_heading_edit_on_input(self, cursor: QTextCursor) -> bool:
@@ -2718,7 +2727,6 @@ class MarkdownEditor(QTextEdit):
         line_cursor.select(QTextCursor.LineUnderCursor)
         line_cursor.insertText(new_line)
         new_block = self.document().findBlock(line_start)
-        new_block.setUserState(level)
         new_len = max(0, new_block.length() - 1)
         new_cursor = self.textCursor()
         if cursor.hasSelection():
@@ -2730,6 +2738,8 @@ class MarkdownEditor(QTextEdit):
             new_abs = line_start + min(new_rel_pos, new_len)
             new_cursor.setPosition(new_abs)
         self.setTextCursor(new_cursor)
+        self._pending_heading_block_num = new_block.blockNumber()
+        self._pending_heading_level = level
         cursor.endEditBlock()
         self._schedule_heading_outline()
         return True
@@ -3040,14 +3050,10 @@ class MarkdownEditor(QTextEdit):
             if self._handle_vi_escape():
                 event.accept()
                 return
-            cursor.beginEditBlock()
-            cursor.select(QTextCursor.LineUnderCursor)
-            cursor.removeSelectedText()
-            cursor.insertText("")
-            cursor.setPosition(block.position())
-            cursor.endEditBlock()
-            self.setTextCursor(cursor)
-            event.accept()
+            if self._handle_escape_clear_empty_line():
+                event.accept()
+                return
+            super().keyPressEvent(event)
             return
         # ...existing code...
         # When at end-of-buffer, Down should still scroll the viewport
@@ -4285,6 +4291,39 @@ class MarkdownEditor(QTextEdit):
         heading_text = self.current_heading_text()
         return self._copy_link_to_location(link_text=None, anchor_text=heading_text)
 
+    def _is_code_block_line(self, block) -> bool:
+        """Return True if the block is a fenced code line or inside a code block."""
+        try:
+            if block.blockState() == MarkdownHighlighter.CODE_BLOCK_STATE:
+                return True
+        except Exception:
+            pass
+        try:
+            if block.text().lstrip().startswith("```"):
+                return True
+        except Exception:
+            return False
+        return False
+
+    def _should_finalize_heading_block(self, block) -> bool:
+        if not block or not block.isValid():
+            return False
+        if self._is_code_block_line(block):
+            return False
+        text = block.text()
+        stripped = text.lstrip()
+        if stripped and heading_level_from_char(stripped[0]):
+            return False
+        if (
+            self._pending_heading_block_num is not None
+            and self._pending_heading_level is not None
+            and block.blockNumber() == self._pending_heading_block_num
+        ):
+            return True
+        if HEADING_MARK_PATTERN.match(text):
+            return True
+        return False
+
     def _emit_cursor(self) -> None:
         if (
             self._cursor_events_blocked
@@ -4304,7 +4343,7 @@ class MarkdownEditor(QTextEdit):
             self._last_heading_block_num = current_block_num
         elif prev_block_num != current_block_num:
             prev_block = self.document().findBlockByNumber(prev_block_num)
-            if prev_block.isValid():
+            if prev_block.isValid() and self._should_finalize_heading_block(prev_block):
                 self._finalize_heading_block(prev_block)
             self._last_heading_block_num = current_block_num
         self.cursorMoved.emit(cursor.position())
@@ -4397,6 +4436,37 @@ class MarkdownEditor(QTextEdit):
             return True
         return False
 
+    def _handle_escape_clear_empty_line(self) -> bool:
+        if self._read_only_mode:
+            return False
+        cursor = self.textCursor()
+        block = cursor.block()
+        if not block.isValid():
+            return False
+        text = block.text()
+        if text.strip():
+            is_task, _, _, task_content = self._is_task_line(text)
+            if is_task and not task_content.strip():
+                pass
+            else:
+                is_bullet, _, bullet_content = self._is_bullet_line(text)
+                if is_bullet and not bullet_content.strip():
+                    pass
+                else:
+                    is_dash, _, dash_content = self._is_dash_line(text)
+                    if is_dash and not dash_content.strip():
+                        pass
+                    else:
+                        return False
+        cursor.beginEditBlock()
+        cursor.select(QTextCursor.LineUnderCursor)
+        cursor.removeSelectedText()
+        cursor.insertText("")
+        cursor.setPosition(block.position())
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+        return True
+
     def _handle_vi_keypress(self, event: QKeyEvent) -> bool:
         if not self._vi_feature_enabled:
             return False
@@ -4469,6 +4539,8 @@ class MarkdownEditor(QTextEdit):
 
         # Navigation mode commands
         if key == Qt.Key_Escape:
+            if self._handle_escape_clear_empty_line():
+                return True
             return True
         if key == Qt.Key_G:
             if shift:
@@ -5364,10 +5436,13 @@ class MarkdownEditor(QTextEdit):
         # 2) Heading marks: #'s → sentinel on this line only (unless actively editing)
         delay_heading_render = False
         if HEADING_MARK_PATTERN.match(line):
-            stripped = line.lstrip()
-            # Keep hashes visible while the cursor is on this line; render after Enter.
-            if not (stripped and heading_level_from_char(stripped[0])):
+            if self._is_code_block_line(block):
                 delay_heading_render = True
+            else:
+                stripped = line.lstrip()
+                # Keep hashes visible while the cursor is on this line; render after Enter.
+                if not (stripped and heading_level_from_char(stripped[0])):
+                    delay_heading_render = True
         if not delay_heading_render:
             line = HEADING_MARK_PATTERN.sub(self._encode_heading, line)
 
@@ -5503,24 +5578,37 @@ class MarkdownEditor(QTextEdit):
         """Render a plain '# ' heading line into display form once editing is done."""
         if self._display_guard or not block or not block.isValid():
             return
+        if self._is_code_block_line(block):
+            self._pending_heading_block_num = None
+            self._pending_heading_level = None
+            return
         text = block.text()
         if not text:
             return
         stripped = text.lstrip()
         # Skip if already rendered (sentinel present)
         if stripped and heading_level_from_char(stripped[0]):
-            block.setUserState(-1)
+            self._pending_heading_block_num = None
+            self._pending_heading_level = None
             return
         converted = HEADING_MARK_PATTERN.sub(self._encode_heading, text)
         if converted == text:
-            pending_level = block.userState()
-            if not (1 <= pending_level <= HEADING_MAX_LEVEL):
+            if (
+                self._pending_heading_block_num is None
+                or self._pending_heading_level is None
+                or block.blockNumber() != self._pending_heading_block_num
+            ):
                 return
             if not stripped:
-                block.setUserState(-1)
+                self._pending_heading_block_num = None
+                self._pending_heading_level = None
+                return
+            if stripped.startswith("```"):
+                self._pending_heading_block_num = None
+                self._pending_heading_level = None
                 return
             indent = text[: len(text) - len(stripped)]
-            converted = f"{indent}{heading_sentinel(pending_level)}{stripped}"
+            converted = f"{indent}{heading_sentinel(self._pending_heading_level)}{stripped}"
 
         current = self.textCursor()
         current_pos = current.position()
@@ -5534,7 +5622,8 @@ class MarkdownEditor(QTextEdit):
             line_cursor.insertText(converted)
         finally:
             self._display_guard = False
-            block.setUserState(-1)
+            self._pending_heading_block_num = None
+            self._pending_heading_level = None
 
         if delta and current_pos > block_start + len(text):
             new_cursor = self.textCursor()

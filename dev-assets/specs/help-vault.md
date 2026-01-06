@@ -1,135 +1,128 @@
-# Zimx Help Vault
+# ZimX Help Vault
+
+This document defines the content and tone of the built-in Help Vault. The Help Vault is a real ZimX vault that ships with the app and opens in a separate window. It teaches ZimX by example: every page is a normal Markdown note, cross-linked like a real knowledge base.
 
 ## Requirements
-In the zimx/help-vault folder is a empty vault.  Inside this folder construct a vault in ZimX format.  This will be a series of files that explain the ZimX application and is self documenting.
+- Create an empty vault at `zimx/help-vault`.
+- Populate it with ZimX-format Markdown pages that explain the app from a user perspective.
+- Add a top-level **Help** menu with a **Documentation** action and `F1` shortcut.
+- Launch the Help Vault in a new ZimX window when **Documentation** is selected.
+- Bundle the Help Vault in the PyInstaller build (`packaging/zimx.spec`).
 
-In the main application create a "Help" menu at the right of any other menu options.  There will be a menu option under Help called 'Documentation'.  This will also be wired to F1 in the application.
+## Content Strategy
+- Write for everyday users first, with a friendly, action-oriented tone.
+- Keep pages short; link out to deeper topics.
+- Use real ZimX link styles and show off labeled links.
+- Include quick steps and small examples rather than long prose.
+- Keep wording consistent with ZimX design principles: local-first, fast, explicit AI, no lock-in.
 
-This, when selected, will open a new instance of ZimX with this help-vault loaded. Add this folder to the pyinstaller package [zimx.spec](packaging/zimx.spec) .
+## Vault Structure
+Use the following page set. Each page is a standalone Markdown file. The names below should be treated as note titles (and thus page names).
 
-## Vault Content
-This vault will be a breakdown of the entire zimx application from a users usage perspective.  It should be peppered with the 'design philosphy' of zimx and be very action based on how to use the application.  each functional area of zimx should have a separate page outlining the features.... Editing, Navigating, Filtering, Tasks, Calendar, AI stuff (how to setup how to use, plantuml how to setup how to use,  Attachments, one shot prompting, etc.  Where it makes sense, show off the linkage ability of zimx by relating pages to each other via links (with nice labels).
+### Home
+**Purpose:** Landing page for the help vault.
+- What ZimX is, in 2-3 sentences.
+- A short “Start here” list linking to Getting Started, Editing, and Navigation.
+- A quick summary of the design philosophy.
 
+### Getting Started
+**Purpose:** First-run walkthrough.
+- Create/open a vault.
+- Open a page.
+- Save and navigate.
+- Explain that ZimX uses plain Markdown files and folders.
 
+### Editing Basics
+**Purpose:** Core editing behaviors.
+- Plain Markdown editing with live formatting.
+- Headings, bold/italic, lists, and checkboxes.
+- Keyboard shortcuts (Ctrl+B/I/K/U/T, Ctrl+1..5, Ctrl+7, Ctrl+9).
+- Inline images and attachments (drag/drop or paste).
 
-### Design philsophy
-Your notes stay yours
-ZimX stores everything locally in plain Markdown and folders. No lock-in, no proprietary cloud, no fear of losing your work.
+### Links and Navigation
+**Purpose:** How to move through a knowledge base.
+- Page links and link labels.
+- Backlinks and "where am I referenced?"
+- Jump to page / quick navigation.
+- Link activation and editing links in place.
 
-Works even when the internet doesn’t
-Full functionality offline. AI, search, and navigation never disappear just because you’re on a plane or the Wi-Fi is down.
+### Search and Replace
+**Purpose:** Find anything quickly.
+- Find bar (forward/back, case sensitivity).
+- Replace current and replace all.
+- Search word under cursor.
 
-Fast, focused, and distraction-free
-Write without clutter when you need to focus—or keep context visible when you’re thinking, teaching, or screen-sharing.
+### Tasks and Checkboxes
+**Purpose:** Task workflow.
+- Task syntax and toggling.
+- How task views are updated.
+- Working with task lists inside notes.
 
-Find anything instantly
-Powerful search, backlinks, filters, and AI context help you surface the right note at the right time—even years later.
+### Calendar and Journals
+**Purpose:** Dated notes and daily workflows.
+- Daily journal pages and templates.
+- Calendar navigation to dated pages.
+- How to customize templates.
 
-AI that helps you think, not replace you
-Use AI to summarize, rewrite, explain, or organize your notes—only when you ask. Nothing happens behind your back.
+### Tags and Filters
+**Purpose:** Organize across pages.
+- Tag style (e.g., `@tag`).
+- Filtering by tag or path.
+- Using tags to create topical views.
 
-No “magic,” no surprises
-Every AI action is visible, intentional, and reversible. You always know what changed and why.
+### AI Helpers
+**Purpose:** Explain AI features without overpromising.
+- AI actions are opt-in and explicit.
+- How to send selections or whole pages to AI.
+- Local vs. remote AI options.
+- Privacy expectations.
 
-Organize your way, not someone else’s
-Trees, links, tags, tasks, or all of them together. ZimX adapts to how your brain works instead of forcing a workflow.
+### Attachments and Images
+**Purpose:** Media workflows.
+- Drag/drop attachments.
+- Inline images in notes.
+- Link behavior for local files.
 
-Starts simple, grows with you
-Use ZimX as a clean note app on day one. Unlock advanced features like templates, filters, and automation only when you’re ready.
+### Keyboard and Focus
+**Purpose:** Flow-focused features.
+- Keyboard navigation basics.
+- Read-only mode behavior.
+- Vi navigation (if enabled).
+- Focus/overlay behaviors (e.g., heading picker).
 
-Keyboard-friendly for real productivity
-Stay in flow with powerful keyboard navigation and editing. No constant mouse hunting.
+### Advanced Setup (Tech)
+**Purpose:** Power-user and multi-device setups.
+- Remote vaults: connect to a server-backed vault.
+- Web client vaults: access your vault in a browser.
+- Offline-first behavior and syncing expectations.
+- Read-only vs. writable sessions.
 
-Built for long-term thinking
-ZimX is designed for notes you’ll revisit months or years later—not just quick captures you’ll forget tomorrow.
+### Troubleshooting
+**Purpose:** Common issues and fixes.
+- Vault not found or not writable.
+- Remote auth problems.
+- Broken links or missing attachments.
+- Performance tips (large vaults).
 
-Your notes remain readable anywhere
-Even without ZimX, your notes are just Markdown files. Open them in any editor, anytime.
+## Design Philosophy (Short Form)
+Include a page with a concise, skimmable list of principles. Avoid duplication. Use this exact tone and keep it tight:
 
-Power without bloat
-Features are modular and focused. ZimX stays fast and responsive, even with large note collections.
+- Your notes stay yours. Everything is plain Markdown.
+- Works offline by default.
+- Fast, focused, and distraction-free.
+- AI is opt-in and visible.
+- No lock-in, ever.
+- Organize your way: links, tags, tasks, or all three.
+- Built for long-term thinking.
 
-Great for work, study, and life
-Specs, research, sermons, journaling, project notes, teaching outlines—it all lives comfortably in one system.
+## Cross-Linking Guidelines
+- Link every page to at least two other pages.
+- Use labeled links (e.g., `[Editing Basics|Learn editing shortcuts]`).
+- Keep link labels clear and action-oriented.
 
-Control how much AI you want
-Use local models, remote models, or none at all. ZimX never forces an AI subscription mindset.
-
-Designed for thinkers, not influencers
-ZimX is about clarity, insight, and understanding—not publishing, likes, or social feeds.
-
-You can grow out of ZimX—and that’s okay
-If you ever leave, your notes come with you. No exports, no migrations, no regret.
-
-
-### More design philosphy
-ZimX is for People Who Think in Notes
-
-Your notes. Your machine. Your rules.
-ZimX is local-first. Plain Markdown. No lock-in. Ever.
-
-Works offline. Always.
-No internet? No problem. Your brain doesn’t need Wi-Fi—neither does ZimX.
-
-Fast enough to stay out of your way.
-No lag. No bloat. Just typing, thinking, and moving on.
-
-AI when you want it. Silent when you don’t.
-ZimX never “helpfully” rewrites your work. You stay in control.
-
-No magic. No surprises.
-Every AI action is explicit, visible, and reversible.
-
-Built for real thinking, not content farming.
-This isn’t a publishing tool. It’s a thinking tool.
-
-Start simple. Grow powerful.
-Use it like a basic notebook—or unlock serious workflows over time.
-
-Organize your way. Not ours.
-Trees. Links. Tasks. Filters. Mix them freely.
-
-Find anything instantly.
-Search, backlinks, and AI context work together to surface what matters.
-
-Keyboard-first. Flow-friendly.
-If your hands leave the keyboard, something went wrong.
-
-Distraction-free when focus matters.
-Strip the chrome. Keep the context. You decide.
-
-Audience mode ... make screensharing better.
-Strip the chrome. highlight cursor text... smooth scroll.
-
-Built for years, not weeks.
-ZimX is for notes you’ll revisit long after other apps are gone.
-
-Your notes stay readable forever.
-They’re just files. Open them anywhere. Anytime.
-
-Power without the mess.
-No feature soup. No buried settings. Just composable tools.
-
-Use your own AI—or none at all.
-Local models. Remote models. Zero models. Your call.
-
-Leave anytime. Take everything.
-No exports. No migrations. No hostage data.
-
-ZimX Isn’t For Everyone
-
-If you want a social feed for your notes
-
-If you want AI to think for you
-
-If you’re fine with cloud lock-in
-
-If you prefer pretty over durable
-
-ZimX won’t be your tool.
-
-But if you want a fast, local, AI-augmented thinking space you actually own—
-ZimX probably is.
-
-
+## Tone and Formatting Rules
+- Use short paragraphs and bullet lists.
+- Avoid marketing fluff; be direct and helpful.
+- Show examples in fenced code blocks where relevant.
+- Keep headings consistent: H1 for the title, H2 for sections.
 

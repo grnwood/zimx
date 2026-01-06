@@ -4625,6 +4625,12 @@ class MainWindow(QMainWindow):
         pkg_root = Path(__file__).resolve().parent.parent
         candidates.append(pkg_root / rel)
         candidates.append(pkg_root / "zimx" / rel)
+        try:
+            source_root = Path(__file__).resolve().parents[2]
+            candidates.append(source_root / rel)
+            candidates.append(source_root.parent / rel)
+        except Exception:
+            pass
         for cand in candidates:
             if cand.exists():
                 return cand
@@ -7099,6 +7105,7 @@ class MainWindow(QMainWindow):
         if not self.current_path:
             self.statusBar().showMessage("No page to reload", 2000)
             return
+        self._save_dirty_page(reason="reload")
         self._remember_history_cursor()
         self._open_file(self.current_path, add_to_history=False, force=True, restore_history_cursor=True)
         self.statusBar().showMessage("Reloaded current page", 2000)
@@ -8855,19 +8862,39 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle("About ZimX")
         icon_path = self._find_asset("icon.png")
+        icon_url = ""
         if icon_path:
             try:
                 pix = QPixmap(icon_path)
                 if not pix.isNull():
-                    box.setIconPixmap(pix.scaledToWidth(96, Qt.SmoothTransformation))
+                    icon_url = QUrl.fromLocalFile(icon_path).toString()
             except Exception:
-                pass
-        boxText = "ZimX\n\nA lightweight desktop note system for Markdown vaults with linking, tasks, and AI helpers.\n\n" \
-            "Author: Joseph Greenwood (grnwood@gmail.com)" \
-            f"\nVersion: {APP_VERSION}" \
-            f"\nReport Issues: https://github.com/grnwood/zimx/issues" \
-            f"\nDocs: https://grnwood.github.io/zimx "
-        box.setText(boxText)
+                icon_url = ""
+        image_block = f'<p style="margin: 0 0 8px 0;"><img src="{icon_url}" width="96" height="96"></p>' if icon_url else ""
+        box_text = (
+            "<div style=\"text-align: center;\">"
+            f"{image_block}"
+            "<div style=\"font-size: 18px; font-weight: 600;\">ZimX</div>"
+            "<div style=\"margin-top: 6px;\">A lightweight desktop note system for Markdown vaults with linking, tasks, and AI helpers.</div>"
+            "<div style=\"margin-top: 10px;\"><b>Author:</b> Joseph Greenwood "
+            "(<a href=\"mailto:grnwood@gmail.com\">grnwood@gmail.com</a>)</div>"
+            f"<div><b>Version:</b> {APP_VERSION}</div>"
+            "<div style=\"margin-top: 8px;\">"
+            "<a href=\"https://github.com/grnwood/zimx/issues\">Report Issues</a>"
+            " · "
+            "<a href=\"https://grnwood.github.io/zimx\">Docs</a>"
+            "</div>"
+            "</div>"
+        )
+        box.setTextFormat(Qt.RichText)
+        box.setText(box_text)
+        box.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        try:
+            for label in box.findChildren(QLabel):
+                label.setOpenExternalLinks(True)
+                label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        except Exception:
+            pass
         box.setStandardButtons(QMessageBox.Ok)
         box.exec()
 
