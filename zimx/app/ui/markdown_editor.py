@@ -1203,7 +1203,7 @@ class MarkdownEditor(QTextEdit):
                 colon_path = path_to_colon(f"/{link}/{link}{PAGE_SUFFIX}")
             return f"[:{colon_path}|{label}]"
         # Replace +CamelCase only if not in the label part of a [link|label]
-        return re.sub(r'\+(?P<link>[A-Z][\w]*)', replacer, text)
+        return re.sub(r'(?<!\S)\+(?P<link>[A-Za-z][\w]*)(?=\s|$)', replacer, text)
     imageSaved = Signal(str)
     focusLost = Signal()
     cursorMoved = Signal(int)
@@ -1222,6 +1222,7 @@ class MarkdownEditor(QTextEdit):
     aiChatSendRequested = Signal(str)  # Send selected/whole text to the open chat
     aiChatPageFocusRequested = Signal(str)  # Request the chat tab focused on this page
     aiActionRequested = Signal(str, str, str)  # title, prompt, text
+    deletePageRequested = Signal(QPoint)  # Request deleting the current page (with global position)
     findBarRequested = Signal(bool, bool, str)  # replace_mode, backwards_first, seed_query
     viInsertModeChanged = Signal(bool)  # Emits True when editor is in insert mode
     headingPickerRequested = Signal(object, bool)  # QPoint(global), prefer_above
@@ -3219,6 +3220,10 @@ class MarkdownEditor(QTextEdit):
                     open_popup_action.triggered.connect(
                         lambda: self._open_in_window_callback(self._current_path or "")
                     )
+                delete_page_action = page_sub.addAction("Delete Page")
+                delete_page_action.triggered.connect(
+                    lambda pos=event.globalPos(): self.deletePageRequested.emit(pos)
+                )
 
                 nav_sub = menu.addMenu("Navigate")
                 filter_action = nav_sub.addAction("Filter Nav From Here")
@@ -3279,6 +3284,8 @@ class MarkdownEditor(QTextEdit):
                 open_popup_action.triggered.connect(
                     lambda: self._open_in_window_callback(self._current_path or "")
                 )
+            delete_page_action = page_sub.addAction("Delete Page")
+            delete_page_action.triggered.connect(lambda pos=event.globalPos(): self.deletePageRequested.emit(pos))
 
             nav_sub = menu.addMenu("Navigate")
             filter_action = nav_sub.addAction("Filter Nav From Here")

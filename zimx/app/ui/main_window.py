@@ -837,6 +837,7 @@ class MainWindow(QMainWindow):
         self._tree_enter_focus = False
         self._tree_keyboard_nav = False
         self._suspend_cursor_history = False
+        self._show_journal_in_nav = config.load_show_journal()
         
         # Create custom header widget
         self.tree_header_widget = QWidget()
@@ -875,6 +876,23 @@ class MainWindow(QMainWindow):
         self.refresh_tree_button.clicked.connect(self._refresh_tree)
         self.refresh_tree_button.setEnabled(False)
         tree_header_layout.addWidget(self.refresh_tree_button)
+
+        self.journal_tree_button = QToolButton()
+        journal_icon_path = self._find_asset("calendar-days.svg")
+        journal_icon = self._load_icon(journal_icon_path, Qt.white, size=16)
+        if journal_icon is None:
+            journal_icon = self.style().standardIcon(QStyle.SP_FileDialogDetailedView)
+        self.journal_tree_button.setIcon(journal_icon)
+        self.journal_tree_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.journal_tree_button.setAutoRaise(True)
+        self.journal_tree_button.setCheckable(True)
+        self.journal_tree_button.setChecked(self._show_journal_in_nav)
+        self.journal_tree_button.setToolTip(
+            f"<div style='color:{tooltip_fg}; background:{tooltip_bg}; padding:2px 4px;'>Show journal in navigator</div>"
+        )
+        self.journal_tree_button.toggled.connect(self._toggle_show_journal_in_nav)
+        self.journal_tree_button.setEnabled(False)
+        tree_header_layout.addWidget(self.journal_tree_button)
         
         # Collapse-all button (aligned to the right, more prominent with white foreground)
         self.collapse_tree_button = QToolButton()
@@ -918,6 +936,7 @@ class MainWindow(QMainWindow):
         self.editor.editPageSourceRequested.connect(self._view_page_source)
         self.editor.openFileLocationRequested.connect(self._open_tree_file_location)
         self.editor.locateInNavigatorRequested.connect(self._locate_current_page_in_tree)
+        self.editor.deletePageRequested.connect(self._delete_current_page_from_editor)
         self.editor.attachmentDropped.connect(self._on_attachment_dropped)
         self.editor.backlinksRequested.connect(
             lambda path="": self._show_link_navigator_for_path(path or self.current_path)
@@ -1187,6 +1206,11 @@ class MainWindow(QMainWindow):
         zim_import_action.setToolTip("Import pages from a Zim wiki folder or .txt file")
         zim_import_action.triggered.connect(self._import_zim_wiki)
         import_menu.addAction(zim_import_action)
+        delete_page_action = QAction("Delete Page", self)
+        delete_page_action.setToolTip("Delete the current page")
+        delete_page_action.triggered.connect(self._delete_current_page_from_menu)
+        file_menu.addSeparator()
+        file_menu.addAction(delete_page_action)
         self._build_format_menu()
         view_menu = self.menuBar().addMenu("&View")
         reset_view_action = QAction("Reset View/Layout", self)
@@ -2724,6 +2748,17 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 try:
+                    self.journal_tree_button.setEnabled(True)
+                except Exception:
+                    pass
+                try:
+                    self._show_journal_in_nav = config.load_show_journal()
+                    blocker = QSignalBlocker(self.journal_tree_button)
+                    self.journal_tree_button.setChecked(self._show_journal_in_nav)
+                    del blocker
+                except Exception:
+                    pass
+                try:
                     self.link_update_mode = config.load_link_update_mode()
                 except Exception:
                     self.link_update_mode = "reindex"
@@ -2802,6 +2837,60 @@ class MainWindow(QMainWindow):
 
     def _refresh_tree(self) -> None:
         """Manual refresh of the vault tree from the API."""
+        self._populate_vault_tree()
+
+    def _toggle_show_journal_in_nav(self, checked: bool) -> None:
+        self._set_show_journal_in_nav(checked)
+
+    def _is_journal_path(self, path: Optional[str]) -> bool:
+        if not path:
+            return False
+        norm = path.strip().lower()
+        if norm in ("journal", "/journal"):
+            return True
+        return norm.startswith("/journal/")
+
+    def _is_journal_node(self, name: Optional[str], path: Optional[str]) -> bool:
+        if name and name.strip().lower() == "journal":
+            return True
+        return self._is_journal_path(path)
+
+    def _set_show_journal_in_nav(self, show: bool, select_path: Optional[str] = None) -> None:
+        self._show_journal_in_nav = bool(show)
+        try:
+            blocker = QSignalBlocker(self.journal_tree_button)
+            self.journal_tree_button.setChecked(self._show_journal_in_nav)
+            del blocker
+        except Exception:
+            pass
+        try:
+            config.save_show_journal(self._show_journal_in_nav)
+        except Exception:
+            pass
+        if not self._show_journal_in_nav and self._is_journal_path(self._nav_filter_path):
+            self._nav_filter_path = None
+            try:
+                self.right_panel.task_panel.set_navigation_filter(None, refresh=False)
+            except Exception:
+                pass
+            try:
+                self.right_panel.link_panel.set_navigation_filter(None, refresh=False)
+            except Exception:
+                pass
+            for panel in list(getattr(self, "_detached_link_panels", [])):
+                try:
+                    panel.set_navigation_filter(None, refresh=False)
+                except Exception:
+                    pass
+            self._sync_detached_task_filters(None)
+            self._apply_nav_filter_style()
+        if select_path:
+            self._pending_selection = select_path
+        try:
+            self._tree_cache.clear()
+            self._tree_path_version.clear()
+        except Exception:
+            pass
         self._populate_vault_tree()
     
     def _load_bookmarks(self) -> None:
@@ -3178,7 +3267,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         normalized = self._file_path_to_folder(path if path.startswith("/") else f"/{path}")
-        if normalized.startswith("/Journal"):
+        if self._is_journal_path(normalized) and not self._show_journal_in_nav:
             logNav(f"_set_nav_filter: ignoring Journal path {normalized}")
             self._nav_filter_path = None
             self._apply_nav_filter_style()
@@ -3523,7 +3612,7 @@ class MainWindow(QMainWindow):
         print(f"{_ANSI_BLUE}[TREE] Vault has {folder_count} folders, using {'LAZY' if self._use_lazy_loading else 'FULL'} loading{_ANSI_RESET}")
         
         nav_root = self._nav_filter_path or "/"
-        fetch_path = "/" if nav_root.startswith("/Journal") else nav_root
+        fetch_path = "/" if (self._is_journal_path(nav_root) and not self._show_journal_in_nav) else nav_root
         selection_model = self.tree_view.selectionModel()
         selection_blocker = QSignalBlocker(selection_model) if selection_model else None
         self.tree_view.setUpdatesEnabled(False)
@@ -3532,7 +3621,14 @@ class MainWindow(QMainWindow):
                 # Use recursive loading for small vaults, lazy for large
                 recursive_param = "false" if self._use_lazy_loading else "true"
                 print(f"{_ANSI_BLUE}[TREE] Fetching tree with recursive={recursive_param}{_ANSI_RESET}")
-                resp = self.http.get("/api/vault/tree", params={"path": fetch_path, "recursive": recursive_param})
+                resp = self.http.get(
+                    "/api/vault/tree",
+                    params={
+                        "path": fetch_path,
+                        "recursive": recursive_param,
+                        "include_journal": "true" if self._show_journal_in_nav else "false",
+                    },
+                )
                 resp.raise_for_status()
             except httpx.HTTPError as exc:
                 self._alert_api_error(exc, "Failed to load vault tree")
@@ -3574,7 +3670,7 @@ class MainWindow(QMainWindow):
     
             self._full_tree_data = data
             filtered_data = data
-            if self._nav_filter_path and not self._nav_filter_path.startswith("/Journal"):
+            if self._nav_filter_path and (self._show_journal_in_nav or not self._is_journal_path(self._nav_filter_path)):
                 filtered_data = self._filter_tree_data(data, self._nav_filter_path)
 
             for node in filtered_data:
@@ -3582,11 +3678,12 @@ class MainWindow(QMainWindow):
                 if node.get("path") == "/":
                     self._cache_children(node)
                     for child in node.get("children", []):
-                        # Always hide Journal from navigator
-                        if child.get("name") == "Journal":
+                        if not self._show_journal_in_nav and self._is_journal_node(child.get("name"), child.get("path")):
                             continue
                         self._add_tree_node(self.tree_model.invisibleRootItem(), child, seen_paths)
                 else:
+                    if not self._show_journal_in_nav and self._is_journal_node(node.get("name"), node.get("path")):
+                        continue
                     self._cache_children(node)
                     self._add_tree_node(self.tree_model.invisibleRootItem(), node, seen_paths)
         finally:
@@ -3721,7 +3818,7 @@ class MainWindow(QMainWindow):
             print(f"{_ANSI_BLUE}[TREE] _load_children_for_path: skipping (full tree already loaded){_ANSI_RESET}")
             return
             
-        if path.startswith("/Journal"):
+        if not self._show_journal_in_nav and self._is_journal_path(path):
             logNav(f"_load_children_for_path: skipping Journal path {path}")
             item.removeRows(0, item.rowCount())
             return
@@ -3733,7 +3830,14 @@ class MainWindow(QMainWindow):
             reason = "not cached" if children is None else "version mismatch" if cached_ver != self._tree_version else "empty but has children"
             logNav(f"_load_children_for_path: fetching {norm_path} ({reason})")
             try:
-                resp = self.http.get("/api/vault/tree", params={"path": norm_path, "recursive": "false"})
+                resp = self.http.get(
+                    "/api/vault/tree",
+                    params={
+                        "path": norm_path,
+                        "recursive": "false",
+                        "include_journal": "true" if self._show_journal_in_nav else "false",
+                    },
+                )
                 resp.raise_for_status()
                 payload = resp.json()
                 try:
@@ -7717,6 +7821,21 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _delete_current_page_from_editor(self, global_pos: QPoint) -> None:
+        self._delete_current_page(global_pos)
+
+    def _delete_current_page_from_menu(self) -> None:
+        self._delete_current_page(None)
+
+    def _delete_current_page(self, global_pos: Optional[QPoint]) -> None:
+        if not self.current_path:
+            self.statusBar().showMessage("No page to delete.", 3000)
+            return
+        if global_pos is None:
+            global_pos = self.mapToGlobal(self.rect().center())
+        folder_path = self._file_path_to_folder(self.current_path)
+        self._delete_path(folder_path, self.current_path, global_pos)
+
     def _parent_path(self, index: QModelIndex) -> str:
         parent = index.parent()
         if parent.isValid():
@@ -7752,8 +7871,38 @@ class MainWindow(QMainWindow):
         if not self.current_path:
             self.statusBar().showMessage("No page to locate", 3000)
             return
+        if self._ensure_journal_visible_for_path(self.current_path):
+            return
         self._ensure_tree_path_loaded(self.current_path)
         self._select_tree_path(self.current_path)
+
+    def _ensure_journal_visible_for_path(self, path: str) -> bool:
+        if not self._is_journal_path(path):
+            return False
+        if not self._show_journal_in_nav:
+            self._set_show_journal_in_nav(True, select_path=path)
+            return True
+        if self._nav_filter_path and not self._is_journal_path(self._nav_filter_path):
+            self._nav_filter_path = None
+            try:
+                self.right_panel.task_panel.set_navigation_filter(None, refresh=False)
+            except Exception:
+                pass
+            try:
+                self.right_panel.link_panel.set_navigation_filter(None, refresh=False)
+            except Exception:
+                pass
+            for panel in list(getattr(self, "_detached_link_panels", [])):
+                try:
+                    panel.set_navigation_filter(None, refresh=False)
+                except Exception:
+                    pass
+            self._sync_detached_task_filters(None)
+            self._apply_nav_filter_style()
+            self._pending_selection = path
+            self._populate_vault_tree()
+            return True
+        return False
 
     def _sync_nav_tree_to_active_page(self) -> None:
         """Automatically sync the nav tree to highlight the currently active page in the editor.

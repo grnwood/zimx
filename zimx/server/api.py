@@ -63,7 +63,7 @@ _LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
 _TASKS_CACHE: dict[tuple[str, tuple[str, ...], Optional[str]], list[dict]] = {}
 _TASK_CACHE_VERSION: int = -1
 
-_TREE_CACHE: dict[tuple[str, str, bool], dict[str, object]] = {}
+_TREE_CACHE: dict[tuple[str, str, bool, bool], dict[str, object]] = {}
 _LOCAL_UI_TOKEN: Optional[str] = None
 _VAULTS_ROOT: Optional[str] = None
 
@@ -77,8 +77,8 @@ def _normalize_tree_path(path: str) -> str:
     return cleaned or "/"
 
 
-def _get_cached_tree(root: Path, path: str, recursive: bool, version: int) -> list[dict] | None:
-    key = (str(root), path, recursive)
+def _get_cached_tree(root: Path, path: str, recursive: bool, include_journal: bool, version: int) -> list[dict] | None:
+    key = (str(root), path, recursive, include_journal)
     cached = _TREE_CACHE.get(key)
     if not cached:
         return None
@@ -91,8 +91,13 @@ def _get_cached_tree(root: Path, path: str, recursive: bool, version: int) -> li
         return None
 
 
-def _set_cached_tree(root: Path, path: str, recursive: bool, version: int, tree: list[dict]) -> None:
-    _TREE_CACHE[(str(root), path, recursive)] = {"version": version, "tree": copy.deepcopy(tree)}
+def _set_cached_tree(
+    root: Path, path: str, recursive: bool, include_journal: bool, version: int, tree: list[dict]
+) -> None:
+    _TREE_CACHE[(str(root), path, recursive, include_journal)] = {
+        "version": version,
+        "tree": copy.deepcopy(tree),
+    }
 
 
 def _clear_tree_cache() -> None:
@@ -723,15 +728,15 @@ def select_vault(payload: VaultSelectPayload) -> dict:
 
 
 @app.get("/api/vault/tree")
-def vault_tree(path: str = "/", recursive: bool = True) -> dict:
+def vault_tree(path: str = "/", recursive: bool = True, include_journal: bool = False) -> dict:
     root = vault_state.get_root()
     version = config.get_tree_version()
     normalized_path = _normalize_tree_path(path)
-    tree = _get_cached_tree(root, normalized_path, recursive, version)
+    tree = _get_cached_tree(root, normalized_path, recursive, include_journal, version)
     cache_hit = tree is not None
     if not cache_hit:
         tree = files.list_dir(root, subpath=normalized_path, recursive=recursive)
-        if normalized_path in ("/", ""):
+        if normalized_path in ("/", "") and not include_journal:
             tree = _filter_out_journal(tree)
         order_map = config.fetch_display_order_map()
         if normalized_path == "/":
@@ -739,7 +744,7 @@ def vault_tree(path: str = "/", recursive: bool = True) -> dict:
         _sort_tree_nodes(tree, order_map)
         if normalized_path == "/" and tree:
             print(f"{_ANSI_BLUE}[API] Root tree order after sort: {[n.get('name') for n in tree[:5]]}{_ANSI_RESET}")
-        _set_cached_tree(root, normalized_path, recursive, version, tree)
+        _set_cached_tree(root, normalized_path, recursive, include_journal, version, tree)
     print(
         f"{_ANSI_BLUE}[API] GET /api/vault/tree path={normalized_path} recursive={recursive} "
         f"version={version} cached={cache_hit}{_ANSI_RESET}"
