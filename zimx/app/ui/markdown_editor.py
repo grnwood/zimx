@@ -6344,6 +6344,8 @@ class MarkdownEditor(QTextEdit):
                 for match in reversed(local_matches):
                     t_img_start = time.perf_counter()
                     start, end = match.span()
+                    if text.strip() != match.group(0):
+                        continue
                     start_pos = block.position() + utf16_positions[start]
                     end_pos = block.position() + utf16_positions[end]
                     cursor.setPosition(start_pos)
