@@ -8389,21 +8389,21 @@ class MainWindow(QMainWindow):
 
     def _toc_jump_to_position(self, position: int) -> None:
         if sys.platform.startswith("win"):
-            self._queue_toc_jump(position, attempt=0)
+            self._queue_toc_jump(position, attempt=0, flash=False)
         else:
             cursor = self._cursor_at_position(max(0, position))
-            self._animate_or_flash_to_cursor(cursor)
+            self._scroll_cursor_to_top_quarter(cursor, animate=True, flash=False)
         QTimer.singleShot(180, lambda: self.editor.setFocus(Qt.OtherFocusReason))
 
-    def _queue_toc_jump(self, position: int, attempt: int = 0) -> None:
+    def _queue_toc_jump(self, position: int, attempt: int = 0, flash: bool = True) -> None:
         if attempt > 5:
             return
         if getattr(self.editor, "_vi_paint_in_progress", False) or getattr(self.editor, "_suppress_paint_depth", 0):
-            QTimer.singleShot(0, lambda: self._queue_toc_jump(position, attempt + 1))
+            QTimer.singleShot(0, lambda: self._queue_toc_jump(position, attempt + 1, flash))
             return
         cursor = self._cursor_at_position(max(0, position))
         self._prepare_editor_jump()
-        self._scroll_cursor_to_top_quarter(cursor, animate=False, flash=True)
+        self._scroll_cursor_to_top_quarter(cursor, animate=False, flash=flash)
         QTimer.singleShot(0, self._restore_editor_after_jump)
 
     def _prepare_editor_jump(self) -> None:
