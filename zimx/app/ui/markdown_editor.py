@@ -6329,9 +6329,14 @@ class MarkdownEditor(QTextEdit):
         cursor = self.textCursor()
         cursor.beginEditBlock()
         try:
-            for idx, match in enumerate(reversed(matches)):
+            matches = list(reversed(matches))
+            for idx, match in enumerate(matches):
                 t_img_start = time.perf_counter()
                 start, end = match.span()
+                if idx > 0:
+                    prior_start = matches[idx - 1].start()
+                    if prior_start <= end:
+                        continue
                 start_pos = utf16_positions[start]
                 end_pos = utf16_positions[end]
                 cursor.setPosition(start_pos)
