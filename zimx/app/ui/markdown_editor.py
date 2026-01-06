@@ -1684,6 +1684,18 @@ class MarkdownEditor(QTextEdit):
             self._page_load_logger.end(label)
             self._page_load_logger = None
 
+    def _log_doc_state(self, label: str) -> None:
+        try:
+            doc = self.document()
+            block = doc.lastBlock()
+            last_text = block.text() if block and block.isValid() else ""
+            print(
+                f"[EDITOR LOAD] {label} blocks={doc.blockCount()} chars={doc.characterCount()} "
+                f"last_block_len={len(last_text)} tail={repr(last_text[:80])}"
+            )
+        except Exception:
+            pass
+
 
     def set_markdown(self, content: str) -> None:
         self._push_paint_block()
@@ -1773,6 +1785,8 @@ class MarkdownEditor(QTextEdit):
                     t3 = time.perf_counter()
                     # Restore cursor after full setPlainText
                     restore_cursor_after_load(len(display))
+                if getenv("ZIMX_TRACE_EDITOR_LOAD") == "1":
+                    self._log_doc_state("after setPlainText")
                 self._mark_page_load("document populated")
                 self.textChanged.connect(self._enforce_display_symbols)
                 self.textChanged.connect(self._schedule_heading_outline)
@@ -1782,6 +1796,8 @@ class MarkdownEditor(QTextEdit):
                 self._render_images(display, time.perf_counter())
                 t4 = time.perf_counter()
                 self._mark_page_load("render images")
+                if getenv("ZIMX_TRACE_EDITOR_LOAD") == "1":
+                    self._log_doc_state("after render_images")
                 self._display_guard = False
                 self._schedule_heading_outline()
                 self._apply_scroll_past_end_margin()
@@ -6280,6 +6296,16 @@ class MarkdownEditor(QTextEdit):
         and inserting a QTextImageFormat created from the resolved path.
         """
         import time
+        from os import getenv
+        if getenv("ZIMX_DISABLE_IMAGE_RENDER") == "1":
+            self._mark_page_load("render images skipped (disabled)")
+            QTimer.singleShot(
+                0,
+                lambda: self._complete_page_load_logging(
+                    f"qt idle after images delay={(time.perf_counter() - (scheduled_at or time.perf_counter()))*1000:.1f}ms"
+                ),
+            )
+            return
         delay_ms = (time.perf_counter() - scheduled_at) * 1000.0 if scheduled_at else 0.0
         matches = list(IMAGE_PATTERN.finditer(display_text))
         if not matches:
