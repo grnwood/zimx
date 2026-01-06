@@ -6317,47 +6317,55 @@ class MarkdownEditor(QTextEdit):
                 ),
             )
             return
-        # QTextCursor positions are UTF-16 based; Python string indices are code points.
-        # Build a map to keep positions aligned when emoji/non-BMP chars are present.
-        utf16_positions = [0]
-        for ch in display_text:
-            utf16_positions.append(utf16_positions[-1] + (2 if ord(ch) > 0xFFFF else 1))
-        
         if _DETAILED_LOGGING:
             print(f"[TIMING] Rendering {len(matches)} images...")
         self._mark_page_load(f"render images start count={len(matches)} delay={delay_ms:.1f}ms")
         cursor = self.textCursor()
         cursor.beginEditBlock()
         try:
-            matches = list(reversed(matches))
-            for idx, match in enumerate(matches):
-                t_img_start = time.perf_counter()
-                start, end = match.span()
-                if idx > 0:
-                    prior_start = matches[idx - 1].start()
-                    if prior_start <= end:
-                        continue
-                start_pos = utf16_positions[start]
-                end_pos = utf16_positions[end]
-                cursor.setPosition(start_pos)
-                cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
-                
-                path = match.group("path")
-                fmt = self._create_image_format(
-                    path,
-                    match.group("alt") or "",
-                    match.group("width"),
-                )
-                t_img_end = time.perf_counter()
-                
-                if fmt is None:
-                    # If the image can't be resolved, leave the markdown text as-is
-                    print(f"  Image {idx+1}/{len(matches)} ({path}): FAILED")
+            # Process blocks from end to start so earlier replacements don't shift later positions.
+            blocks = []
+            block = self.document().lastBlock()
+            while block.isValid():
+                blocks.append(block)
+                block = block.previous()
+            img_idx = 0
+            total = len(matches)
+            for block in blocks:
+                text = block.text()
+                if not text or "!" not in text:
                     continue
-                
-                cursor.removeSelectedText()
-                cursor.insertImage(fmt)
-                print(f"  Image {idx+1}/{len(matches)} ({path}): {(t_img_end - t_img_start)*1000:.1f}ms")
+                local_matches = list(IMAGE_PATTERN.finditer(text))
+                if not local_matches:
+                    continue
+                utf16_positions = [0]
+                for ch in text:
+                    utf16_positions.append(utf16_positions[-1] + (2 if ord(ch) > 0xFFFF else 1))
+                for match in reversed(local_matches):
+                    t_img_start = time.perf_counter()
+                    start, end = match.span()
+                    start_pos = block.position() + utf16_positions[start]
+                    end_pos = block.position() + utf16_positions[end]
+                    cursor.setPosition(start_pos)
+                    cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
+
+                    path = match.group("path")
+                    fmt = self._create_image_format(
+                        path,
+                        match.group("alt") or "",
+                        match.group("width"),
+                    )
+                    t_img_end = time.perf_counter()
+
+                    img_idx += 1
+                    if fmt is None:
+                        # If the image can't be resolved, leave the markdown text as-is
+                        print(f"  Image {img_idx}/{total} ({path}): FAILED")
+                        continue
+
+                    cursor.removeSelectedText()
+                    cursor.insertImage(fmt)
+                    print(f"  Image {img_idx}/{total} ({path}): {(t_img_end - t_img_start)*1000:.1f}ms")
         finally:
             cursor.endEditBlock()
         self._mark_page_load(f"render images done count={len(matches)}")
