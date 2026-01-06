@@ -8388,17 +8388,52 @@ class MainWindow(QMainWindow):
                 pass
 
     def _toc_jump_to_position(self, position: int) -> None:
-        cursor = self._cursor_at_position(max(0, position))
         if sys.platform.startswith("win"):
-            try:
-                self.editor._push_paint_block()
-            except Exception:
-                pass
-            self._scroll_cursor_to_top_quarter(cursor, animate=False, flash=True)
-            QTimer.singleShot(0, lambda: self._safe_pop_paint_block())
+            self._queue_toc_jump(position, attempt=0)
         else:
+            cursor = self._cursor_at_position(max(0, position))
             self._animate_or_flash_to_cursor(cursor)
         QTimer.singleShot(180, lambda: self.editor.setFocus(Qt.OtherFocusReason))
+
+    def _queue_toc_jump(self, position: int, attempt: int = 0) -> None:
+        if attempt > 5:
+            return
+        if getattr(self.editor, "_vi_paint_in_progress", False) or getattr(self.editor, "_suppress_paint_depth", 0):
+            QTimer.singleShot(0, lambda: self._queue_toc_jump(position, attempt + 1))
+            return
+        cursor = self._cursor_at_position(max(0, position))
+        self._prepare_editor_jump()
+        self._scroll_cursor_to_top_quarter(cursor, animate=False, flash=True)
+        QTimer.singleShot(0, self._restore_editor_after_jump)
+
+    def _prepare_editor_jump(self) -> None:
+        try:
+            self.editor._push_paint_block()
+        except Exception:
+            pass
+        try:
+            self.editor.setUpdatesEnabled(False)
+        except Exception:
+            pass
+        try:
+            viewport = self.editor.viewport()
+            if viewport:
+                viewport.setUpdatesEnabled(False)
+        except Exception:
+            pass
+
+    def _restore_editor_after_jump(self) -> None:
+        try:
+            viewport = self.editor.viewport()
+            if viewport:
+                viewport.setUpdatesEnabled(True)
+        except Exception:
+            pass
+        try:
+            self.editor.setUpdatesEnabled(True)
+        except Exception:
+            pass
+        self._safe_pop_paint_block()
 
     def _safe_pop_paint_block(self) -> None:
         try:
