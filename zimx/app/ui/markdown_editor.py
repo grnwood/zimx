@@ -1496,6 +1496,10 @@ class MarkdownEditor(QTextEdit):
 
     def paintEvent(self, event):  # type: ignore[override]
         """Custom paint to draw horizontal rules as visual lines."""
+        if self._suppress_paint or self._suppress_paint_depth:
+            return
+        if self._vi_paint_in_progress:
+            return
         self._vi_paint_in_progress = True
         painter: Optional[QPainter] = None
         try:

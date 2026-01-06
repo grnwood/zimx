@@ -8389,8 +8389,22 @@ class MainWindow(QMainWindow):
 
     def _toc_jump_to_position(self, position: int) -> None:
         cursor = self._cursor_at_position(max(0, position))
-        self._animate_or_flash_to_cursor(cursor)
+        if sys.platform.startswith("win"):
+            try:
+                self.editor._push_paint_block()
+            except Exception:
+                pass
+            self._scroll_cursor_to_top_quarter(cursor, animate=False, flash=True)
+            QTimer.singleShot(0, lambda: self._safe_pop_paint_block())
+        else:
+            self._animate_or_flash_to_cursor(cursor)
         QTimer.singleShot(180, lambda: self.editor.setFocus(Qt.OtherFocusReason))
+
+    def _safe_pop_paint_block(self) -> None:
+        try:
+            self.editor._pop_paint_block()
+        except Exception:
+            pass
 
     def _on_toc_collapsed_changed(self, collapsed: bool) -> None:
         config.save_toc_collapsed(collapsed)
