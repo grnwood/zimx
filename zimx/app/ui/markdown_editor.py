@@ -6297,6 +6297,7 @@ class MarkdownEditor(QTextEdit):
         """
         import time
         from os import getenv
+        import sys
         if getenv("ZIMX_DISABLE_IMAGE_RENDER") == "1":
             self._mark_page_load("render images skipped (disabled)")
             QTimer.singleShot(
@@ -6306,6 +6307,7 @@ class MarkdownEditor(QTextEdit):
                 ),
             )
             return
+        safe_mode = sys.platform.startswith("win")
         delay_ms = (time.perf_counter() - scheduled_at) * 1000.0 if scheduled_at else 0.0
         matches = list(IMAGE_PATTERN.finditer(display_text))
         if not matches:
@@ -6371,8 +6373,15 @@ class MarkdownEditor(QTextEdit):
                         print(f"  Image {img_idx}/{total} ({path}): FAILED")
                         continue
 
-                    cursor.removeSelectedText()
-                    cursor.insertImage(fmt)
+                    if safe_mode:
+                        cursor.clearSelection()
+                        cursor.setPosition(end_pos)
+                        cursor.insertBlock()
+                        cursor.insertImage(fmt)
+                        cursor.insertBlock()
+                    else:
+                        cursor.removeSelectedText()
+                        cursor.insertImage(fmt)
                     print(f"  Image {img_idx}/{total} ({path}): {(t_img_end - t_img_start)*1000:.1f}ms")
         finally:
             cursor.endEditBlock()
