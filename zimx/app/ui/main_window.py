@@ -1001,7 +1001,7 @@ class MainWindow(QMainWindow):
         self.editor.set_font_point_size(self.font_size)
         self.editor.viInsertModeChanged.connect(self._on_vi_insert_state_changed)
         self._apply_vi_preferences()
-        self.toc_widget = TableOfContentsWidget(self.editor.viewport())
+        self.toc_widget = TableOfContentsWidget(self)
         self.toc_widget.set_headings([])
         self.toc_widget.set_base_path("")
         self.toc_widget.headingActivated.connect(self._toc_jump_to_position)
@@ -8455,8 +8455,10 @@ class MainWindow(QMainWindow):
         margin = 12
         width = self.toc_widget.width()
         rect = viewport.rect()
-        x = max(margin, rect.width() - width - margin)
-        y = margin
+        top_left_global = viewport.mapToGlobal(rect.topLeft())
+        top_left = self.mapFromGlobal(top_left_global)
+        x = max(margin, top_left.x() + rect.width() - width - margin)
+        y = max(margin, top_left.y() + margin)
         self.toc_widget.move(x, y)
         self.toc_widget.raise_()
 
