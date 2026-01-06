@@ -226,9 +226,11 @@ WIKI_LINK_DUPLICATE_TAIL_PATTERN = re.compile(
     r"\[(?P<link>[^\]|]+)\|(?P<label>[^\]]*)\](?P<tail>[^\s\]]+)\|\s*(?P=label)\]"
 )
 
+LINK_SENTINEL = "\uE100"
 # Display pattern for rendered links (sentinel + link + sentinel + label + sentinel)
-# Uses \x00 sentinel for all links (both HTTP and page links)
-WIKI_LINK_DISPLAY_PATTERN = re.compile(r"\x00(?P<link>[^\x00\n]+)\x00(?P<label>[^\x00\n]*)\x00")
+WIKI_LINK_DISPLAY_PATTERN = re.compile(
+    rf"{LINK_SENTINEL}(?P<link>[^{LINK_SENTINEL}\n]+){LINK_SENTINEL}(?P<label>[^{LINK_SENTINEL}\n]*){LINK_SENTINEL}"
+)
 
 TABLE_ROW_PATTERN = re.compile(r"^\s*\|.*\|\s*$")
 TABLE_SEP_PATTERN = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$")
@@ -1053,12 +1055,12 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         display_link_spans: list[tuple[int, int]] = []
         idx = 0
         while idx < len(text):
-            if text[idx] == "\x00":
+            if text[idx] == LINK_SENTINEL:
                 link_start = idx + 1
-                link_end = text.find("\x00", link_start)
+                link_end = text.find(LINK_SENTINEL, link_start)
                 if link_end > link_start:
                     label_start = link_end + 1
-                    label_end = text.find("\x00", label_start)
+                    label_end = text.find(LINK_SENTINEL, label_start)
                     if label_end >= label_start:  # Changed: >= instead of > to handle empty labels
                         # Hide opening sentinel and link
                         self.setFormat(idx, label_start - idx, self.hidden_format)
@@ -2062,7 +2064,7 @@ class MarkdownEditor(QTextEdit):
     def insert_link(self, colon_path: str, link_name: str | None = None, *, surround_with_spaces: bool = False) -> None:
         """Insert a link at the current cursor position in display format.
         
-        Inserts directly as \x00target\x00label\x00 (display format with sentinels).
+        Inserts directly as sentinel+target+sentinel+label+sentinel (display format).
         When surround_with_spaces is True, adds missing spaces around the link to avoid
         embedding sentinels in the middle of a word.
         """
@@ -2085,8 +2087,8 @@ class MarkdownEditor(QTextEdit):
         if not label:
             label = target
         
-        # Insert directly in display format: \x00target\x00label\x00
-        display_link = f"\x00{target}\x00{label}\x00"
+        # Insert directly in display format: sentinel + target + sentinel + label + sentinel
+        display_link = f"{LINK_SENTINEL}{target}{LINK_SENTINEL}{label}{LINK_SENTINEL}"
         
         cursor = self.textCursor()
         prefix = ""
@@ -2271,8 +2273,8 @@ class MarkdownEditor(QTextEdit):
     def _normalize_external_link(self, link: str) -> str:
         """Preserve full external links while stripping whitespace and hidden sentinels."""
         text = (link or "").strip()
-        if "\x00" in text:
-            text = text.split("\x00", 1)[0]
+        if LINK_SENTINEL in text:
+            text = text.split(LINK_SENTINEL, 1)[0]
         return text
 
     def _wrap_plain_http_links(self, text: str) -> str:
@@ -2280,7 +2282,7 @@ class MarkdownEditor(QTextEdit):
         if not text or "http" not in text:
             return text
 
-        pattern = re.compile(r"(?<!\[)(?<!\()(https?://[^\s<>\[\]\(\)\x00]+)")
+        pattern = re.compile(rf"(?<!\[)(?<!\()(https?://[^\s<>\[\]\(\){LINK_SENTINEL}]+)")
 
         def repl(match: re.Match[str]) -> str:
             url = match.group(1)
@@ -3722,15 +3724,15 @@ class MarkdownEditor(QTextEdit):
         rel_pos = cursor.position() - block.position()
         text = block.text()
         
-        # Find link boundaries in display format: \x00link\x00label\x00
+        # Find link boundaries in display format: sentinel + link + sentinel + label + sentinel
         idx = 0
         while idx < len(text):
-            if text[idx] == '\x00':
+            if text[idx] == LINK_SENTINEL:
                 link_start = idx + 1
-                link_end = text.find('\x00', link_start)
+                link_end = text.find(LINK_SENTINEL, link_start)
                 if link_end > link_start:
                     label_start = link_end + 1
-                    label_end = text.find('\x00', label_start)
+                    label_end = text.find(LINK_SENTINEL, label_start)
                     if label_end >= label_start:  # >= to handle empty labels
                         # Determine visible region: if label empty, show link; otherwise show label
                         if label_end == label_start:  # Empty label - link is visible
@@ -3781,7 +3783,7 @@ class MarkdownEditor(QTextEdit):
         # If there's a selection, check if it contains any sentinels
         if cursor.hasSelection():
             selected_text = cursor.selectedText()
-            if '\x00' in selected_text:
+            if LINK_SENTINEL in selected_text:
                 # Delete the entire link(s) instead of partial sentinels
                 self._delete_selection_with_links(cursor)
                 return True
@@ -3793,17 +3795,17 @@ class MarkdownEditor(QTextEdit):
             
             if key == Qt.Key_Delete:
                 # Check if we're about to delete a sentinel
-                if rel_pos < len(text) and text[rel_pos] == '\x00':
+                if rel_pos < len(text) and text[rel_pos] == LINK_SENTINEL:
                     # Find the complete link structure and delete it
                     self._delete_link_at_position(cursor, rel_pos)
                     return True
                 # Check if we're right after a link's closing sentinel
-                if rel_pos > 0 and text[rel_pos - 1] == '\x00':
+                if rel_pos > 0 and text[rel_pos - 1] == LINK_SENTINEL:
                     self._delete_link_at_position(cursor, rel_pos - 1)
                     return True
             elif key == Qt.Key_Backspace:
                 # Check if we're about to delete a sentinel
-                if rel_pos > 0 and text[rel_pos - 1] == '\x00':
+                if rel_pos > 0 and text[rel_pos - 1] == LINK_SENTINEL:
                     # Find the complete link structure and delete it
                     self._delete_link_at_position(cursor, rel_pos - 1)
                     return True
@@ -3812,13 +3814,13 @@ class MarkdownEditor(QTextEdit):
                 if rel_pos > 0:
                     idx = 0
                     while idx < len(text):
-                        if text[idx] == '\x00':
+                        if text[idx] == LINK_SENTINEL:
                             link_start_pos = idx
                             link_content_start = idx + 1
-                            link_content_end = text.find('\x00', link_content_start)
+                            link_content_end = text.find(LINK_SENTINEL, link_content_start)
                             if link_content_end > link_content_start:
                                 label_start = link_content_end + 1
-                                label_end = text.find('\x00', label_start)
+                                label_end = text.find(LINK_SENTINEL, label_start)
                                 if label_end >= label_start:
                                     link_end_pos = label_end + 1
                                     # Check if cursor is inside this link's visible region
@@ -3878,13 +3880,13 @@ class MarkdownEditor(QTextEdit):
         # Find the complete link structure containing this sentinel
         idx = 0
         while idx < len(text):
-            if text[idx] == '\x00':
+            if text[idx] == LINK_SENTINEL:
                 link_start_pos = idx
                 link_content_start = idx + 1
-                link_content_end = text.find('\x00', link_content_start)
+                link_content_end = text.find(LINK_SENTINEL, link_content_start)
                 if link_content_end > link_content_start:
                     label_start = link_content_end + 1
-                    label_end = text.find('\x00', label_start)
+                    label_end = text.find(LINK_SENTINEL, label_start)
                     if label_end >= label_start:
                         link_end_pos = label_end + 1
                         
@@ -4020,15 +4022,15 @@ class MarkdownEditor(QTextEdit):
         rel = cursor.position() - block.position()
         text = block.text()
         
-        # Check display-format: \x00link\x00label\x00 (unified for both HTTP and page links)
+        # Check display-format: sentinel + link + sentinel + label + sentinel
         idx = 0
         while idx < len(text):
-            if text[idx] == '\x00':
+            if text[idx] == LINK_SENTINEL:
                 link_start = idx + 1
-                link_end = text.find('\x00', link_start)
+                link_end = text.find(LINK_SENTINEL, link_start)
                 if link_end > link_start:
                     label_start = link_end + 1
-                    label_end = text.find('\x00', label_start)
+                    label_end = text.find(LINK_SENTINEL, label_start)
                     if label_end >= label_start:  # >= to handle empty labels
                         raw_link = text[link_start:link_end]
                         visible_label = text[label_start:label_end]
@@ -4937,7 +4939,7 @@ class MarkdownEditor(QTextEdit):
         # Check for sentinel deletion before proceeding
         if cursor.hasSelection():
             selected_text = cursor.selectedText()
-            if '\x00' in selected_text:
+            if LINK_SENTINEL in selected_text:
                 # Use the safe deletion method
                 self._delete_selection_with_links(cursor)
                 return
@@ -4946,12 +4948,12 @@ class MarkdownEditor(QTextEdit):
             block = cursor.block()
             rel_pos = cursor.position() - block.position()
             text = block.text()
-            if rel_pos < len(text) and text[rel_pos] == '\x00':
+            if rel_pos < len(text) and text[rel_pos] == LINK_SENTINEL:
                 # Delete the entire link
                 self._delete_link_at_position(cursor, rel_pos)
                 return
             # Check if we're right after a link's closing sentinel
-            if rel_pos > 0 and text[rel_pos - 1] == '\x00':
+            if rel_pos > 0 and text[rel_pos - 1] == LINK_SENTINEL:
                 # Find if this is a closing sentinel of a link
                 self._delete_link_at_position(cursor, rel_pos - 1)
                 return
@@ -5240,14 +5242,14 @@ class MarkdownEditor(QTextEdit):
         converted = TASK_LINE_PATTERN.sub(_md_repl, text)
         converted = SYMBOL_TASK_LINE_PATTERN.sub(_symbol_repl, converted)
         converted = HEADING_MARK_PATTERN.sub(self._encode_heading, converted)
-        # Transform wiki-style links: [link|label] → \x00link\x00label\x00
+        # Transform wiki-style links: [link|label] → sentinel + link + sentinel + label + sentinel
         converted = WIKI_LINK_STORAGE_PATTERN.sub(self._encode_wiki_link, converted)
         # Transform bullets: * → •
         converted = BULLET_STORAGE_PATTERN.sub(r"\1• ", converted)
         return converted
 
     def _from_display(self, text: str) -> str:
-        # Restore wiki-style links: \x00link\x00label\x00 → [link|label]
+        # Restore wiki-style links: sentinel + link + sentinel + label + sentinel → [link|label]
         restored = WIKI_LINK_DISPLAY_PATTERN.sub(self._decode_wiki_link, text)
         # Drop duplicated link tails that sometimes get re-appended after decoding.
         def _dedupe_tail(m: re.Match[str]) -> str:
@@ -5290,11 +5292,11 @@ class MarkdownEditor(QTextEdit):
         label = match.group("label")
         if not label:
             # Inject a trailing pipe so plain-text round trips keep the wiki delimiter.
-            return f"\x00{link}|\x00\x00"
-        return f"\x00{link}\x00{label}\x00"
+            return f"{LINK_SENTINEL}{link}|{LINK_SENTINEL}{LINK_SENTINEL}"
+        return f"{LINK_SENTINEL}{link}{LINK_SENTINEL}{label}{LINK_SENTINEL}"
 
     def _decode_wiki_link(self, match: re.Match[str]) -> str:
-        """Convert hidden format \x00link\x00label\x00 back to [link|label]"""
+        """Convert hidden format sentinel+link+sentinel+label+sentinel back to [link|label]"""
         link = match.group("link")
         label = match.group("label")
         if not label and link.endswith("|"):
@@ -5461,7 +5463,7 @@ class MarkdownEditor(QTextEdit):
         if not delay_heading_render:
             line = HEADING_MARK_PATTERN.sub(self._encode_heading, line)
 
-        # 3) Wiki-style links: [link|label] → \x00link\x00label\x00
+        # 3) Wiki-style links: [link|label] → sentinel + link + sentinel + label + sentinel
         line = WIKI_LINK_STORAGE_PATTERN.sub(self._encode_wiki_link, line)
         
         # 4) Bullet conversion: Convert "* " at start of line (after whitespace) to bullet
