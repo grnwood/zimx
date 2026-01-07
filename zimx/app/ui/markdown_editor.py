@@ -6286,7 +6286,39 @@ class MarkdownEditor(QTextEdit):
         """
         import time
         delay_ms = (time.perf_counter() - scheduled_at) * 1000.0 if scheduled_at else 0.0
-        matches = list(IMAGE_PATTERN.finditer(display_text))
+        matches: list[tuple[int, int, str, str, Optional[str]]] = []
+        qt_pattern = QRegularExpression(r"!\[[^\]]*\]\([^\)\s]+\)(?:\{width=\d+\})?")
+        doc = self.document()
+        cursor = QTextCursor(doc)
+        cursor.movePosition(QTextCursor.Start)
+        while True:
+            cursor = doc.find(qt_pattern, cursor)
+            if cursor.isNull():
+                break
+            selected = cursor.selectedText().replace("\u2029", "\n")
+            match = IMAGE_PATTERN.search(selected)
+            if match:
+                matches.append(
+                    (
+                        cursor.selectionStart(),
+                        cursor.selectionEnd(),
+                        match.group("path"),
+                        match.group("alt") or "",
+                        match.group("width"),
+                    )
+                )
+            cursor.setPosition(cursor.selectionEnd())
+        if sys.platform == "win32" and os.getenv("ZIMX_WIN_IMAGE_DEBUG", "0") not in ("0", "false", "False", ""):
+            sample = matches[:5]
+            print(f"[ZimX][WIN_IMAGE_DEBUG] matches={len(matches)} sample_count={len(sample)}")
+            for idx, (start_pos, end_pos, path, alt, width) in enumerate(sample, start=1):
+                snippet = display_text[start_pos:end_pos].replace("\u2029", "\\n")
+                if len(snippet) > 120:
+                    snippet = snippet[:120] + "..."
+                print(
+                    f"[ZimX][WIN_IMAGE_DEBUG] #{idx} range=({start_pos},{end_pos}) "
+                    f"path={path} alt_len={len(alt)} width={width or ''} snippet={snippet!r}"
+                )
         if not matches:
             self._mark_page_load(f"render images skipped (0) delay={delay_ms:.1f}ms")
             QTimer.singleShot(
@@ -6299,24 +6331,18 @@ class MarkdownEditor(QTextEdit):
         if _DETAILED_LOGGING:
             print(f"[TIMING] Rendering {len(matches)} images...")
         self._mark_page_load(f"render images start count={len(matches)} delay={delay_ms:.1f}ms")
-        # QTextCursor positions are UTF-16 code unit offsets; regex spans are codepoint offsets.
-        utf16_positions = _utf16_positions(display_text)
         cursor = self.textCursor()
         cursor.beginEditBlock()
         try:
-            for idx, match in enumerate(reversed(matches)):
+            for idx, (start_pos, end_pos, path, alt, width) in enumerate(reversed(matches)):
                 t_img_start = time.perf_counter()
-                start, end = match.span()
-                start_pos = utf16_positions[start]
-                end_pos = utf16_positions[end]
                 cursor.setPosition(start_pos)
                 cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
 
-                path = match.group("path")
                 fmt = self._create_image_format(
                     path,
-                    match.group("alt") or "",
-                    match.group("width"),
+                    alt,
+                    width,
                 )
                 t_img_end = time.perf_counter()
 
