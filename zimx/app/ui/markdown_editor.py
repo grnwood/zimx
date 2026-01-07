@@ -1860,7 +1860,28 @@ class MarkdownEditor(QTextEdit):
         markdown = self._normalize_markdown_images(markdown)
         # Convert +CamelCase links to colon-style links before saving
         markdown = self._convert_camelcase_links(markdown)
-        return self._from_display(markdown)
+        result = self._from_display(markdown)
+        if sys.platform == "win32" and os.getenv("ZIMX_WIN_TRUNC_DEBUG", "0") not in ("0", "false", "False", ""):
+            display_text = self.toPlainText()
+            baseline = self._from_display(display_text)
+            def _tail(text: str) -> str:
+                tail = text.replace("\u2029", "\n")
+                return tail[-200:] if len(tail) > 200 else tail
+            mismatch = None
+            for idx, (a, b) in enumerate(zip(baseline, result)):
+                if a != b:
+                    mismatch = idx
+                    break
+            if mismatch is None and len(baseline) != len(result):
+                mismatch = min(len(baseline), len(result))
+            print(
+                "[ZimX][WIN_TRUNC_DEBUG] "
+                f"display_len={len(display_text)} baseline_len={len(baseline)} result_len={len(result)} "
+                f"mismatch_at={mismatch}"
+            )
+            print(f"[ZimX][WIN_TRUNC_DEBUG] baseline_tail={_tail(baseline)!r}")
+            print(f"[ZimX][WIN_TRUNC_DEBUG] result_tail={_tail(result)!r}")
+        return result
 
     def _schedule_camel_refresh(self) -> None:
         """Schedule a quick refresh to render +CamelCase links into colon format."""
