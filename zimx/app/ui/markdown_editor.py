@@ -1862,10 +1862,16 @@ class MarkdownEditor(QTextEdit):
         markdown = self._convert_camelcase_links(markdown)
         result = self._from_display(markdown)
         # Guard against QTextDocument fragment drift: if the doc-derived markdown
-        # doesn't match the display-derived markdown, prefer the display path.
+        # doesn't match the display-derived markdown, prefer the display path,
+        # but never drop image markdown that only exists in the document.
         baseline = self._from_display(self.toPlainText())
         if result != baseline:
-            result = baseline
+            result_images = len(IMAGE_PATTERN.findall(result))
+            baseline_images = len(IMAGE_PATTERN.findall(baseline))
+            if result_images < baseline_images:
+                result = baseline
+            elif result_images == baseline_images and len(result) < len(baseline):
+                result = baseline
         if sys.platform == "win32" and os.getenv("ZIMX_WIN_TRUNC_DEBUG", "0") not in ("0", "false", "False", ""):
             display_text = self.toPlainText()
             def _tail(text: str) -> str:
@@ -1885,6 +1891,38 @@ class MarkdownEditor(QTextEdit):
             )
             print(f"[ZimX][WIN_TRUNC_DEBUG] baseline_tail={_tail(baseline)!r}")
             print(f"[ZimX][WIN_TRUNC_DEBUG] result_tail={_tail(result)!r}")
+        if sys.platform == "win32" and os.getenv("ZIMX_WIN_IMAGE_SAVE_DEBUG", "0") not in ("0", "false", "False", ""):
+            doc = self.document()
+            cursor = QTextCursor(doc)
+            cursor.setPosition(0)
+            doc_end = max(0, doc.characterCount() - 1)
+            doc_images: list[str] = []
+            while cursor.position() < doc_end:
+                cursor.setPosition(cursor.position() + 1, QTextCursor.KeepAnchor)
+                fmt = cursor.charFormat()
+                if fmt.isImageFormat():
+                    img_fmt = fmt.toImageFormat()
+                    name = img_fmt.property(IMAGE_PROP_ORIGINAL) or img_fmt.name()
+                    doc_images.append(str(name))
+                cursor.setPosition(cursor.position())
+            result_images = IMAGE_PATTERN.findall(result)
+            baseline_images = IMAGE_PATTERN.findall(baseline)
+            def _img_sample(images: list[tuple[str, str, str]]) -> list[str]:
+                sample: list[str] = []
+                for alt, path, width in images[:5]:
+                    suffix = f"{{width={width}}}" if width else ""
+                    sample.append(f"![{alt}]({path}){suffix}")
+                return sample
+            print(
+                "[ZimX][WIN_IMAGE_SAVE_DEBUG] "
+                f"doc_images={len(doc_images)} result_images={len(result_images)} baseline_images={len(baseline_images)}"
+            )
+            if doc_images:
+                print(f"[ZimX][WIN_IMAGE_SAVE_DEBUG] doc_image_sample={doc_images[:5]}")
+            if result_images:
+                print(f"[ZimX][WIN_IMAGE_SAVE_DEBUG] result_image_sample={_img_sample(result_images)}")
+            if baseline_images:
+                print(f"[ZimX][WIN_IMAGE_SAVE_DEBUG] baseline_image_sample={_img_sample(baseline_images)}")
         return result
 
     def _schedule_camel_refresh(self) -> None:
@@ -6259,19 +6297,21 @@ class MarkdownEditor(QTextEdit):
         """
         parts: list[str] = []
         doc = self.document()
-        end = max(0, doc.characterCount() - 1)
+        text = doc.toPlainText()
+        end = len(text)
         cursor = QTextCursor(doc)
-        cursor.setPosition(0)
-        while cursor.position() < end:
-            cursor.setPosition(cursor.position() + 1, QTextCursor.KeepAnchor)
-            fmt = cursor.charFormat()
-            if fmt.isImageFormat():
-                parts.append(self._markdown_from_image_format(fmt.toImageFormat()))
-            else:
-                text = cursor.selectedText()
-                if text:
-                    parts.append(text)
-            cursor.setPosition(cursor.position())
+        pos = 0
+        while pos < end:
+            ch = text[pos]
+            if ch == "\ufffc":
+                cursor.setPosition(pos)
+                fmt = cursor.charFormat()
+                if fmt.isImageFormat():
+                    parts.append(self._markdown_from_image_format(fmt.toImageFormat()))
+                pos += 1
+                continue
+            parts.append(ch)
+            pos += 1
 
         result = "".join(parts).replace("\u2029", "\n")
 
@@ -6308,7 +6348,7 @@ class MarkdownEditor(QTextEdit):
         """
         import time
         delay_ms = (time.perf_counter() - scheduled_at) * 1000.0 if scheduled_at else 0.0
-        matches: list[tuple[int, int, str, str, Optional[str], str]] = []
+        matches: list[tuple[int, int, str, str, Optional[str], str, str]] = []
         qt_pattern = QRegularExpression(r"!\[[^\]]*\]\([^\)\s]+\)(?:\{width=\d+\})?")
         doc = self.document()
         cursor = QTextCursor(doc)
@@ -6331,19 +6371,20 @@ class MarkdownEditor(QTextEdit):
                         match.group("alt") or "",
                         match.group("width"),
                         selected,
+                        match.group(0),
                     )
                 )
             cursor.setPosition(cursor.selectionEnd())
         if sys.platform == "win32" and os.getenv("ZIMX_WIN_IMAGE_DEBUG", "0") not in ("0", "false", "False", ""):
             sample = matches[:5]
             print(f"[ZimX][WIN_IMAGE_DEBUG] matches={len(matches)} sample_count={len(sample)}")
-            for idx, (start_pos, end_pos, path, alt, width, selected) in enumerate(sample, start=1):
+            for idx, (start_pos, end_pos, path, alt, width, selected, match_text) in enumerate(sample, start=1):
                 snippet = selected.replace("\u2029", "\\n")
                 if len(snippet) > 120:
                     snippet = snippet[:120] + "..."
                 print(
                     f"[ZimX][WIN_IMAGE_DEBUG] #{idx} range=({start_pos},{end_pos}) "
-                    f"path={path} alt_len={len(alt)} width={width or ''} snippet={snippet!r}"
+                    f"path={path} alt_len={len(alt)} width={width or ''} snippet={snippet!r} match={match_text!r}"
                 )
         if not matches:
             self._mark_page_load(f"render images skipped (0) delay={delay_ms:.1f}ms")
@@ -6360,10 +6401,24 @@ class MarkdownEditor(QTextEdit):
         cursor = self.textCursor()
         cursor.beginEditBlock()
         try:
-            for idx, (start_pos, end_pos, path, alt, width, _) in enumerate(reversed(matches)):
+            for idx, (start_pos, end_pos, path, alt, width, selected, match_text) in enumerate(reversed(matches)):
                 t_img_start = time.perf_counter()
                 cursor.setPosition(start_pos)
                 cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
+                if os.getenv("ZIMX_IMAGE_RENDER_DEBUG", "0") not in ("0", "false", "False", ""):
+                    picked = cursor.selectedText().replace("\u2029", "\n")
+                    print(
+                        f"[ZimX][IMAGE_RENDER_DEBUG] idx={idx+1}/{len(matches)} "
+                        f"range=({start_pos},{end_pos}) picked={picked!r} match={match_text!r}"
+                    )
+                picked = cursor.selectedText().replace("\u2029", "\n")
+                if picked != match_text:
+                    if os.getenv("ZIMX_IMAGE_RENDER_DEBUG", "0") not in ("0", "false", "False", ""):
+                        print(
+                            f"[ZimX][IMAGE_RENDER_DEBUG] skip idx={idx+1} "
+                            f"range=({start_pos},{end_pos}) picked_mismatch"
+                        )
+                    continue
 
                 fmt = self._create_image_format(
                     path,
