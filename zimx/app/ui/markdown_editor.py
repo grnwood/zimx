@@ -6254,25 +6254,22 @@ class MarkdownEditor(QTextEdit):
         from accidental or repeated saves.
         """
         parts: list[str] = []
-        block = self.document().begin()
-        while block.isValid():
-            it = block.begin()
-            while not it.atEnd():
-                fragment = it.fragment()
-                if not fragment.isValid():
-                    it += 1
-                    continue
-                fmt = fragment.charFormat()
-                if fmt.isImageFormat():
-                    parts.append(self._markdown_from_image_format(fmt.toImageFormat()))
-                else:
-                    parts.append(fragment.text())
-                it += 1
-            block = block.next()
-            if block.isValid():
-                parts.append("\n")
-        
-        result = "".join(parts)
+        doc = self.document()
+        end = max(0, doc.characterCount() - 1)
+        cursor = QTextCursor(doc)
+        cursor.setPosition(0)
+        while cursor.position() < end:
+            cursor.setPosition(cursor.position() + 1, QTextCursor.KeepAnchor)
+            fmt = cursor.charFormat()
+            if fmt.isImageFormat():
+                parts.append(self._markdown_from_image_format(fmt.toImageFormat()))
+            else:
+                text = cursor.selectedText()
+                if text:
+                    parts.append(text)
+            cursor.setPosition(cursor.position())
+
+        result = "".join(parts).replace("\u2029", "\n")
 
         # Limit trailing newlines to keep saves stable and prevent runaway growth.
         max_trailing = 3
