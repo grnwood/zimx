@@ -502,6 +502,12 @@ IMAGE_PROP_NATURAL_HEIGHT = IMAGE_PROP_ALT + 4
 
 _DETAILED_LOGGING = os.getenv("ZIMX_DETAILED_LOGGING", "0") not in ("0", "false", "False", "", None)
 
+def _utf16_positions(text: str) -> list[int]:
+    positions = [0]
+    for ch in text:
+        positions.append(positions[-1] + (2 if ord(ch) > 0xFFFF else 1))
+    return positions
+
 
 def heading_sentinel(level: int) -> str:
     level = max(1, min(HEADING_MAX_LEVEL, level))
@@ -1684,19 +1690,6 @@ class MarkdownEditor(QTextEdit):
             self._page_load_logger.end(label)
             self._page_load_logger = None
 
-    def _log_doc_state(self, label: str) -> None:
-        try:
-            doc = self.document()
-            block = doc.lastBlock()
-            last_text = block.text() if block and block.isValid() else ""
-            print(
-                f"[EDITOR LOAD] {label} blocks={doc.blockCount()} chars={doc.characterCount()} "
-                f"last_block_len={len(last_text)} tail={repr(last_text[:80])}"
-            )
-        except Exception:
-            pass
-
-
     def set_markdown(self, content: str) -> None:
         self._push_paint_block()
         try:
@@ -1785,8 +1778,6 @@ class MarkdownEditor(QTextEdit):
                     t3 = time.perf_counter()
                     # Restore cursor after full setPlainText
                     restore_cursor_after_load(len(display))
-                if getenv("ZIMX_TRACE_EDITOR_LOAD") == "1":
-                    self._log_doc_state("after setPlainText")
                 self._mark_page_load("document populated")
                 self.textChanged.connect(self._enforce_display_symbols)
                 self.textChanged.connect(self._schedule_heading_outline)
@@ -1796,8 +1787,6 @@ class MarkdownEditor(QTextEdit):
                 self._render_images(display, time.perf_counter())
                 t4 = time.perf_counter()
                 self._mark_page_load("render images")
-                if getenv("ZIMX_TRACE_EDITOR_LOAD") == "1":
-                    self._log_doc_state("after render_images")
                 self._display_guard = False
                 self._schedule_heading_outline()
                 self._apply_scroll_past_end_margin()
@@ -6296,18 +6285,6 @@ class MarkdownEditor(QTextEdit):
         and inserting a QTextImageFormat created from the resolved path.
         """
         import time
-        from os import getenv
-        import sys
-        if getenv("ZIMX_DISABLE_IMAGE_RENDER") == "1":
-            self._mark_page_load("render images skipped (disabled)")
-            QTimer.singleShot(
-                0,
-                lambda: self._complete_page_load_logging(
-                    f"qt idle after images delay={(time.perf_counter() - (scheduled_at or time.perf_counter()))*1000:.1f}ms"
-                ),
-            )
-            return
-        safe_mode = sys.platform.startswith("win")
         delay_ms = (time.perf_counter() - scheduled_at) * 1000.0 if scheduled_at else 0.0
         matches = list(IMAGE_PATTERN.finditer(display_text))
         if not matches:
@@ -6322,67 +6299,35 @@ class MarkdownEditor(QTextEdit):
         if _DETAILED_LOGGING:
             print(f"[TIMING] Rendering {len(matches)} images...")
         self._mark_page_load(f"render images start count={len(matches)} delay={delay_ms:.1f}ms")
+        # QTextCursor positions are UTF-16 code unit offsets; regex spans are codepoint offsets.
+        utf16_positions = _utf16_positions(display_text)
         cursor = self.textCursor()
         cursor.beginEditBlock()
         try:
-            # Process blocks from end to start so earlier replacements don't shift later positions.
-            blocks = []
-            block = self.document().lastBlock()
-            while block.isValid():
-                blocks.append(block)
-                block = block.previous()
-            img_idx = 0
-            total = len(matches)
-            for block in blocks:
-                text = block.text()
-                if not text or "!" not in text:
+            for idx, match in enumerate(reversed(matches)):
+                t_img_start = time.perf_counter()
+                start, end = match.span()
+                start_pos = utf16_positions[start]
+                end_pos = utf16_positions[end]
+                cursor.setPosition(start_pos)
+                cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
+
+                path = match.group("path")
+                fmt = self._create_image_format(
+                    path,
+                    match.group("alt") or "",
+                    match.group("width"),
+                )
+                t_img_end = time.perf_counter()
+
+                if fmt is None:
+                    # If the image can't be resolved, leave the markdown text as-is
+                    print(f"  Image {idx+1}/{len(matches)} ({path}): FAILED")
                     continue
-                local_matches = list(IMAGE_PATTERN.finditer(text))
-                if not local_matches:
-                    continue
-                utf16_positions = [0]
-                for ch in text:
-                    utf16_positions.append(utf16_positions[-1] + (2 if ord(ch) > 0xFFFF else 1))
-                for match in reversed(local_matches):
-                    t_img_start = time.perf_counter()
-                    start, end = match.span()
-                    if text.strip() != match.group(0):
-                        continue
-                    start_pos = block.position() + utf16_positions[start]
-                    end_pos = block.position() + utf16_positions[end]
-                    cursor.setPosition(start_pos)
-                    cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
 
-                    selected = cursor.selectedText()
-                    expected = match.group(0)
-                    if selected != expected:
-                        # If selection drifted, skip to avoid corrupting the document.
-                        continue
-
-                    path = match.group("path")
-                    fmt = self._create_image_format(
-                        path,
-                        match.group("alt") or "",
-                        match.group("width"),
-                    )
-                    t_img_end = time.perf_counter()
-
-                    img_idx += 1
-                    if fmt is None:
-                        # If the image can't be resolved, leave the markdown text as-is
-                        print(f"  Image {img_idx}/{total} ({path}): FAILED")
-                        continue
-
-                    if safe_mode:
-                        cursor.clearSelection()
-                        cursor.setPosition(end_pos)
-                        cursor.insertBlock()
-                        cursor.insertImage(fmt)
-                        cursor.insertBlock()
-                    else:
-                        cursor.removeSelectedText()
-                        cursor.insertImage(fmt)
-                    print(f"  Image {img_idx}/{total} ({path}): {(t_img_end - t_img_start)*1000:.1f}ms")
+                cursor.removeSelectedText()
+                cursor.insertImage(fmt)
+                print(f"  Image {idx+1}/{len(matches)} ({path}): {(t_img_end - t_img_start)*1000:.1f}ms")
         finally:
             cursor.endEditBlock()
         self._mark_page_load(f"render images done count={len(matches)}")
@@ -6430,6 +6375,9 @@ class MarkdownEditor(QTextEdit):
         if not raw_path:
             return None
         raw_path = raw_path.strip()
+        raw_path = raw_path.replace("\\", "/")
+        while "/./" in raw_path:
+            raw_path = raw_path.replace("/./", "/")
         if raw_path.startswith("http://") or raw_path.startswith("https://"):
             return None
         if self._remote_mode:
@@ -6477,6 +6425,9 @@ class MarkdownEditor(QTextEdit):
 
     def _virtual_image_path(self, raw_path: str) -> Optional[str]:
         raw_path = raw_path.strip()
+        raw_path = raw_path.replace("\\", "/")
+        while "/./" in raw_path:
+            raw_path = raw_path.replace("/./", "/")
         if not raw_path or raw_path.startswith("http://") or raw_path.startswith("https://"):
             return None
         if raw_path.startswith("/"):
@@ -6489,6 +6440,9 @@ class MarkdownEditor(QTextEdit):
 
     def _normalize_image_path(self, path: str) -> str:
         path = (path or "").strip()
+        path = path.replace("\\", "/")
+        while "/./" in path:
+            path = path.replace("/./", "/")
         if not path or path.startswith(("http://", "https://", "/", "./", "../")):
             return path
         return f"./{path}"
