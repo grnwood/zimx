@@ -1238,6 +1238,7 @@ class MarkdownEditor(QTextEdit):
     LIST_INDENT_UNIT = "  "
     _VI_EXTRA_KEY = QTextFormat.UserProperty + 1
     _FLASH_EXTRA_KEY = QTextFormat.UserProperty + 2
+    _HR_EXTRA_KEY = QTextFormat.UserProperty + 3
     _LOAD_GUARD_DEPTH = 0  # class-level: block cursor/link work during any markdown load
 
     def __init__(self, parent=None) -> None:
@@ -1308,6 +1309,11 @@ class MarkdownEditor(QTextEdit):
         self._heading_timer.setSingleShot(True)
         self._heading_timer.timeout.connect(self._emit_heading_outline)
         self.textChanged.connect(self._schedule_heading_outline)
+        self._hr_timer = QTimer(self)
+        self._hr_timer.setInterval(120)
+        self._hr_timer.setSingleShot(True)
+        self._hr_timer.timeout.connect(self._refresh_hr_selections)
+        self.textChanged.connect(self._schedule_hr_selections)
         # Timer for CamelCase link conversion; explicitly started on key triggers
         self._camel_refresh_timer = QTimer(self)
         self._camel_refresh_timer.setInterval(120)
@@ -1321,6 +1327,7 @@ class MarkdownEditor(QTextEdit):
         self.setAcceptDrops(True)
         # Configure scroll-past-end margin initially
         QTimer.singleShot(0, self._apply_scroll_past_end_margin)
+        QTimer.singleShot(0, self._refresh_hr_selections)
 
         self._ai_send_shortcut = QShortcut(QKeySequence("Ctrl+Shift+P"), self)
         try:
@@ -1789,6 +1796,7 @@ class MarkdownEditor(QTextEdit):
                 self._mark_page_load("render images")
                 self._display_guard = False
                 self._schedule_heading_outline()
+                self._refresh_hr_selections()
                 self._apply_scroll_past_end_margin()
             finally:
                 del blocker
@@ -5379,6 +5387,36 @@ class MarkdownEditor(QTextEdit):
         if self._display_guard:
             return
         self._heading_timer.start()
+
+    def _schedule_hr_selections(self) -> None:
+        if self._display_guard:
+            return
+        if self._hr_timer.isActive():
+            return
+        self._hr_timer.start()
+
+    def _refresh_hr_selections(self) -> None:
+        doc = self.document()
+        if doc is None:
+            return
+        selections: list[QTextEdit.ExtraSelection] = []
+        block = doc.begin()
+        while block.isValid():
+            if block.text().strip() in ("---", "***", "___"):
+                cursor = QTextCursor(block)
+                cursor.select(QTextCursor.LineUnderCursor)
+                sel = QTextEdit.ExtraSelection()
+                sel.cursor = cursor
+                fmt = sel.format
+                fmt.setBackground(QColor("#333333"))
+                fmt.setForeground(QColor("#333333"))
+                fmt.setProperty(QTextFormat.FullWidthSelection, True)
+                fmt.setProperty(self._HR_EXTRA_KEY, True)
+                selections.append(sel)
+            block = block.next()
+        existing = [s for s in self.extraSelections() if s.format.property(self._HR_EXTRA_KEY) is None]
+        existing.extend(selections)
+        self.setExtraSelections(existing)
 
     def _emit_heading_outline(self) -> None:
         outline: list[dict] = []

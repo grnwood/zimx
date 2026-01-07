@@ -88,6 +88,8 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QPushButton,
     QTabWidget,
+    QTabBar,
+    QStackedLayout,
     QCheckBox,
     QFormLayout,
 )
@@ -893,7 +895,7 @@ class MainWindow(QMainWindow):
         self.journal_tree_button.toggled.connect(self._toggle_show_journal_in_nav)
         self.journal_tree_button.setEnabled(False)
         tree_header_layout.addWidget(self.journal_tree_button)
-        
+
         # Collapse-all button (aligned to the right, more prominent with white foreground)
         self.collapse_tree_button = QToolButton()
         icon_path = self._find_asset("collapse.svg")
@@ -1064,6 +1066,28 @@ class MainWindow(QMainWindow):
             self.right_panel.task_panel.focusGained.connect(self._suspend_vi_for_tasks)
         except Exception:
             pass
+
+        self._minibar_width = 28
+        self.right_minibar, self._right_minibar_bar, self._right_minibar_toggle = self._build_minibar(
+            self._right_minibar_labels(),
+            side="right",
+        )
+        self._right_minibar_bar.tabBarClicked.connect(self._expand_right_from_minibar)
+        self._right_minibar_toggle.clicked.connect(lambda *_: self._set_right_panel_collapsed(False))
+        self.right_panel.tabs.currentChanged.connect(self._sync_right_minibar_selection)
+        self._right_toggle_button = QToolButton()
+        self._right_toggle_button.setAutoRaise(True)
+        self._right_toggle_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self._right_toggle_button.clicked.connect(lambda *_: self._toggle_right_panel())
+        self.right_panel.tabs.setCornerWidget(self._right_toggle_button, Qt.TopRightCorner)
+        self.right_panel_container = QWidget()
+        self._right_panel_stack = QStackedLayout(self.right_panel_container)
+        self._right_panel_stack.setContentsMargins(0, 0, 0, 0)
+        self._right_panel_stack.addWidget(self.right_panel)
+        self._right_panel_stack.addWidget(self.right_minibar)
+        self._right_panel_stack.setCurrentWidget(self.right_panel)
+        self._refresh_right_minibar_tabs()
+        self._sync_right_minibar_selection(self.right_panel.tabs.currentIndex())
         self._inline_editor: Optional[InlineNameEdit] = None
         self._pending_selection: Optional[str] = None
         self._suspend_autosave = False
@@ -1093,7 +1117,7 @@ class MainWindow(QMainWindow):
 
         self.editor_split = QSplitter()
         self.editor_split.addWidget(editor_container)
-        self.editor_split.addWidget(self.right_panel)
+        self.editor_split.addWidget(self.right_panel_container)
         self.editor_split.setChildrenCollapsible(False)
         self.editor_split.setHandleWidth(8)
         # Allow the editor to shrink enough so the right panel can expand comfortably
@@ -1106,6 +1130,11 @@ class MainWindow(QMainWindow):
         # Create left panel with tabs for Vault, Tags, and Search
         self.left_tab_widget = QTabWidget()
         self.left_tab_widget.setMinimumWidth(80)
+        self._left_toggle_button = QToolButton()
+        self._left_toggle_button.setAutoRaise(True)
+        self._left_toggle_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self._left_toggle_button.clicked.connect(lambda *_: self._toggle_left_panel())
+        self.left_tab_widget.setCornerWidget(self._left_toggle_button, Qt.TopRightCorner)
         
         # Vault tab (tree with header)
         vault_tab = QWidget()
@@ -1128,9 +1157,25 @@ class MainWindow(QMainWindow):
         self.search_tab.pageNavigationRequested.connect(self._on_search_result_selected)
         self.search_tab.pageNavigationWithEditorFocusRequested.connect(self._on_search_result_selected_with_editor_focus)
         self.left_tab_widget.addTab(self.search_tab, "Search")
+
+        self.left_minibar, self._left_minibar_bar, self._left_minibar_toggle = self._build_minibar(
+            ["Vault", "Tags", "Search"],
+            side="left",
+        )
+        self._left_minibar_bar.tabBarClicked.connect(self._expand_left_from_minibar)
+        self._left_minibar_toggle.clicked.connect(lambda *_: self._set_left_panel_collapsed(False))
+        self.left_tab_widget.currentChanged.connect(self._sync_left_minibar_selection)
+        self.left_panel_container = QWidget()
+        self._left_panel_stack = QStackedLayout(self.left_panel_container)
+        self._left_panel_stack.setContentsMargins(0, 0, 0, 0)
+        self._left_panel_stack.addWidget(self.left_tab_widget)
+        self._left_panel_stack.addWidget(self.left_minibar)
+        self._left_panel_stack.setCurrentWidget(self.left_tab_widget)
+        self._sync_left_minibar_selection(self.left_tab_widget.currentIndex())
+        self._update_sidebar_toggle_icons()
         
         self.main_splitter = QSplitter()
-        self.main_splitter.addWidget(self.left_tab_widget)
+        self.main_splitter.addWidget(self.left_panel_container)
         self.main_splitter.addWidget(self.editor_split)
         self.main_splitter.setStretchFactor(1, 5)
         self.main_splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -2926,9 +2971,8 @@ class MainWindow(QMainWindow):
             print(f"[Geometry] Saved editor splitter state: {len(editor_splitter_state)} chars")
         # Save panel visibility
         try:
-            left_visible = self.main_splitter.sizes()[0] > 0
-            right_sizes = self.editor_split.sizes()
-            right_visible = self.right_panel.isVisible() and (len(right_sizes) >= 2 and right_sizes[1] > 0)
+            left_visible = self._is_left_panel_expanded()
+            right_visible = self._is_right_panel_expanded()
             config.save_panel_visibility(left_visible, right_visible)
         except Exception:
             pass
@@ -2992,18 +3036,9 @@ class MainWindow(QMainWindow):
         right_visible = vis.get("right", True)
         try:
             if not left_visible:
-                sizes = self.main_splitter.sizes()
-                if sizes:
-                    self._saved_left_width = sizes[0]
-                total = sum(sizes) or max(1, self.main_splitter.width())
-                self.main_splitter.setSizes([0, total])
+                self._set_left_panel_collapsed(True)
             if not right_visible:
-                sizes = self.editor_split.sizes()
-                if sizes:
-                    self._saved_right_width = sizes[1] if len(sizes) > 1 else getattr(self, "_saved_right_width", 360)
-                total = sum(sizes) or max(1, self.editor_split.width())
-                self.right_panel.hide()
-                self.editor_split.setSizes([total, 0])
+                self._set_right_panel_collapsed(True)
         except Exception:
             pass
 
@@ -3030,6 +3065,11 @@ class MainWindow(QMainWindow):
         try:
             self.main_splitter.setSizes([240, max(500, self.width() - 260)])
             self.editor_split.setSizes([760, 320])
+        except Exception:
+            pass
+        try:
+            self._set_left_panel_collapsed(False)
+            self._set_right_panel_collapsed(False)
         except Exception:
             pass
         self.statusBar().showMessage("View layout reset to defaults", 4000)
@@ -3509,9 +3549,8 @@ class MainWindow(QMainWindow):
     def _save_panel_visibility(self) -> None:
         """Persist current left/right panel visibility to config."""
         try:
-            left_visible = self.main_splitter.sizes()[0] > 0
-            right_sizes = self.editor_split.sizes()
-            right_visible = self.right_panel.isVisible() and (len(right_sizes) >= 2 and right_sizes[1] > 0)
+            left_visible = self._is_left_panel_expanded()
+            right_visible = self._is_right_panel_expanded()
             config.save_panel_visibility(left_visible, right_visible)
         except Exception:
             pass
@@ -5171,6 +5210,7 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.Accepted:
             self._apply_vi_preferences()
             self.right_panel.set_ai_enabled(config.load_enable_ai_chats())
+            self._refresh_right_minibar_tabs()
             self.editor.set_ai_actions_enabled(config.load_enable_ai_chats())
             # Apply vault read-only preference immediately
             self._apply_vault_read_only_pref()
@@ -5780,52 +5820,165 @@ class MainWindow(QMainWindow):
         if delta:
             sb.setValue(max(sb.minimum(), min(sb.maximum(), sb.value() + delta)))
 
+    def _build_minibar(self, labels: list[str], *, side: str) -> tuple[QWidget, QTabBar, QToolButton]:
+        toggle = QToolButton()
+        toggle.setAutoRaise(True)
+        toggle.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        toggle.setFocusPolicy(Qt.NoFocus)
+        toggle.setToolTip("Show sidebar")
+        bar = QTabBar()
+        bar.setDocumentMode(True)
+        bar.setExpanding(False)
+        bar.setUsesScrollButtons(False)
+        bar.setFocusPolicy(Qt.NoFocus)
+        bar.setElideMode(Qt.ElideNone)
+        bar.setShape(QTabBar.RoundedWest if side == "left" else QTabBar.RoundedEast)
+        for label in labels:
+            bar.addTab(label)
+        bar.setStyleSheet(
+            "QTabBar::tab { padding: 6px 10px; margin: 2px 0; }"
+            "QTabBar::tab:selected { background: #2b2b2b; color: #fff; }"
+            "QTabBar::tab:!selected { color: #c0c0c0; }"
+        )
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.setAlignment(Qt.AlignTop)
+        layout.addWidget(toggle)
+        layout.addWidget(bar)
+        wrapper.setFixedWidth(self._minibar_width)
+        return wrapper, bar, toggle
+
+    def _sidebar_toggle_icon(self, collapsed: bool) -> Optional[QIcon]:
+        icon_name = "show-sidebar.svg" if collapsed else "hide-sidebar.svg"
+        return self._load_icon(self._find_asset(icon_name), Qt.white, size=16)
+
+    def _update_sidebar_toggle_icons(self) -> None:
+        if not hasattr(self, "_left_panel_stack") or not hasattr(self, "_right_panel_stack"):
+            return
+        left_collapsed = not self._is_left_panel_expanded()
+        right_collapsed = not self._is_right_panel_expanded()
+        left_icon = self._sidebar_toggle_icon(left_collapsed)
+        right_icon = self._sidebar_toggle_icon(not right_collapsed)
+        if self._left_toggle_button and left_icon:
+            self._left_toggle_button.setIcon(left_icon)
+            self._left_toggle_button.setToolTip("Show sidebar" if left_collapsed else "Hide sidebar")
+        if self._left_minibar_toggle and left_icon:
+            self._left_minibar_toggle.setIcon(left_icon)
+            self._left_minibar_toggle.setToolTip("Show sidebar" if left_collapsed else "Hide sidebar")
+        if self._right_toggle_button and right_icon:
+            self._right_toggle_button.setIcon(right_icon)
+            self._right_toggle_button.setToolTip("Show sidebar" if right_collapsed else "Hide sidebar")
+        if self._right_minibar_toggle and right_icon:
+            self._right_minibar_toggle.setIcon(right_icon)
+            self._right_minibar_toggle.setToolTip("Show sidebar" if right_collapsed else "Hide sidebar")
+
+    def _right_minibar_labels(self) -> list[str]:
+        labels: list[str] = []
+        for i in range(self.right_panel.tabs.count()):
+            label = self.right_panel.tabs.tabText(i) or ""
+            if label.endswith(")") and "(" in label:
+                label = label.rsplit("(", 1)[0].strip()
+            labels.append(label or "Tab")
+        return labels
+
+    def _sync_left_minibar_selection(self, index: int) -> None:
+        if not self._left_minibar_bar:
+            return
+        blocker = QSignalBlocker(self._left_minibar_bar)
+        self._left_minibar_bar.setCurrentIndex(index)
+        del blocker
+
+    def _sync_right_minibar_selection(self, index: int) -> None:
+        if not self._right_minibar_bar:
+            return
+        blocker = QSignalBlocker(self._right_minibar_bar)
+        self._right_minibar_bar.setCurrentIndex(index)
+        del blocker
+
+    def _refresh_right_minibar_tabs(self) -> None:
+        if not self._right_minibar_bar:
+            return
+        blocker = QSignalBlocker(self._right_minibar_bar)
+        while self._right_minibar_bar.count() > 0:
+            self._right_minibar_bar.removeTab(0)
+        for label in self._right_minibar_labels():
+            self._right_minibar_bar.addTab(label)
+        self._right_minibar_bar.setCurrentIndex(self.right_panel.tabs.currentIndex())
+        del blocker
+
+    def _expand_left_from_minibar(self, index: int) -> None:
+        self.left_tab_widget.setCurrentIndex(index)
+        self._set_left_panel_collapsed(False)
+
+    def _expand_right_from_minibar(self, index: int) -> None:
+        self.right_panel.tabs.setCurrentIndex(index)
+        self._set_right_panel_collapsed(False)
+
+    def _is_left_panel_expanded(self) -> bool:
+        return self._left_panel_stack.currentWidget() == self.left_tab_widget
+
+    def _is_right_panel_expanded(self) -> bool:
+        return self._right_panel_stack.currentWidget() == self.right_panel
+
+    def _set_left_panel_collapsed(self, collapsed: bool) -> None:
+        sizes = self.main_splitter.sizes()
+        total = sum(sizes) or max(1, self.main_splitter.width())
+        if collapsed:
+            if self._is_left_panel_expanded():
+                self._saved_left_width = sizes[0] if sizes else getattr(self, "_saved_left_width", 240)
+            self._left_panel_stack.setCurrentWidget(self.left_minibar)
+            self.left_panel_container.setFixedWidth(self._minibar_width)
+            self.main_splitter.setSizes([self._minibar_width, max(1, total - self._minibar_width)])
+        else:
+            self._left_panel_stack.setCurrentWidget(self.left_tab_widget)
+            self.left_panel_container.setMinimumWidth(self.left_tab_widget.minimumWidth())
+            self.left_panel_container.setMaximumWidth(16777215)
+            width = getattr(self, "_saved_left_width", 240)
+            self.main_splitter.setSizes([width, max(1, total - width)])
+        self._update_sidebar_toggle_icons()
+
+    def _set_right_panel_collapsed(self, collapsed: bool) -> None:
+        sizes = self.editor_split.sizes()
+        total = sum(sizes) or max(1, self.editor_split.width())
+        if collapsed:
+            if self._is_right_panel_expanded():
+                self._saved_right_width = sizes[1] if len(sizes) > 1 else getattr(self, "_saved_right_width", 360)
+            self._right_panel_stack.setCurrentWidget(self.right_minibar)
+            self.right_panel_container.setFixedWidth(self._minibar_width)
+            self.editor_split.setSizes([max(1, total - self._minibar_width), self._minibar_width])
+        else:
+            self._right_panel_stack.setCurrentWidget(self.right_panel)
+            self.right_panel_container.setMinimumWidth(self._minibar_width)
+            self.right_panel_container.setMaximumWidth(16777215)
+            width = getattr(self, "_saved_right_width", 360)
+            self.editor_split.setSizes([max(1, total - width), max(0, width)])
+        self._update_sidebar_toggle_icons()
+
     def _toggle_left_panel(self) -> None:
         """Show/hide the navigation (tree) panel."""
-        is_visible = self.main_splitter.sizes()[0] > 0
-        if is_visible:
-            self._saved_left_width = self.main_splitter.sizes()[0]
-            self.main_splitter.setSizes([0, sum(self.main_splitter.sizes())])
-        else:
-            width = getattr(self, "_saved_left_width", 240)
-            total = sum(self.main_splitter.sizes())
-            self.main_splitter.setSizes([width, max(1, total - width)])
+        self._set_left_panel_collapsed(self._is_left_panel_expanded())
         self._save_panel_visibility()
 
     def _toggle_right_panel(self) -> None:
         """Show/hide the right tabbed panel."""
-        sizes = self.editor_split.sizes()
-        is_visible = self.right_panel.isVisible() and len(sizes) >= 2 and sizes[1] > 0
-        if is_visible:
-            self._saved_right_width = sizes[1]
-            self.right_panel.hide()
-            self.editor_split.setSizes([sum(sizes), 0])
-            # Give focus back to editor when hiding the right panel
+        collapsing = self._is_right_panel_expanded()
+        self._set_right_panel_collapsed(collapsing)
+        if collapsing:
             self.editor.setFocus(Qt.OtherFocusReason)
-        else:
-            self.right_panel.show()
-            width = getattr(self, "_saved_right_width", 360)
-            total = sum(sizes) or max(1, self.editor_split.width())
-            self.editor_split.setSizes([max(1, total - width), max(0, width)])
         self._save_panel_visibility()
 
     def _ensure_left_panel_visible(self) -> None:
         """Ensure the left navigation panel is visible (used before showing search/tags)."""
-        sizes = self.main_splitter.sizes()
-        if sizes and sizes[0] == 0:
-            width = getattr(self, "_saved_left_width", 240)
-            total = sum(sizes) or max(1, self.main_splitter.width())
-            self.main_splitter.setSizes([width, max(1, total - width)])
+        if not self._is_left_panel_expanded():
+            self._set_left_panel_collapsed(False)
             self._save_panel_visibility()
 
     def _ensure_right_panel_visible(self) -> None:
         """Ensure the right panel is visible (used before showing link/AI panes)."""
-        sizes = self.editor_split.sizes()
-        if len(sizes) >= 2 and sizes[1] == 0:
-            self.right_panel.show()
-            width = getattr(self, "_saved_right_width", 360)
-            total = sum(sizes) or max(1, self.editor_split.width())
-            self.editor_split.setSizes([max(1, total - width), max(0, width)])
+        if not self._is_right_panel_expanded():
+            self._set_right_panel_collapsed(False)
             self._save_panel_visibility()
 
     def _open_link_in_context(self, link: str, force: bool = False, refresh_only: bool = False) -> None:
@@ -6448,15 +6601,7 @@ class MainWindow(QMainWindow):
                     pass
         
         # No external window - ensure right panel is visible if hidden
-        sizes = self.editor_split.sizes()
-        if len(sizes) >= 2 and sizes[1] == 0:
-            width = getattr(self, "_saved_right_width", 360)
-            total = sum(sizes)
-            self.editor_split.setSizes([max(1, total - width), width])
-        
-        # Ensure right panel widget is visible
-        if not self.right_panel.isVisible():
-            self.right_panel.setVisible(True)
+        self._ensure_right_panel_visible()
         
         # Switch to Tasks tab (this will trigger _focus_current_tab but that's OK)
         self.right_panel.tabs.setCurrentIndex(0)
@@ -8388,11 +8533,8 @@ class MainWindow(QMainWindow):
                 pass
 
     def _toc_jump_to_position(self, position: int) -> None:
-        if sys.platform.startswith("win"):
-            self._queue_toc_jump(position, attempt=0, flash=False)
-        else:
-            cursor = self._cursor_at_position(max(0, position))
-            self._scroll_cursor_to_top_quarter(cursor, animate=True, flash=False)
+        cursor = self._cursor_at_position(max(0, position))
+        self._animate_or_flash_to_cursor(cursor)
         QTimer.singleShot(180, lambda: self.editor.setFocus(Qt.OtherFocusReason))
 
     def _queue_toc_jump(self, position: int, attempt: int = 0, flash: bool = True) -> None:
