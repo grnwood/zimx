@@ -6307,7 +6307,14 @@ class MarkdownEditor(QTextEdit):
                 cursor.setPosition(pos)
                 fmt = cursor.charFormat()
                 if fmt.isImageFormat():
-                    parts.append(self._markdown_from_image_format(fmt.toImageFormat()))
+                    img_md = self._markdown_from_image_format(fmt.toImageFormat())
+                    # If the markdown tag is still in the document right after the image
+                    # object, skip the duplicate text to keep saves stable.
+                    if text.startswith(img_md, pos + 1):
+                        parts.append(img_md)
+                        pos += 1 + len(img_md)
+                        continue
+                    parts.append(img_md)
                 pos += 1
                 continue
             parts.append(ch)
