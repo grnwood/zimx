@@ -4979,7 +4979,7 @@ class MarkdownEditor(QTextEdit):
                 self._delete_link_at_position(cursor, rel_pos)
                 return
             # Check if we're right after a link's closing sentinel
-            if rel_pos > 0 and text[rel_pos - 1] == LINK_SENTINEL:
+            if rel_pos > 0 and (rel_pos - 1) < len(text) and text[rel_pos - 1] == LINK_SENTINEL:
                 # Find if this is a closing sentinel of a link
                 self._delete_link_at_position(cursor, rel_pos - 1)
                 return
