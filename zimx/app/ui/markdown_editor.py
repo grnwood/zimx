@@ -6286,7 +6286,7 @@ class MarkdownEditor(QTextEdit):
         """
         import time
         delay_ms = (time.perf_counter() - scheduled_at) * 1000.0 if scheduled_at else 0.0
-        matches: list[tuple[int, int, str, str, Optional[str]]] = []
+        matches: list[tuple[int, int, str, str, Optional[str], str]] = []
         qt_pattern = QRegularExpression(r"!\[[^\]]*\]\([^\)\s]+\)(?:\{width=\d+\})?")
         doc = self.document()
         cursor = QTextCursor(doc)
@@ -6298,21 +6298,25 @@ class MarkdownEditor(QTextEdit):
             selected = cursor.selectedText().replace("\u2029", "\n")
             match = IMAGE_PATTERN.search(selected)
             if match:
+                utf16_sel = _utf16_positions(selected)
+                start_pos = cursor.selectionStart() + utf16_sel[match.start()]
+                end_pos = cursor.selectionStart() + utf16_sel[match.end()]
                 matches.append(
                     (
-                        cursor.selectionStart(),
-                        cursor.selectionEnd(),
+                        start_pos,
+                        end_pos,
                         match.group("path"),
                         match.group("alt") or "",
                         match.group("width"),
+                        selected,
                     )
                 )
             cursor.setPosition(cursor.selectionEnd())
         if sys.platform == "win32" and os.getenv("ZIMX_WIN_IMAGE_DEBUG", "0") not in ("0", "false", "False", ""):
             sample = matches[:5]
             print(f"[ZimX][WIN_IMAGE_DEBUG] matches={len(matches)} sample_count={len(sample)}")
-            for idx, (start_pos, end_pos, path, alt, width) in enumerate(sample, start=1):
-                snippet = display_text[start_pos:end_pos].replace("\u2029", "\\n")
+            for idx, (start_pos, end_pos, path, alt, width, selected) in enumerate(sample, start=1):
+                snippet = selected.replace("\u2029", "\\n")
                 if len(snippet) > 120:
                     snippet = snippet[:120] + "..."
                 print(
@@ -6334,7 +6338,7 @@ class MarkdownEditor(QTextEdit):
         cursor = self.textCursor()
         cursor.beginEditBlock()
         try:
-            for idx, (start_pos, end_pos, path, alt, width) in enumerate(reversed(matches)):
+            for idx, (start_pos, end_pos, path, alt, width, _) in enumerate(reversed(matches)):
                 t_img_start = time.perf_counter()
                 cursor.setPosition(start_pos)
                 cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
