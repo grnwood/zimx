@@ -1861,9 +1861,13 @@ class MarkdownEditor(QTextEdit):
         # Convert +CamelCase links to colon-style links before saving
         markdown = self._convert_camelcase_links(markdown)
         result = self._from_display(markdown)
+        # Guard against QTextDocument fragment drift: if the doc-derived markdown
+        # doesn't match the display-derived markdown, prefer the display path.
+        baseline = self._from_display(self.toPlainText())
+        if result != baseline:
+            result = baseline
         if sys.platform == "win32" and os.getenv("ZIMX_WIN_TRUNC_DEBUG", "0") not in ("0", "false", "False", ""):
             display_text = self.toPlainText()
-            baseline = self._from_display(display_text)
             def _tail(text: str) -> str:
                 tail = text.replace("\u2029", "\n")
                 return tail[-200:] if len(tail) > 200 else tail
