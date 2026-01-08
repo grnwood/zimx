@@ -4734,7 +4734,9 @@ class MainWindow(QMainWindow):
 
     def _on_editor_focus_lost(self) -> None:
         """Handle editor focus loss - save if not moving to right panel."""
-        self._exit_vi_insert_on_activate()
+        # Note: We do NOT exit vi insert mode here because focus can be lost
+        # when alt-tabbing or clicking outside the app. Vi mode should only
+        # exit on explicit navigation within the app (handled in navigation methods).
         # Check where focus is going
         from PySide6.QtWidgets import QApplication
         new_focus = QApplication.focusWidget()
@@ -8498,8 +8500,8 @@ class MainWindow(QMainWindow):
         return result
 
     def _heading_popup_candidates(self) -> list[dict]:
-        """Return headings for current page."""
-        return [h for h in self._toc_headings if h]
+        """Return headings for current page (excluding horizontal rules)."""
+        return [h for h in self._toc_headings if h and h.get("type") != "hr"]
 
     def _ensure_history_popup(self) -> None:
         if self._history_popup is None:
@@ -8654,6 +8656,10 @@ class MainWindow(QMainWindow):
     def _update_toc_visibility(self, force: bool = False) -> None:
         """Show/hide/refresh the ToC based on headings and scrollability."""
         if not self.toc_widget:
+            return
+        # Check if TOC widget is enabled in preferences
+        if not config.load_toc_widget_enabled():
+            self.toc_widget.hide()
             return
         scrollbar = self.editor.verticalScrollBar()
         scrollable = scrollbar and scrollbar.maximum() > 0

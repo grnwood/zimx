@@ -84,8 +84,18 @@ class PreferencesDialog(QDialog):
             self.stack.addWidget(page)
             return layout
 
+        # General
+        general_layout = add_section("General")
+        general_layout.addWidget(QLabel("<b>Markdown Editor</b>"))
+        self.toc_widget_checkbox = QCheckBox("Enable TOC Widget")
+        self.toc_widget_checkbox.setChecked(config.load_toc_widget_enabled())
+        self.toc_widget_checkbox.setToolTip("Show floating transparent Heading navigator in editor")
+        general_layout.addWidget(self.toc_widget_checkbox)
+        general_layout.addStretch(1)
+
         # Modes
         modes_layout = add_section("Modes")
+        modes_layout.addWidget(QLabel("<b>VI Mode</b>"))
         self.vi_enable_checkbox = QCheckBox("Enable Vi Mode")
         self.vi_enable_checkbox.setChecked(config.load_vi_mode_enabled())
         self.vi_enable_checkbox.setToolTip("Turn on vi-style navigation keys in the Markdown editor.")
@@ -607,6 +617,7 @@ class PreferencesDialog(QDialog):
     
     def accept(self):
         """Save preferences when OK is clicked."""
+        config.save_toc_widget_enabled(self.toc_widget_checkbox.isChecked())
         config.save_vi_mode_enabled(self.vi_enable_checkbox.isChecked())
         config.save_vi_block_cursor_enabled(self.vi_block_cursor_checkbox.isChecked())
         app_font = self._font_value(self.application_font_combo)

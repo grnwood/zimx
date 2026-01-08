@@ -108,10 +108,11 @@ class TableOfContentsWidget(QFrame):
         parents: dict[int, QTreeWidgetItem] = {0: self.tree.invisibleRootItem()}
         for entry in self._headings:
             if entry.get("type") == "hr":
-                item = QTreeWidgetItem(["----------------"])
+                item = QTreeWidgetItem(["─" * 100])  # Use Unicode line character, make it very long
                 item.setFlags(Qt.ItemFlag.NoItemFlags)
-                item.setTextAlignment(0, Qt.AlignmentFlag.AlignCenter)
+                item.setTextAlignment(0, Qt.AlignmentFlag.AlignLeft)  # Left align so it extends fully
                 item.setForeground(0, QColor("#555555"))
+                item.setBackground(0, QColor("#333333"))  # Match editor background
                 self.tree.invisibleRootItem().addChild(item)
                 continue
             level = int(entry.get("level", 1))

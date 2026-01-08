@@ -826,6 +826,22 @@ def save_toc_collapsed(collapsed: bool) -> None:
     _update_global_config({"toc_collapsed": bool(collapsed)})
 
 
+def load_toc_widget_enabled() -> bool:
+    """Return whether the TOC widget should be enabled."""
+    if not GLOBAL_CONFIG.exists():
+        return True  # Default to enabled
+    try:
+        payload = json.loads(GLOBAL_CONFIG.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return True
+    return bool(payload.get("toc_widget_enabled", True))
+
+
+def save_toc_widget_enabled(enabled: bool) -> None:
+    """Persist the TOC widget enabled state."""
+    _update_global_config({"toc_widget_enabled": bool(enabled)})
+
+
 def get_page_hash(path: str) -> Optional[str]:
     """Return last stored content hash for a page path, or None."""
     conn = _get_conn()
