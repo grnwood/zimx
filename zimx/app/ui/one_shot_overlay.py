@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtGui import QDesktopServices, QIcon, QKeyEvent, QPalette, QTextCursor
+from PySide6.QtGui import QDesktopServices, QIcon, QKeyEvent, QPalette, QTextCursor, QFont, QFontDatabase, QColor
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -20,6 +20,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from markdown import markdown
+import platform
+
+from zimx.app import config
 
 
 class OneShotChatInput(QTextEdit):
@@ -100,6 +103,7 @@ class OneShotPromptOverlay(QDialog):
         self._model = model
         self._system_prompt = system_prompt
         self._on_accept = on_accept
+        self._font_family = config.load_ai_chat_font_family() or self._default_chat_font_family()
 
         self._worker = None
         self._streaming = False
@@ -118,6 +122,30 @@ class OneShotPromptOverlay(QDialog):
         self._render_timer.timeout.connect(self._render)
 
         self._build_ui()
+
+    def _default_chat_font_family(self) -> str:
+        if platform.system() != "Windows":
+            return ""
+        families = {f.lower(): f for f in QFontDatabase().families()}
+        for candidate in ("Segoe UI Variable", "Segoe UI"):
+            picked = families.get(candidate.lower())
+            if picked:
+                return picked
+        return ""
+
+    def _apply_font(self) -> None:
+        font = QFont()
+        if self._font_family:
+            font.setFamily(self._font_family)
+        font.setPointSize(12)
+        try:
+            self.chat_view.document().setDefaultFont(font)
+        except Exception:
+            pass
+        try:
+            self.input.setFont(font)
+        except Exception:
+            pass
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -160,10 +188,8 @@ class OneShotPromptOverlay(QDialog):
             "  border: 1px solid #1f1f1f;"
             "  border-radius: 10px;"
             "  padding: 8px;"
-            "  font-size: 12px;"
             "  background: #0b0b0b;"
             "  color: #d6f5d6;"
-            "  font-family: \"Courier New\", monospace;"
             "}"
         )
         layout.addWidget(self.chat_view, 1)
@@ -172,7 +198,6 @@ class OneShotPromptOverlay(QDialog):
         self.input = OneShotChatInput(self)
         self.input.setFixedHeight(54)
         self.input.setStyleSheet(
-            "font-size: 12px;"
             " padding: 6px;"
             " background: #111;"
             " color: #d6f5d6;"
@@ -198,6 +223,7 @@ class OneShotPromptOverlay(QDialog):
             "QFrame#OneShotCard { background: #0b0b0b; border-radius: 14px; }"
         )
         self.resize(680, 480)
+        self._apply_font()
 
     def open_with_selection(self, selected_text: str) -> None:
         selected_text = (selected_text or "").strip()
