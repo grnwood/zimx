@@ -265,7 +265,7 @@ class PreferencesDialog(QDialog):
 
         row_fonts_ai = QHBoxLayout()
         row_fonts_ai.addWidget(QLabel("AI chat font:"))
-        self.ai_chat_font_combo = self._build_font_combo("VS Code default")
+        self.ai_chat_font_combo = self._build_font_combo("default")
         try:
             ai_font = config.load_ai_chat_font_family()
         except Exception:
