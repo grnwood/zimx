@@ -546,6 +546,26 @@ def save_ai_chat_font_family(font: Optional[str]) -> None:
     _update_global_config({"ai_chat_font_family": value})
 
 
+def load_one_shot_font_size(default: int = 12) -> int:
+    """Load preferred font size for the One-Shot overlay (global)."""
+    payload = _read_global_config()
+    try:
+        size = int(payload.get("one_shot_font_size", default))
+        return max(6, min(24, size))
+    except Exception:
+        return default
+
+
+def save_one_shot_font_size(size: int) -> None:
+    """Persist preferred font size for the One-Shot overlay (global)."""
+    try:
+        val = int(size)
+    except Exception:
+        val = 12
+    val = max(6, min(24, val))
+    _update_global_config({"one_shot_font_size": val})
+
+
 def load_enable_ai_chats() -> bool:
     """Load preference for enabling AI Chats tab. Defaults to False."""
     if not GLOBAL_CONFIG.exists():

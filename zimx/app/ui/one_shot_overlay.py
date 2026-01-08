@@ -104,6 +104,7 @@ class OneShotPromptOverlay(QDialog):
         self._system_prompt = system_prompt
         self._on_accept = on_accept
         self._font_family = config.load_ai_chat_font_family() or self._default_chat_font_family()
+        self._font_size = config.load_one_shot_font_size(12)
 
         self._worker = None
         self._streaming = False
@@ -137,15 +138,23 @@ class OneShotPromptOverlay(QDialog):
         font = QFont()
         if self._font_family:
             font.setFamily(self._font_family)
-        font.setPointSize(12)
+        font.setPointSize(self._font_size)
         try:
             self.chat_view.document().setDefaultFont(font)
         except Exception:
             pass
         try:
             self.input.setFont(font)
+            metrics = self.input.fontMetrics()
+            line_height = metrics.lineSpacing()
+            self.input.setFixedHeight(line_height * 2 + 6)
         except Exception:
             pass
+
+    def _set_font_size(self, size: int) -> None:
+        self._font_size = max(6, min(24, int(size)))
+        self._apply_font()
+        config.save_one_shot_font_size(self._font_size)
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -206,6 +215,18 @@ class OneShotPromptOverlay(QDialog):
         self.input.sendRequested.connect(self._send_input)
         self.input.acceptRequested.connect(self._accept_last_message)
         input_row.addWidget(self.input, 1)
+        self.zoom_out_btn = QToolButton(self)
+        self.zoom_out_btn.setToolTip("Smaller text")
+        self.zoom_out_btn.setText("-")
+        self.zoom_out_btn.setFixedSize(32, 32)
+        self.zoom_out_btn.clicked.connect(lambda: self._set_font_size(self._font_size - 1))
+        input_row.addWidget(self.zoom_out_btn)
+        self.zoom_in_btn = QToolButton(self)
+        self.zoom_in_btn.setToolTip("Larger text")
+        self.zoom_in_btn.setText("+")
+        self.zoom_in_btn.setFixedSize(32, 32)
+        self.zoom_in_btn.clicked.connect(lambda: self._set_font_size(self._font_size + 1))
+        input_row.addWidget(self.zoom_in_btn)
         self.send_btn = QToolButton(self)
         self.send_btn.setToolTip("Send (Ctrl+Enter)")
         icon_path = _find_asset("send-message.svg")
