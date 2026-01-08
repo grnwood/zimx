@@ -5212,6 +5212,8 @@ class MainWindow(QMainWindow):
             self.right_panel.set_ai_enabled(config.load_enable_ai_chats())
             self._refresh_right_minibar_tabs()
             self.editor.set_ai_actions_enabled(config.load_enable_ai_chats())
+            if self.right_panel.ai_chat_panel:
+                self.right_panel.ai_chat_panel.set_font_family(config.load_ai_chat_font_family())
             # Apply vault read-only preference immediately
             self._apply_vault_read_only_pref()
             try:
@@ -8787,13 +8789,17 @@ class MainWindow(QMainWindow):
         if new_idx == idx:
             return
         target = indexes[new_idx]
-        self.tree_view.setCurrentIndex(target)
-        self.tree_view.scrollTo(target)
+        self._suspend_selection_open = True
+        try:
+            self.tree_view.setCurrentIndex(target)
+            self.tree_view.scrollTo(target)
+        finally:
+            self._suspend_selection_open = False
         
         # Open the page for this node (whether folder or file)
         open_target = target.data(OPEN_ROLE) or target.data(PATH_ROLE)
         if open_target and open_target != self.current_path:
-            self._open_file(open_target)
+            QTimer.singleShot(0, lambda p=open_target: self._open_file(p))
 
     def _rebuild_vault_index_from_disk(self) -> None:
         """Drop and rebuild vault index from source files, preserving bookmarks/kv/ai tables."""

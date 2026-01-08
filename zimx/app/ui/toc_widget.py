@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Iterable
 
 from PySide6.QtCore import QPoint, Qt, Signal, QPropertyAnimation
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -107,6 +107,13 @@ class TableOfContentsWidget(QFrame):
         self.tree.clear()
         parents: dict[int, QTreeWidgetItem] = {0: self.tree.invisibleRootItem()}
         for entry in self._headings:
+            if entry.get("type") == "hr":
+                item = QTreeWidgetItem(["----------------"])
+                item.setFlags(Qt.ItemFlag.NoItemFlags)
+                item.setTextAlignment(0, Qt.AlignmentFlag.AlignCenter)
+                item.setForeground(0, QColor("#555555"))
+                self.tree.invisibleRootItem().addChild(item)
+                continue
             level = int(entry.get("level", 1))
             level = max(1, min(5, level))
             text = entry.get("title") or "(untitled heading)"
@@ -159,6 +166,8 @@ class TableOfContentsWidget(QFrame):
     def _on_item_activated(self, item: QTreeWidgetItem) -> None:
         if not item:
             return
+        if item.flags() == Qt.ItemFlag.NoItemFlags:
+            return
         data = item.data(0, Qt.ItemDataRole.UserRole)
         if not data:
             return
@@ -168,6 +177,8 @@ class TableOfContentsWidget(QFrame):
     def _show_context_menu(self, pos: QPoint) -> None:
         item = self.tree.itemAt(pos)
         if not item:
+            return
+        if item.flags() == Qt.ItemFlag.NoItemFlags:
             return
         data = item.data(0, Qt.ItemDataRole.UserRole)
         if not data:

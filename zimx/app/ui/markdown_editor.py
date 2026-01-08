@@ -1512,7 +1512,7 @@ class MarkdownEditor(QTextEdit):
 
     def paintEvent(self, event):  # type: ignore[override]
         """Custom paint to draw horizontal rules as visual lines."""
-        if sys.platform.startswith("win"):
+        if os.getenv("ZIMX_DISABLE_HR_OVERLAY", "0") not in ("0", "false", "False", ""):
             super().paintEvent(event)
             return
         if self._suppress_paint or self._suppress_paint_depth:
@@ -1561,7 +1561,7 @@ class MarkdownEditor(QTextEdit):
                         break
                     if not self._is_alive(document) or not self._is_alive(layout):
                         break
-                    if block.text().strip() == "---":
+                    if block.text().strip() in ("---", "***", "___"):
                         try:
                             br = layout.blockBoundingRect(block)
                         except RuntimeError as exc:
@@ -5424,6 +5424,18 @@ class MarkdownEditor(QTextEdit):
         while block.isValid():
             text = block.text()
             stripped = text.lstrip()
+            if stripped.strip() in ("---", "***", "___"):
+                outline.append(
+                    {
+                        "level": 1,
+                        "title": "---",
+                        "line": block.blockNumber() + 1,
+                        "position": block.position(),
+                        "type": "hr",
+                    }
+                )
+                block = block.next()
+                continue
             if stripped:
                 level = heading_level_from_char(stripped[0])
                 title = None

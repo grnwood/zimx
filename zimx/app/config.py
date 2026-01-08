@@ -531,6 +531,21 @@ def save_ai_chat_font_size(size: int) -> None:
     _update_global_config({"ai_chat_font_size": val})
 
 
+def load_ai_chat_font_family() -> Optional[str]:
+    """Load preferred font family for AI chat panel (global)."""
+    payload = _read_global_config()
+    font = payload.get("ai_chat_font_family")
+    if isinstance(font, str) and font.strip():
+        return font.strip()
+    return None
+
+
+def save_ai_chat_font_family(font: Optional[str]) -> None:
+    """Persist preferred font family for AI chat panel (global)."""
+    value = font.strip() if isinstance(font, str) and font.strip() else None
+    _update_global_config({"ai_chat_font_family": value})
+
+
 def load_enable_ai_chats() -> bool:
     """Load preference for enabling AI Chats tab. Defaults to False."""
     if not GLOBAL_CONFIG.exists():

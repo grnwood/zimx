@@ -1164,6 +1164,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self.system_prompts_tree: dict = {}
         self.current_system_prompt = None
         self.font_size = config.load_panel_font_size("ai_chat_font_size", font_size)
+        self.font_family = config.load_ai_chat_font_family() or self._default_chat_font_family()
         self.condense_prompt = self._load_condense_prompt()
         self._condense_buffer = ""
         self._summary_content = None
@@ -1350,7 +1351,6 @@ class AIChatPanel(QtWidgets.QWidget):
             "  background: #0b0b0b;"
             "  color: #d6f5d6;"
             "  border: 1px solid #1f1f1f;"
-            "  font-family: \"Courier New\", monospace;"
             "}"
         )
         self.chat_view.installEventFilter(self)
@@ -3400,15 +3400,41 @@ class AIChatPanel(QtWidgets.QWidget):
     def get_font_size(self) -> int:
         return self.font_size
 
+    def set_font_family(self, family: str | None) -> None:
+        self.font_family = family or ""
+        self._apply_font_size()
+        config.save_ai_chat_font_family(family)
+
     def _apply_font_size(self) -> None:
         from PySide6.QtGui import QFont
 
         font = QFont()
+        if self.font_family:
+            font.setFamily(self.font_family)
         font.setPointSize(self.font_size)
         if hasattr(self, "chat_view"):
             self.chat_view.document().setDefaultFont(font)
         if hasattr(self, "input_edit"):
             self.input_edit.setFont(font)
+            try:
+                metrics = self.input_edit.fontMetrics()
+                line_height = metrics.lineSpacing()
+                self.input_edit.setFixedHeight(line_height * 2 + 6)
+            except Exception:
+                pass
+
+    def _default_chat_font_family(self) -> str:
+        from PySide6.QtGui import QFontDatabase
+        import platform
+
+        if platform.system() != "Windows":
+            return ""
+        families = {f.lower(): f for f in QFontDatabase().families()}
+        for candidate in ("Segoe UI Variable", "Segoe UI"):
+            picked = families.get(candidate.lower())
+            if picked:
+                return picked
+        return ""
 
     def _new_chat(self) -> None:
         folder_path = self._current_folder_path()

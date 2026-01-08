@@ -263,6 +263,17 @@ class PreferencesDialog(QDialog):
         row_fonts_md_size.addWidget(self.markdown_font_size_spin, 1)
         font_layout.addLayout(row_fonts_md_size)
 
+        row_fonts_ai = QHBoxLayout()
+        row_fonts_ai.addWidget(QLabel("AI chat font:"))
+        self.ai_chat_font_combo = self._build_font_combo("VS Code default")
+        try:
+            ai_font = config.load_ai_chat_font_family()
+        except Exception:
+            ai_font = None
+        self._select_font(self.ai_chat_font_combo, ai_font)
+        row_fonts_ai.addWidget(self.ai_chat_font_combo, 1)
+        font_layout.addLayout(row_fonts_ai)
+
         self.minimal_font_scan_checkbox = QCheckBox("Use Minimal Font Scan (For Fast Window Startup)")
         try:
             self.minimal_font_scan_checkbox.setChecked(config.load_minimal_font_scan_enabled())
@@ -605,6 +616,8 @@ class PreferencesDialog(QDialog):
         md_font = self._font_value(self.markdown_font_combo)
         config.save_default_markdown_font(md_font)
         config.save_default_markdown_font_size(self.markdown_font_size_spin.value())
+        ai_font = self._font_value(self.ai_chat_font_combo)
+        config.save_ai_chat_font_family(ai_font)
         config.save_minimal_font_scan_enabled(self.minimal_font_scan_checkbox.isChecked())
         config.save_focus_mode_settings(
             {
