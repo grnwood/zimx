@@ -58,7 +58,7 @@ cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
 Type=Application
 Name=$APP_NAME
-Comment=Zim Desktop Wiki Rewrite
+Comment=ZimX Desktop
 Exec=$INSTALL_DIR/$EXEC_NAME
 Icon=$ICON_TARGET
 Terminal=false
