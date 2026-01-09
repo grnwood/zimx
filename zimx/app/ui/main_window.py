@@ -6061,6 +6061,9 @@ class MainWindow(QMainWindow):
         if self._is_attachment_link(link):
             if self._open_attachment_link(link):
                 return
+        if self._is_local_file_link(link):
+            if self._open_local_file_link(link):
+                return
         # Absolute vault-relative path (starts with /): open directly without CamelCase heuristics
         if link.startswith("/"):
             target = self._normalize_editor_path(link)
@@ -6071,6 +6074,51 @@ class MainWindow(QMainWindow):
             return
         # Otherwise treat as page link
         self._open_camel_link(link, focus_target="editor", refresh_only=refresh_only, force=force)
+
+    def _is_local_file_link(self, link: str) -> bool:
+        cleaned = (link or "").strip()
+        if not cleaned:
+            return False
+        if cleaned.startswith(("http://", "https://")):
+            return False
+        if cleaned.startswith(("./", "../", "~/" )):
+            return True
+        if re.match(r"^[A-Za-z]:[\\/]", cleaned):
+            return True
+        if cleaned.startswith(("\\\\", "//")):
+            return True
+        return False
+
+    def _open_local_file_link(self, link: str) -> bool:
+        cleaned = (link or "").strip()
+        if not cleaned:
+            return False
+        target_path: Optional[Path] = None
+        if cleaned.startswith("~/"):
+            target_path = Path(cleaned).expanduser()
+        elif cleaned.startswith(("./", "../")):
+            if self.vault_root and self.current_path:
+                base_dir = Path(self.vault_root) / Path(self.current_path.lstrip("/")).parent
+                target_path = (base_dir / cleaned).resolve()
+            else:
+                target_path = Path(cleaned).expanduser().resolve()
+        elif re.match(r"^[A-Za-z]:[\\/]", cleaned) or cleaned.startswith(("\\\\", "//")):
+            target_path = Path(cleaned).expanduser()
+        if target_path is None:
+            return False
+        try:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            ok = QDesktopServices.openUrl(QUrl.fromLocalFile(str(target_path)))
+            if not ok:
+                self.statusBar().showMessage(f"Failed to open file link: {cleaned}", 4000)
+            return ok
+        except Exception:
+            try:
+                self.statusBar().showMessage(f"Failed to open file link: {cleaned}", 4000)
+            except Exception:
+                pass
+            return False
     
     def _open_journal_date(self, year: int, month: int, day: int) -> None:
         """Open or create journal entry for the selected date."""
@@ -6408,6 +6456,12 @@ class MainWindow(QMainWindow):
         if not candidate.exists() or not candidate.is_file():
             return False
         try:
+            if candidate.suffix.lower() == ".puml":
+                self._open_plantuml_editor(candidate)
+                return True
+        except Exception:
+            pass
+        try:
             from PySide6.QtGui import QDesktopServices
             from PySide6.QtCore import QUrl
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(candidate)))
@@ -6426,6 +6480,18 @@ class MainWindow(QMainWindow):
         else:
             base_dir = Path(self.current_path).parent if self.current_path else Path("/")
             virtual_path = f"/{(base_dir / rel_name).as_posix()}"
+        try:
+            if Path(virtual_path).suffix.lower() == ".puml":
+                self._open_plantuml_editor(
+                    {
+                        "kind": "remote",
+                        "path": virtual_path,
+                        "page_path": self.current_path,
+                    }
+                )
+                return True
+        except Exception:
+            pass
         cache_root = self._ensure_remote_cache_root()
         cache_path = (cache_root / "attachments" / virtual_path.lstrip("/")).resolve()
         if not cache_path.exists():
