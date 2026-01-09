@@ -28,6 +28,10 @@ jobs:
         run: |
           pyinstaller -y packaging/zimx.spec
 
+      - name: Smoke test bundle
+        run: |
+          test -x dist/ZimX/ZimX
+
       - name: Build AppImage
         run: |
           APPDIR="ZimX.AppDir"
@@ -61,9 +65,11 @@ jobs:
             > "$APPDIR/AppRun"
           chmod +x "$APPDIR/AppRun"
 
-          curl -L -o appimagetool https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
-          chmod +x appimagetool
-          ./appimagetool "$APPDIR" "ZimX-x86_64.AppImage"
+          curl -L -o appimagetool.AppImage https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool.AppImage
+          ./appimagetool.AppImage --appimage-extract
+          ./squashfs-root/AppRun "$APPDIR" "ZimX-x86_64.AppImage"
+          rm -rf squashfs-root appimagetool.AppImage
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
