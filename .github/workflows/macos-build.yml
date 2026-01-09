@@ -21,7 +21,11 @@ jobs:
 
       - name: Build app bundle
         run: |
-          bash packaging/macos/install-mac.sh
+          set -euo pipefail
+          if ! bash packaging/macos/install-mac.sh; then
+            echo "install-mac.sh failed"
+            exit 1
+          fi
 
       - name: Smoke test bundle
         run: |
