@@ -1,0 +1,41 @@
+name: Build macOS App
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-13
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build app bundle
+        run: |
+          bash packaging/macos/install-mac.sh
+
+      - name: Smoke test bundle
+        run: |
+          test -d ZimX.app
+          test -f ZimX.app/Contents/Info.plist
+          test -x ZimX.app/Contents/MacOS/ZimX
+
+      - name: Run tests
+        run: |
+          source .venv/bin/activate
+          pytest tests
+
+      - name: Upload app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZimX-macOS-app
+          path: ZimX.app
