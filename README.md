@@ -99,6 +99,36 @@ pyinstaller -y packaging/zimx.spec
 
 Artifacts land in `dist/ZimX/`.
 
+## Install into OS
+If you want to install fully into the OS there are some helper scripts in packaging/
+
+### Windows
+Open powershell
+
+```bash
+> .\venv\Scripts\Activate.ps1
+> pyinstaller.exe -y .\packaging\zimx.spec
+> cd .\packaging\win32\
+> .\install.ps1
+```
+
+Zimx should be installed in menus, etc.
+
+### Linux
+```bash
+~/code/zimx$ cd packaging/linux-desktop/
+~/code/zimx/packaging/linux-desktop$ sudo ./install-app.sh 
+📦 Installing ZimX...
+➡️  Creating install dir: /opt/zimx
+➡️  Copying files...
+➡️  Creating symlink: /usr/local/bin/zimx
+➡️  Installing icon to /usr/share/icons/zimx.png
+➡️  Creating desktop entry at /usr/share/applications/zimx.desktop
+
+🎉 ZimX installed successfully!
+You can now launch it from: Menu → Accessories → ZimX
+Or run from terminal: zimx
+```
 ## Repo Layout
 
 - `zimx/app/` - Desktop app (PySide6)
