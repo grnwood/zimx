@@ -19,6 +19,7 @@ except ImportError:
 # --- end fix ---
 
 import copy
+import re
 from datetime import date as Date
 from datetime import datetime, timedelta
 import os
@@ -27,16 +28,20 @@ import traceback
 from pathlib import Path
 import secrets
 from typing import List, Literal, Optional
+from urllib.parse import quote, unquote, urlparse
 
 import httpx
 from fastapi import Depends, FastAPI, File as FastAPISingleFile, Form, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from pydantic import BaseModel, ConfigDict, Field
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+from markupsafe import Markup
+import markdown as md
 
 from zimx.server import indexer
 from zimx.server import file_ops
@@ -158,6 +163,12 @@ AUTH_ENABLED = os.getenv("AUTH_ENABLED", "true").lower() in ("true", "1", "yes")
 password_hasher = PasswordHasher()
 security = HTTPBearer(auto_error=False)
 
+_PRINT_TEMPLATES = Environment(
+    loader=FileSystemLoader(Path(__file__).parent / "templates"),
+    autoescape=select_autoescape(["html", "xml"]),
+)
+_IMAGE_SRC_RE = re.compile(r'(<img[^>]+src=["\'])([^"\']+)(["\'])', re.IGNORECASE)
+
 
 class AuthModels:
     class SetupRequest(BaseModel):
@@ -176,6 +187,9 @@ class AuthModels:
     class UserInfo(BaseModel):
         username: str
         is_admin: bool = True
+
+    class PrintTokenRequest(BaseModel):
+        ttl_seconds: int = Field(default=900, ge=60, le=3600)
 
 
 def _create_token(data: dict, expires_delta: timedelta) -> str:
@@ -673,6 +687,22 @@ def auth_status() -> dict:
     }
 
 
+@app.post("/auth/print-token")
+def auth_print_token(
+    payload: AuthModels.PrintTokenRequest,
+    user: AuthModels.UserInfo = Depends(get_current_user),
+) -> dict:
+    """Issue a short-lived token for browser print access."""
+    if not AUTH_ENABLED:
+        return {"token": None, "expires_in": 0}
+    ttl = int(payload.ttl_seconds or 900)
+    token = _create_token(
+        {"sub": user.username, "scope": "print"},
+        timedelta(seconds=ttl),
+    )
+    return {"token": token, "expires_in": ttl}
+
+
 @app.get("/api/vaults")
 def list_vaults() -> dict:
     root = _ensure_vaults_root()
@@ -793,6 +823,83 @@ def file_read(payload: FilePathPayload) -> dict:
 def file_raw(path: str) -> FileResponse:
     root = _get_vault_root()
     normalized = _vault_relative_path(path)
+    target = (root / normalized.lstrip("/")).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid file path") from exc
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(target)
+
+
+@app.get("/print/{path:path}")
+async def print_page(
+    request: Request,
+    path: str,
+    mode: Literal["page", "tree"] = "page",
+    auto: int = 1,
+    depth: Optional[int] = Query(default=None, ge=0, le=20),
+    title: Optional[str] = None,
+    header: int = 0,
+    token: Optional[str] = None,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> HTMLResponse:
+    await _require_print_user(request, token, credentials)
+    root = _get_vault_root()
+    if mode == "page":
+        page_file = _resolve_page_file_for_print(root, path)
+        html_body = _render_single_page_html(root, page_file, token)
+        doc_title = title or page_file.stem
+    else:
+        tree_root = _resolve_tree_root(root, path)
+        html_body, doc_title = _render_tree_html(root, tree_root, depth, token, title_override=title)
+    html = _render_print_document(
+        title=doc_title,
+        body_html=html_body,
+        auto_print=bool(auto),
+        show_header=bool(header),
+        path_label=path,
+        token=token,
+    )
+    return HTMLResponse(content=html, status_code=200)
+
+
+@app.get("/print.css")
+async def print_css(
+    request: Request,
+    token: Optional[str] = None,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> Response:
+    await _require_print_user(request, token, credentials)
+    root = _get_vault_root()
+    css = _load_print_css(root)
+    return Response(content=css, media_type="text/css")
+
+
+@app.get("/asset/{path:path}")
+async def asset_file(
+    request: Request,
+    path: str,
+    token: Optional[str] = None,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> FileResponse:
+    await _require_print_user(request, token, credentials)
+    root = _get_vault_root()
+    raw = (path or "").strip()
+    root_resolved = root.resolve()
+    normalized = raw
+    if raw.startswith("/"):
+        candidate = Path(raw)
+        if candidate == root_resolved or root_resolved in candidate.parents:
+            normalized = candidate.relative_to(root_resolved).as_posix()
+        else:
+            raise HTTPException(status_code=400, detail="Invalid file path")
+    else:
+        root_str = root_resolved.as_posix().lstrip("/")
+        if root_str and raw.startswith(root_str + "/"):
+            normalized = raw[len(root_str) + 1 :]
+    normalized = _vault_relative_path(normalized)
     target = (root / normalized.lstrip("/")).resolve()
     try:
         target.relative_to(root)
@@ -1498,6 +1605,284 @@ def _handle_vector_exception(context: str, exc: Exception) -> None:
     _log_vector(f"{context} failed: {exc}")
     traceback.print_exc()
     raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _print_override_dirs(root: Path) -> list[Path]:
+    return [
+        root / ".zimx" / "templates",
+        Path.home() / ".zimx" / "templates",
+    ]
+
+
+def _find_print_override(root: Path, filename: str) -> Optional[Path]:
+    for base in _print_override_dirs(root):
+        candidate = base / filename
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def _load_print_template(root: Path):
+    override = _find_print_override(root, "print.html")
+    if not override:
+        return _PRINT_TEMPLATES.get_template("print.html")
+    env = Environment(
+        loader=FileSystemLoader(override.parent),
+        autoescape=select_autoescape(["html", "xml"]),
+    )
+    return env.get_template(override.name)
+
+
+def _load_print_css(root: Path) -> str:
+    override = _find_print_override(root, "print.css")
+    if override:
+        return override.read_text(encoding="utf-8")
+    css_path = Path(__file__).parent / "templates" / "print.css"
+    return css_path.read_text(encoding="utf-8")
+
+
+def _print_css_url(token: Optional[str]) -> str:
+    if token:
+        return f"/print.css?token={quote(token)}"
+    return "/print.css"
+
+
+def _verify_print_token(token: str) -> AuthModels.UserInfo:
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except JWTError as exc:
+        raise HTTPException(status_code=401, detail="Invalid print token") from exc
+    if payload.get("scope") != "print":
+        raise HTTPException(status_code=401, detail="Invalid print token scope")
+    username = payload.get("sub") or "print"
+    return AuthModels.UserInfo(username=username, is_admin=True)
+
+
+async def _require_print_user(
+    request: Request,
+    token: Optional[str],
+    credentials: Optional[HTTPAuthorizationCredentials],
+) -> Optional[AuthModels.UserInfo]:
+    if not AUTH_ENABLED:
+        return AuthModels.UserInfo(username="admin", is_admin=True)
+    if token:
+        return _verify_print_token(token)
+    return await get_current_user(request, credentials)
+
+
+def _resolve_page_file_for_print(root: Path, path: str) -> Path:
+    normalized = _vault_relative_path(path)
+    target = (root / normalized.lstrip("/")).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid page path") from exc
+    target = files._resolve_page_for_read(target)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Page not found")
+    return target
+
+
+def _resolve_tree_root(root: Path, path: str) -> Path:
+    normalized = _vault_relative_path(path)
+    target = (root / normalized.lstrip("/")).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid page path") from exc
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Folder not found")
+    if target.is_file():
+        target = target.parent
+    if not target.is_dir():
+        raise HTTPException(status_code=404, detail="Folder not found")
+    return target
+
+
+def _render_markdown_html(text: str) -> str:
+    renderer = md.Markdown(extensions=["fenced_code", "tables", "nl2br"])
+    return renderer.convert(text)
+
+
+def _asset_url(path: str, token: Optional[str]) -> str:
+    rel = path.strip().lstrip("/")
+    safe = quote(rel, safe="/")
+    base = f"/asset/{safe}"
+    if token:
+        joiner = "&" if "?" in base else "?"
+        return f"{base}{joiner}token={quote(token)}"
+    return base
+
+
+def _rewrite_image_src(html: str, root: Path, page_path: Path, token: Optional[str]) -> str:
+    page_dir = page_path.parent
+    root_resolved = root.resolve()
+
+    def _normalize_src_path(src_value: str) -> tuple[Optional[str], bool, bool]:
+        raw = src_value.strip()
+        if not raw:
+            return None, False, False
+        if raw.startswith("file://"):
+            parsed = urlparse(raw)
+            raw = unquote(parsed.path or "")
+        if raw.startswith(("http://", "https://", "data:")):
+            return raw, True, False
+        if raw.startswith("/asset/"):
+            asset_path = raw.split("?", 1)[0]
+            asset_rel = asset_path[len("/asset/") :]
+            try:
+                asset_candidate = Path("/" + asset_rel.lstrip("/"))
+            except Exception:
+                return raw, False, False
+            root_parts = root_resolved.parts
+            asset_parts = asset_candidate.parts
+            if asset_parts[: len(root_parts)] == root_parts:
+                rel = Path(*asset_parts[len(root_parts) :]).as_posix()
+                return rel, False, True
+            return raw, False, False
+        try:
+            src_path = Path(raw)
+        except Exception:
+            return raw, False, False
+        if src_path.is_absolute():
+            try:
+                resolved = src_path.resolve()
+            except Exception:
+                return raw, False, False
+            if resolved == root_resolved or root_resolved in resolved.parents:
+                rel = resolved.relative_to(root_resolved).as_posix()
+                return rel, False, True
+            return raw, False, False
+        return raw, False, False
+
+    def _replacer(match: re.Match) -> str:
+        prefix, src, suffix = match.groups()
+        normalized, is_external, is_root_relative = _normalize_src_path(src)
+        if normalized is None:
+            return match.group(0)
+        if is_external:
+            return match.group(0)
+        if normalized.startswith("/asset/"):
+            if token and "token=" not in normalized:
+                joiner = "&" if "?" in normalized else "?"
+                normalized = f"{normalized}{joiner}token={quote(token)}"
+            return f"{prefix}{normalized}{suffix}"
+        if is_root_relative:
+            rel = normalized.lstrip("/")
+        elif normalized.startswith("/"):
+            rel = normalized.lstrip("/")
+        else:
+            rel = (page_dir / normalized).as_posix()
+        return f"{prefix}{_asset_url(rel, token)}{suffix}"
+
+    return _IMAGE_SRC_RE.sub(_replacer, html)
+
+
+def _render_print_document(
+    *,
+    title: str,
+    body_html: str,
+    auto_print: bool,
+    show_header: bool,
+    path_label: Optional[str],
+    token: Optional[str],
+) -> str:
+    root = _get_vault_root()
+    template = _load_print_template(root)
+    return template.render(
+        title=title,
+        body_html=Markup(body_html),
+        auto_print=auto_print,
+        show_header=show_header,
+        path_label=path_label,
+        generated_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+        print_css_url=_print_css_url(token),
+    )
+
+
+def _render_single_page_html(
+    root: Path,
+    page_file: Path,
+    token: Optional[str],
+) -> str:
+    content = page_file.read_text(encoding="utf-8")
+    html = _render_markdown_html(content)
+    html = _rewrite_image_src(html, root, page_file, token)
+    return f"<section class=\"zimx-section\">{html}</section>"
+
+
+def _iter_tree_pages(root: Path, directory: Path, depth: int, max_depth: Optional[int]) -> list[tuple[Path, int, bool]]:
+    pages: list[tuple[Path, int, bool]] = []
+    index_page = files._resolve_page_for_read(directory)
+    if index_page.exists():
+        pages.append((index_page, depth, True))
+
+    def _sort_key(path: Path) -> str:
+        return path.stem.lower()
+
+    child_pages = []
+    for item in directory.iterdir():
+        if not item.is_file():
+            continue
+        if not files.is_page_suffix(item.suffix):
+            continue
+        if index_page.exists() and item.resolve() == index_page.resolve():
+            continue
+        child_pages.append(item)
+    for child in sorted(child_pages, key=_sort_key):
+        pages.append((child, depth, False))
+
+    if max_depth is not None and depth >= max_depth:
+        return pages
+
+    subfolders = []
+    for item in directory.iterdir():
+        if item.is_dir() and not item.name.startswith("."):
+            subfolders.append(item)
+    for sub in sorted(subfolders, key=lambda p: p.name.lower()):
+        pages.extend(_iter_tree_pages(root, sub, depth + 1, max_depth))
+    return pages
+
+
+def _render_tree_html(
+    root: Path,
+    tree_root: Path,
+    max_depth: Optional[int],
+    token: Optional[str],
+    *,
+    title_override: Optional[str] = None,
+) -> tuple[str, str]:
+    pages = _iter_tree_pages(root, tree_root, depth=0, max_depth=max_depth)
+    root_index_exists = False
+    if pages:
+        root_index_exists = pages[0][2] and pages[0][0].parent == tree_root
+
+    base_level = 2 if root_index_exists else 1
+    sections: list[str] = []
+    for idx, (page_file, depth, is_index) in enumerate(pages):
+        try:
+            content = page_file.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        html = _render_markdown_html(content)
+        html = _rewrite_image_src(html, root, page_file, token)
+        if root_index_exists and is_index and depth == 0:
+            heading_level = 1
+        else:
+            heading_level = min(6, base_level + depth)
+        title = page_file.stem
+        section_html = (
+            f"<section class=\"zimx-section\" data-path=\"{page_file.relative_to(root).as_posix()}\">"
+            f"<h{heading_level}>{title}</h{heading_level}>"
+            f"{html}"
+            "</section>"
+        )
+        sections.append(section_html)
+        if idx < len(pages) - 1:
+            sections.append("<div class=\"zimx-page-break\"></div>")
+
+    doc_title = title_override or tree_root.name or "ZimX Print"
+    return "".join(sections), doc_title
 
 
 def _vault_relative_path(path: str) -> str:

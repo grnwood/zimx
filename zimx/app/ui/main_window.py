@@ -90,6 +90,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QCheckBox,
     QFormLayout,
+    QSpinBox,
 )
 
 from zimx.app import config, indexer
@@ -937,6 +938,7 @@ class MainWindow(QMainWindow):
         self.editor.openFileLocationRequested.connect(self._open_tree_file_location)
         self.editor.locateInNavigatorRequested.connect(self._locate_current_page_in_tree)
         self.editor.deletePageRequested.connect(self._delete_current_page_from_editor)
+        self.editor.printPageRequested.connect(self._print_page_for_path)
         self.editor.attachmentDropped.connect(self._on_attachment_dropped)
         self.editor.backlinksRequested.connect(
             lambda path="": self._show_link_navigator_for_path(path or self.current_path)
@@ -6761,6 +6763,11 @@ class MainWindow(QMainWindow):
                 copy_link_action.triggered.connect(
                     lambda checked=False, p=path, op=open_path: self._copy_tree_location_link(p, op)
                 )
+
+                print_page_action = menu.addAction("Print Page…")
+                print_page_action.triggered.connect(
+                    lambda checked=False, fp=file_path: self._print_page_for_path(fp)
+                )
                 
                 backlinks_action = menu.addAction("Backlinks…")
                 backlinks_action.triggered.connect(
@@ -8792,192 +8799,133 @@ class MainWindow(QMainWindow):
 
     def _print_current_page(self) -> None:
         """Print or export current page to PDF."""
-        if not self.current_file or not self.vault_root:
+        if not self.current_path or not self.vault_root:
             self._alert("No page is currently open.")
             return
-        
-        # Determine if we're running locally or remotely
-        is_local = self._is_local_api()
-        
-        if is_local:
-            # Local: render HTML directly from file
-            self._print_page_local()
-        else:
-            # Remote: use webserver or API
-            self._print_page_remote()
-    
-    def _is_local_api(self) -> bool:
-        """Check if the API is running locally."""
-        import urllib.parse
-        parsed = urllib.parse.urlparse(self.api_base)
-        return parsed.hostname in ("localhost", "127.0.0.1", "::1", None)
-    
-    def _print_page_local(self) -> None:
-        """Print page by rendering HTML locally."""
-        import tempfile
-        import webbrowser
-        from urllib.parse import quote
-        
+        self._print_page_for_path(self.current_path)
+
+    def _print_page_for_path(self, path: str) -> None:
+        if not path or not self.vault_root:
+            self._alert("No page is currently open.")
+            return
+        normalized = self._normalize_editor_path(path)
+        options = self._show_print_dialog()
+        if not options:
+            return
+
         try:
-            # Read the current file
-            file_path = Path(self.vault_root) / self.current_file
-            if not file_path.exists():
-                self._alert(f"File not found: {self.current_file}")
-                return
-            
-            content = file_path.read_text(encoding="utf-8")
-            
-            # Render using our webserver template approach
-            html = self._render_page_html(self.current_file, content)
-            
-            # Write to temp file and open in browser
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as f:
-                f.write(html)
-                temp_path = f.name
-            
-            # Open in browser with file:// URL
-            webbrowser.open(f"file://{temp_path}")
-            
-            self.statusBar().showMessage("Print page opened in browser", 3000)
-            
-        except Exception as e:
-            self._alert(f"Failed to render page for printing: {e}")
-            print(f"[UI] Print page error: {e}")
-    
-    def _print_page_remote(self) -> None:
-        """Print page via webserver (for remote UI connections)."""
-        # When UI is remote, we need a webserver running to serve print-ready HTML
-        # Check if there's a webserver we can use
-        
-        # For now, alert the user to use the webserver
-        # In the future, we could auto-start a temporary webserver or use the API
-        self._alert(
-            "Remote printing requires a running web server.\n\n"
-            "Please start the web server via Tools → Start Web Server,\n"
-            "then navigate to your page in the browser and use:\n"
-            f"/wiki/{self.current_file.replace('.txt', '').replace('.md', '')}?mode=print&autoPrint=1"
-        )
-    
-    def _render_page_html(self, page_path: str, content: str) -> str:
-        """Render a markdown page to HTML using the webserver template style."""
-        from jinja2 import Template
-        import markdown
-        
-        # Get page title
-        title = Path(page_path).stem
-        
-        # Render markdown
-        md = markdown.Markdown(extensions=['fenced_code', 'tables', 'nl2br'])
-        html_content = md.convert(content)
-        
-        # Simple HTML template similar to webserver
-        template_html = """<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ title }} - ZimX</title>
-    <style>
-        @page {
-            margin: 2cm;
-            size: A4;
+            token = self._get_print_token() if options["use_token"] else None
+            mode = "tree" if options["include_subpages"] else "page"
+            path_to_use = normalized.lstrip("/")
+            if mode == "tree":
+                parent = Path(normalized).parent.as_posix()
+                path_to_use = parent if parent and parent != "." else Path(normalized).with_suffix("").as_posix()
+            url = self._build_print_url(
+                path_to_use,
+                mode=mode,
+                depth=options["depth"],
+                token=token,
+                show_header=options["include_header"],
+            )
+            QDesktopServices.openUrl(QUrl(url))
+            self.statusBar().showMessage("Print view opened in browser", 3000)
+        except Exception as exc:
+            self._alert(f"Failed to open print view: {exc}")
+            print(f"[UI] Print page error: {exc}")
+
+    def _show_print_dialog(self) -> Optional[dict]:
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QCheckBox, QSpinBox, QDialogButtonBox
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Print to Browser")
+        dialog.resize(360, 180)
+        dialog.setWindowModality(Qt.ApplicationModal)
+
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("Print options:"))
+
+        include_subpages = QCheckBox("Include subpages")
+        include_subpages.setChecked(False)
+        layout.addWidget(include_subpages)
+
+        include_header = QCheckBox("Include header (title/path)")
+        include_header.setChecked(False)
+        layout.addWidget(include_header)
+
+        depth_row = QHBoxLayout()
+        depth_label = QLabel("Max depth:")
+        depth_input = QSpinBox()
+        depth_input.setRange(1, 20)
+        depth_input.setValue(1)
+        depth_input.setEnabled(False)
+        depth_row.addWidget(depth_label)
+        depth_row.addWidget(depth_input)
+        depth_row.addStretch(1)
+        layout.addLayout(depth_row)
+
+        include_subpages.toggled.connect(depth_input.setEnabled)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        dialog.setLayout(layout)
+        ok_button = buttons.button(QDialogButtonBox.Ok)
+        if ok_button is not None:
+            ok_button.setDefault(True)
+            ok_button.setAutoDefault(True)
+            ok_button.setFocus()
+        dialog.raise_()
+        dialog.activateWindow()
+        if dialog.exec() != QDialog.Accepted:
+            return None
+
+        return {
+            "include_subpages": include_subpages.isChecked(),
+            "depth": depth_input.value(),
+            "use_token": True,
+            "include_header": include_header.isChecked(),
         }
-        
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            line-height: 1.7;
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 2rem;
-            color: #333;
-        }
-        
-        h1 { font-size: 2em; margin-bottom: 0.5em; }
-        h2 { font-size: 1.5em; margin-top: 1em; }
-        h3 { font-size: 1.25em; margin-top: 1em; }
-        
-        pre {
-            background: #f5f5f5;
-            padding: 1em;
-            overflow-x: auto;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-        }
-        
-        code {
-            background: #f5f5f5;
-            padding: 0.2em 0.4em;
-            border-radius: 3px;
-            font-family: monospace;
-            font-size: 0.9em;
-        }
-        
-        pre code {
-            background: none;
-            padding: 0;
-        }
-        
-        table {
-            border-collapse: collapse;
-            width: 100%;
-            margin: 1em 0;
-        }
-        
-        th, td {
-            border: 1px solid #ddd;
-            padding: 0.5em;
-            text-align: left;
-        }
-        
-        th {
-            background: #f5f5f5;
-            font-weight: bold;
-        }
-        
-        img {
-            max-width: 100%;
-            height: auto;
-        }
-        
-        blockquote {
-            border-left: 4px solid #ddd;
-            margin-left: 0;
-            padding-left: 1em;
-            color: #666;
-        }
-        
-        @media print {
-            body {
-                padding: 0;
-            }
-            
-            h1, h2, h3, h4, h5, h6 {
-                page-break-after: avoid;
-            }
-            
-            pre, table {
-                page-break-inside: avoid;
-            }
-        }
-    </style>
-    <script>
-        window.addEventListener('load', function() {
-            setTimeout(function() {
-                window.print();
-            }, 500);
-        });
-    </script>
-</head>
-<body>
-    <h1>{{ title }}</h1>
-    <div class="content">
-        {{ content | safe }}
-    </div>
-</body>
-</html>"""
-        
-        template = Template(template_html)
-        return template.render(title=title, content=html_content)
+
+    def _get_print_token(self) -> Optional[str]:
+        try:
+            status = self.http.get("/auth/status")
+            if status.is_success and not status.json().get("enabled"):
+                return None
+        except Exception:
+            return None
+
+        resp = self.http.post("/auth/print-token", json={"ttl_seconds": 900})
+        if not resp.is_success:
+            detail = "Failed to request print token."
+            try:
+                detail = resp.json().get("detail") or detail
+            except Exception:
+                pass
+            raise RuntimeError(detail)
+        return resp.json().get("token") or None
+
+    def _build_print_url(
+        self,
+        path: str,
+        *,
+        mode: str,
+        depth: int,
+        token: Optional[str],
+        show_header: bool,
+    ) -> str:
+        from urllib.parse import quote
+
+        safe_path = quote(path.lstrip("/"), safe="/")
+        url = f"{self.api_base}/print/{safe_path}?mode={mode}&auto=1"
+        if mode == "tree":
+            url += f"&depth={depth}"
+        if show_header:
+            url += "&header=1"
+        if token:
+            url += f"&token={quote(token)}"
+        return url
 
     def _reindex_vault(self, show_progress: bool = False) -> None:
         """Reindex all pages in the vault."""
