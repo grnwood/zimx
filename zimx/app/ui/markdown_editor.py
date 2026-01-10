@@ -1232,6 +1232,7 @@ class MarkdownEditor(QTextEdit):
     aiChatPageFocusRequested = Signal(str)  # Request the chat tab focused on this page
     aiActionRequested = Signal(str, str, str)  # title, prompt, text
     deletePageRequested = Signal(QPoint)  # Request deleting the current page (with global position)
+    printPageRequested = Signal(str)  # Request printing the current page
     findBarRequested = Signal(bool, bool, str)  # replace_mode, backwards_first, seed_query
     viInsertModeChanged = Signal(bool)  # Emits True when editor is in insert mode
     headingPickerRequested = Signal(object, bool)  # QPoint(global), prefer_above
@@ -3292,6 +3293,10 @@ class MarkdownEditor(QTextEdit):
                 copy_page_action.triggered.connect(
                     lambda: self._copy_link_to_location(link_text=None, anchor_text=None)
                 )
+                print_page_action = page_sub.addAction("Print Page…")
+                print_page_action.triggered.connect(
+                    lambda: self.printPageRequested.emit(self._current_path or "")
+                )
                 edit_src_action = page_sub.addAction("Edit Page Source")
                 edit_src_action.triggered.connect(
                     lambda: self.editPageSourceRequested.emit(self._current_path or "")
@@ -3355,6 +3360,10 @@ class MarkdownEditor(QTextEdit):
             copy_page_action = page_sub.addAction("Copy link to this Page")
             copy_page_action.triggered.connect(
                 lambda: self._copy_link_to_location(link_text=None, anchor_text=None)
+            )
+            print_page_action = page_sub.addAction("Print Page…")
+            print_page_action.triggered.connect(
+                lambda: self.printPageRequested.emit(self._current_path or "")
             )
             edit_src_action = page_sub.addAction("Edit Page Source")
             edit_src_action.triggered.connect(
